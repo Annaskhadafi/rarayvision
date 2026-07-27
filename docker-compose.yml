@@ -8,7 +8,7 @@ services:
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-rarayvision}
       POSTGRES_USER: ${POSTGRES_USER:-raray}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-yourpassword}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ca66b066787710c9ecb21bf4777ce2d6}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -29,7 +29,8 @@ services:
     env_file:
       - .env
     environment:
-      - DATABASE_URL=${DATABASE_URL:-postgresql+psycopg2://raray:yourpassword@db:5432/rarayvision}
+      - DATABASE_URL=${DATABASE_URL:-postgresql+psycopg2://${POSTGRES_USER:-raray}:${POSTGRES_PASSWORD:-ca66b066787710c9ecb21bf4777ce2d6}@db:5432/${POSTGRES_DB:-rarayvision}}
+      - SECRET_KEY=${SECRET_KEY:-af8ab971bf9210d90d5b615f4e5359594707750d582e8d824a973e329726ee42}
     volumes:
       - ./backend/uploads:/app/backend/uploads
       - ./backend/models:/app/backend/models
@@ -42,6 +43,8 @@ services:
     restart: unless-stopped
     depends_on:
       - backend
+    expose:
+      - "80"
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.rarayvision-frontend.rule=Host(`vision.chitraparatama.com`)"
