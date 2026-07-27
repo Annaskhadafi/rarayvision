@@ -1,33 +1,43 @@
-version: "3.9"
+version: "3.8"
 
 services:
   db:
-    image: mariadb:10.11
+    image: postgres:16-alpine
     container_name: rarayvision-db
     restart: unless-stopped
     environment:
-      MYSQL_ROOT_PASSWORD: rootpassword
-      MYSQL_DATABASE: rarayvision
-      MYSQL_USER: raray
-      MYSQL_PASSWORD: yourpassword
+      POSTGRES_DB: ${POSTGRES_DB:-rarayvision}
+      POSTGRES_USER: ${POSTGRES_USER:-raray}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-yourpassword}
     volumes:
-      - db_data:/var/lib/mysql
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-raray} -d ${POSTGRES_DB:-rarayvision}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
 
   backend:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile
     container_name: rarayvision-backend
     restart: unless-stopped
     depends_on:
-      - db
+      db:
+        condition: service_healthy
     env_file:
       - .env
+    environment:
+      - DATABASE_URL=${DATABASE_URL:-postgresql+psycopg2://raray:yourpassword@db:5432/rarayvision}
     volumes:
       - ./backend/uploads:/app/backend/uploads
       - ./backend/models:/app/backend/models
-    # Ports are omitted because frontend nginx proxies requests
 
   frontend:
-    build: ./frontend
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
     container_name: rarayvision-frontend
     restart: unless-stopped
     depends_on:
@@ -36,4 +46,5 @@ services:
       - "80:80"
 
 volumes:
-  db_data:
+  postgres_data:
+
