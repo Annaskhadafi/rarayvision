@@ -42,6 +42,11 @@ services:
     restart: unless-stopped
     depends_on:
       - backend
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.rarayvision-frontend.rule=Host(`vision.chitraparatama.com`)"
+      - "traefik.http.routers.rarayvision-frontend.entrypoints=web,websecure"
+      - "traefik.http.services.rarayvision-frontend.loadbalancer.server.port=80"
     networks:
       - default
       - dokploy-network
