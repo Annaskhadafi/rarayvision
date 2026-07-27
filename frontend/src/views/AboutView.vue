@@ -262,7 +262,7 @@ const submitFeedback = async () => {
         Designed to accelerate AI development, Raray Vision brings enterprise-grade facial recognition to the community. Build, scale, and integrate advanced computer vision into your applications without commercial barriers or restrictive limits.
       </p>
       <div style="display: flex; gap: 1rem; justify-content: center; flex-wrap: wrap;">
-        <a href="https://apirv.dfs.co.id/redoc" target="_blank" style="display: inline-flex; align-items: center; background: #6366f1; color: white; padding: 1rem 2rem; border-radius: 99px; font-weight: 700; text-decoration: none; transition: background 0.2s;" onmouseover="this.style.background='#4f46e5'" onmouseout="this.style.background='#6366f1'">
+        <a href="/redoc" target="_blank" style="display: inline-flex; align-items: center; background: #6366f1; color: white; padding: 1rem 2rem; border-radius: 99px; font-weight: 700; text-decoration: none; transition: background 0.2s;" onmouseover="this.style.background='#4f46e5'" onmouseout="this.style.background='#6366f1'">
           Explore API Documentation
         </a>
         <a href="https://github.com" target="_blank" style="display: inline-flex; align-items: center; gap: 0.5rem; background: #ffffff; color: #0f172a; padding: 1rem 2rem; border-radius: 99px; font-weight: 700; text-decoration: none; transition: background 0.2s;" onmouseover="this.style.background='#f1f5f9'" onmouseout="this.style.background='#ffffff'">
