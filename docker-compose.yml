@@ -42,9 +42,15 @@ services:
     restart: unless-stopped
     depends_on:
       - backend
-    expose:
-      - "80"
+    networks:
+      - default
+      - dokploy-network
 
 volumes:
   postgres_data:
+
+networks:
+  dokploy-network:
+    external: true
+
 
