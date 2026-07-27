@@ -6,6 +6,6 @@ export default defineConfig({
   plugins: [vue()],
   server: {
     host: '0.0.0.0',
-    allowedHosts: ['rarayvision.dfs.co.id', 'localhost', '127.0.0.1']
+    allowedHosts: ['vision.chitraparatama.com', 'rarayvision.dfs.co.id', 'localhost', '127.0.0.1']
   }
 })

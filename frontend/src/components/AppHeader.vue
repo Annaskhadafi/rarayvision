@@ -41,9 +41,9 @@ const goTo = (path) => {
 <template>
   <header class="top-nav">
     <div class="header-brand">
-      <img :src="logoImage" alt="Raray Vision logo" class="brand-logo" />
+      <img :src="logoImage" alt="Chitra Vision logo" class="brand-logo" />
       <div>
-        <p class="eyebrow">Raray Vision</p>
+        <p class="eyebrow">Chitra Vision</p>
         <h1>Face Recognition API Console</h1>
       </div>
     </div>

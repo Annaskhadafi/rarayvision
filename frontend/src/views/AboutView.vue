@@ -50,9 +50,9 @@ const submitFeedback = async () => {
   <div class="about-page">
     <div style="text-align: center; margin-bottom: 4rem;">
       <p style="text-transform: uppercase; letter-spacing: 2px; color: #6366f1; font-weight: 700; margin-bottom: 0.5rem; font-size: 0.9rem;">Introduce</p>
-      <h1 class="hero-title">Raray Vision API</h1>
+      <h1 class="hero-title">Chitra Vision API</h1>
       <p class="hero-desc">
-        Raray Vision takes its name from the Sundanese word <strong>Raray</strong>, meaning face. The project is dedicated to advancing face recognition technology through open, scalable, and intelligent computer vision.
+        Chitra Vision is dedicated to advancing face recognition technology through open, scalable, and intelligent computer vision.
       </p>
     </div>
 
@@ -92,7 +92,7 @@ const submitFeedback = async () => {
       <div style="text-align: center; margin-bottom: 3rem;">
         <h2 class="section-title">Core Technology Stack</h2>
         <p style="font-size: 1.1rem; color: #475569; max-width: 700px; margin: 1rem auto 0; line-height: 1.6;">
-          Raray Vision is built on a modern, high-performance technology stack optimized for real-time face recognition, scalable API services, and production deployment.
+          Chitra Vision is built on a modern, high-performance technology stack optimized for real-time face recognition, scalable API services, and production deployment.
         </p>
       </div>
 
@@ -245,7 +245,7 @@ const submitFeedback = async () => {
         <p style="font-size: 1.15rem; color: #334155; font-style: italic; line-height: 1.6; margin: 0 0 1rem 0; position: relative;">
           "For me, engineering is more than writing code—it's about creating technology that people can trust, maintain, and truly own. Every project I build is driven by simplicity, reliability, and a commitment to open innovation."
         </p>
-        <p style="font-size: 1rem; font-weight: 700; color: #0f172a; margin: 0;">— Dedin, Founder & Lead Engineer Raray Vision</p>
+        <p style="font-size: 1rem; font-weight: 700; color: #0f172a; margin: 0;">— Dedin, Founder & Lead Engineer Chitra Vision</p>
         <div style="margin-top: 1.5rem;">
           <a href="https://wa.me/6282299331066?text=Hi%20Dedin%2C%20I'm%20interested%20in%20a%20business%20collaboration%20regarding%20Raray%20Vision." target="_blank" style="display: inline-flex; align-items: center; gap: 0.5rem; background: #25D366; color: white; padding: 0.75rem 1.5rem; border-radius: 99px; font-weight: 700; text-decoration: none; font-size: 0.95rem; transition: background 0.2s;" onmouseover="this.style.background='#128C7E'" onmouseout="this.style.background='#25D366'">
             <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M12.002 0h-.005A11.97 11.97 0 0 0 0 11.983c0 2.128.558 4.21 1.616 6.046L.347 24l6.113-1.603a11.97 11.97 0 0 0 5.541 1.344h.005A11.968 11.968 0 0 0 24 11.983 11.968 11.968 0 0 0 12.002 0zm0 21.684a9.92 9.92 0 0 1-5.065-1.39l-.363-.215-3.76 1.013.986-3.665-.236-.375A9.928 9.928 0 0 1 2.039 11.983a9.92 9.92 0 0 1 9.963-9.94h.004a9.922 9.922 0 0 1 9.96 9.94 9.922 9.922 0 0 1-9.964 9.94zm5.452-7.447c-.299-.15-1.77-.874-2.044-.975-.274-.1-.473-.15-.672.15s-.77 1.036-.944 1.25c-.175.214-.35.24-.65.09-1.637-.81-2.92-1.922-3.83-3.486-.176-.3-.021-.465.127-.614.135-.136.3-.35.45-.526.15-.175.2-.3.3-.5.1-.2.05-.375-.025-.525-.075-.15-.672-1.62-.921-2.215-.24-.58-.485-.502-.672-.511-.174-.01-.373-.01-.572-.01-.2 0-.522.075-.796.375-.274.3-1.046 1.025-1.046 2.5 0 1.475 1.07 2.9 1.22 3.1.15.2 2.116 3.23 5.122 4.526 2.05 1 2.5.825 3.025.775.525-.05 1.77-.725 2.02-1.425.25-.7.25-1.3.175-1.425-.075-.125-.274-.2-.573-.35z"/></svg>
@@ -259,7 +259,7 @@ const submitFeedback = async () => {
     <div class="footer-banner" style="background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%); border-radius: 24px; text-align: center; color: white;">
       <h2 class="banner-title">Open by Design, Built for Innovation</h2>
       <p style="font-size: 1.15rem; color: #cbd5e1; max-width: 650px; margin: 0 auto 2rem auto; line-height: 1.6;">
-        Designed to accelerate AI development, Raray Vision brings enterprise-grade facial recognition to the community. Build, scale, and integrate advanced computer vision into your applications without commercial barriers or restrictive limits.
+        Designed to accelerate AI development, Chitra Vision brings enterprise-grade facial recognition to the community. Build, scale, and integrate advanced computer vision into your applications without commercial barriers or restrictive limits.
       </p>
       <div style="display: flex; gap: 1rem; justify-content: center; flex-wrap: wrap;">
         <a href="/redoc" target="_blank" style="display: inline-flex; align-items: center; background: #6366f1; color: white; padding: 1rem 2rem; border-radius: 99px; font-weight: 700; text-decoration: none; transition: background 0.2s;" onmouseover="this.style.background='#4f46e5'" onmouseout="this.style.background='#6366f1'">

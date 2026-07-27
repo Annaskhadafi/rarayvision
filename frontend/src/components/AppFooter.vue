@@ -3,7 +3,7 @@
     <div class="footer-container">
       <div class="footer-grid">
         <div class="footer-col">
-          <h3>Raray Vision</h3>
+          <h3>Chitra Vision</h3>
           <p>An open-source, high-performance computer vision API for face recognition, liveness detection, and facial analysis.</p>
           <h3 style="margin-top: 24px;">Support Us</h3>
           <a href="https://trakteer.id/dedin_toyibah" target="_blank" style="display: inline-block; margin-top: 4px; transition: transform 0.2s; height: 40px;" onmouseover="this.style.transform='scale(1.05)'" onmouseout="this.style.transform='scale(1)'">
@@ -28,7 +28,7 @@
       </div>
       
       <div class="footer-bottom">
-        <p>&copy; {{ new Date().getFullYear() }} Raray Vision. All rights reserved.</p>
+        <p>&copy; {{ new Date().getFullYear() }} Chitra Vision. All rights reserved.</p>
       </div>
     </div>
 
@@ -43,8 +43,8 @@
         <div class="modal-body">
           <section>
             <h4>Our Stance on Privacy</h4>
-            <p><strong>By default, Raray Vision does not store original face images.</strong> Images are processed in memory to generate encrypted face embeddings and are immediately discarded unless explicitly configured otherwise.</p>
-            <p>Raray Vision is designed with privacy and security best practices. Organizations remain responsible for complying with applicable regulations such as UU PDP and GDPR.</p>
+            <p><strong>By default, Chitra Vision does not store original face images.</strong> Images are processed in memory to generate encrypted face embeddings and are immediately discarded unless explicitly configured otherwise.</p>
+            <p>Chitra Vision is designed with privacy and security best practices. Organizations remain responsible for complying with applicable regulations such as UU PDP and GDPR.</p>
           </section>
 
           <section>
@@ -64,7 +64,7 @@
           <section>
             <h4>Deployment Options</h4>
             <h5>Self-Hosted</h5>
-            <p>When deployed on your own infrastructure, you retain complete ownership of the system. Raray Vision has absolutely no access to customer data, logs, or encryption keys.</p>
+            <p>When deployed on your own infrastructure, you retain complete ownership of the system. Chitra Vision has absolutely no access to customer data, logs, or encryption keys.</p>
             <h5>Cloud API</h5>
             <p>Our managed cloud API strictly adheres to the principle of storing only encrypted embeddings. Original images are not stored by default and can only be optionally stored if the customer explicitly enables it for auditing purposes.</p>
           </section>
@@ -78,12 +78,12 @@
         <button class="modal-close" @click="showSecurityModal = false">&times;</button>
         <div class="modal-header">
           <h2>API Security Guidelines</h2>
-          <p>Security architecture and data protection in Raray Vision</p>
+          <p>Security architecture and data protection in Chitra Vision</p>
         </div>
         <div class="modal-body">
           <section>
             <h4>Security by Design</h4>
-            <p>Raray Vision prioritizes the security of biometric data. We implement industry-standard encryption and access controls to ensure that face data is protected against unauthorized access.</p>
+            <p>Chitra Vision prioritizes the security of biometric data. We implement industry-standard encryption and access controls to ensure that face data is protected against unauthorized access.</p>
           </section>
 
           <section>
@@ -100,7 +100,7 @@
           
           <section>
             <h4>Best Practices for Integration</h4>
-            <p>When integrating the Raray Vision API into your application, we strongly recommend:</p>
+            <p>When integrating the Chitra Vision API into your application, we strongly recommend:</p>
             <ul>
               <li>Never expose your API keys in frontend applications (e.g., mobile apps, web browsers).</li>
               <li>Route all requests through your own backend servers.</li>

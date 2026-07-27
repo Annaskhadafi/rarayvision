@@ -172,7 +172,7 @@ export const authService = {
       const res = await fetch(`${API_BASE_URL}/health`)
       if (!res.ok) throw new Error('HTTP ' + res.status)
       store.apiStatus = 'Online'
-      store.apiStatusDetail = 'Raray Vision API'
+      store.apiStatusDetail = 'Chitra Vision API'
     } catch {
       store.apiStatus = 'Offline'
       store.apiStatusDetail = 'Unable to connect to backend'
