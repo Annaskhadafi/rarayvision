@@ -1,5 +1,5 @@
 <script setup>
-import { ref, nextTick, onUnmounted } from 'vue'
+import { ref, nextTick, onUnmounted, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { store } from '../store'
 import { authService } from '../services/authService'
@@ -13,6 +13,26 @@ const name = ref('')
 const password = ref('')
 const loginError = ref('')
 const isLoading = ref(false)
+
+const registeredUsers = ref([])
+const loadingUsers = ref(false)
+
+const loadUsers = async () => {
+  loadingUsers.value = true
+  const res = await authService.getRegisteredUsers()
+  if (res.success) {
+    registeredUsers.value = res.users
+  }
+  loadingUsers.value = false
+}
+
+const selectUser = (u) => {
+  email.value = u.email
+}
+
+onMounted(() => {
+  loadUsers()
+})
 
 const showFaceLogin = ref(false)
 const faceVideoEl = ref(null)
@@ -55,6 +75,7 @@ const register = async () => {
     if (result.success) {
       isRegistering.value = false
       loginError.value = 'Registration successful! Please login.'
+      await loadUsers()
     } else {
       loginError.value = result.error
     }
@@ -278,10 +299,6 @@ onUnmounted(() => {
             <svg v-if="isLoading" class="spinner-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="2" x2="12" y2="6"></line><line x1="12" y1="18" x2="12" y2="22"></line><line x1="4.93" y1="4.93" x2="7.76" y2="7.76"></line><line x1="16.24" y1="16.24" x2="19.07" y2="19.07"></line><line x1="2" y1="12" x2="6" y2="12"></line><line x1="18" y1="12" x2="22" y2="12"></line><line x1="4.93" y1="19.07" x2="7.76" y2="16.24"></line><line x1="16.24" y1="7.76" x2="19.07" y2="4.93"></line></svg>
             {{ isLoading ? 'Processing...' : (isRegistering ? 'Create Account' : 'Sign In') }}
           </button>
-          <p style="text-align: center; margin-top: 12px; font-size: 0.85rem; color: #64748b;">
-            Default Login:<br>
-            <strong>admin@rarayvision.dfs.co.id</strong> / <strong>askingme</strong>
-          </p>
         </form>
         <div class="divider" style="margin:20px 0;"><span>or</span></div>
         <div class="social-login">
@@ -290,6 +307,53 @@ onUnmounted(() => {
             Login with Face
             <span style="background: #3b82f6; color: white; font-size: 10px; font-weight: bold; padding: 2px 6px; border-radius: 4px;">BETA</span>
           </button>
+        </div>
+
+        <!-- Section Pengguna Terdaftar -->
+        <div class="registered-users-section" style="margin-top: 20px; padding-top: 16px; border-top: 1px solid #e2e8f0; text-align: left;">
+          <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px;">
+            <span style="font-size: 0.85rem; font-weight: 600; color: #475569; display: flex; align-items: center; gap: 6px;">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path><circle cx="9" cy="7" r="4"></circle><path d="M23 21v-2a4 4 0 0 0-3-3.87"></path><path d="M16 3.13a4 4 0 0 1 0 7.75"></path></svg>
+              Pengguna Terdaftar
+            </span>
+            <span v-if="registeredUsers.length" style="background: #f1f5f9; color: #475569; font-size: 0.75rem; font-weight: 600; padding: 2px 8px; border-radius: 12px; border: 1px solid #cbd5e1;">
+              {{ registeredUsers.length }} User
+            </span>
+          </div>
+
+          <div v-if="loadingUsers" style="text-align: center; color: #94a3b8; font-size: 0.8rem; padding: 10px 0;">
+            Memuat daftar pengguna...
+          </div>
+          
+          <div v-else-if="!registeredUsers.length" style="text-align: center; color: #94a3b8; font-size: 0.8rem; padding: 10px 0;">
+            Belum ada pengguna terdaftar.
+          </div>
+
+          <div v-else style="display: flex; flex-direction: column; gap: 6px; max-height: 180px; overflow-y: auto; padding-right: 2px;">
+            <div 
+              v-for="u in registeredUsers" 
+              :key="u.id" 
+              class="user-card-item"
+              @click="selectUser(u)"
+              title="Klik untuk mengisi email secara otomatis"
+            >
+              <div style="display: flex; align-items: center; gap: 10px; min-width: 0;">
+                <div class="user-avatar-circle">
+                  {{ (u.name || u.email).charAt(0).toUpperCase() }}
+                </div>
+                <div style="display: flex; flex-direction: column; min-width: 0;">
+                  <span style="font-size: 0.82rem; font-weight: 600; color: #1e293b; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">{{ u.name || 'User' }}</span>
+                  <span style="font-size: 0.75rem; color: #64748b; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">{{ u.email }}</span>
+                </div>
+              </div>
+              <div v-if="u.has_face" style="flex-shrink: 0;">
+                <span title="Face Login Aktif" style="background: #dcfce7; color: #15803d; font-size: 0.7rem; font-weight: 600; padding: 2px 6px; border-radius: 4px; display: inline-flex; align-items: center; gap: 3px;">
+                  <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3z"></path><circle cx="12" cy="13" r="3"></circle></svg>
+                  Face
+                </span>
+              </div>
+            </div>
+          </div>
         </div>
       </template>
     </div>
@@ -390,5 +454,38 @@ onUnmounted(() => {
   100% {
     box-shadow: 9984px 0 0 0 #22c55e, 9999px 0 0 0 #22c55e, 10014px 0 0 0 #22c55e;
   }
+}
+
+.user-card-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.user-card-item:hover {
+  background: #eff6ff !important;
+  border-color: #bfdbfe !important;
+  transform: translateY(-1px);
+}
+
+.user-avatar-circle {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, #3b82f6, #1d4ed8);
+  color: white;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: bold;
+  font-size: 13px;
+  flex-shrink: 0;
+  box-shadow: 0 2px 4px rgba(59, 130, 246, 0.25);
 }
 </style>

@@ -77,6 +77,95 @@ export const authService = {
     }
   },
 
+  async getRegisteredUsers() {
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/v1/auth/registered-users`)
+      if (!res.ok) throw new Error('Failed to fetch registered users')
+      const data = await res.json()
+      if (data.status === 'success') {
+        return { success: true, users: data.users }
+      }
+      return { success: false, users: [] }
+    } catch {
+      return { success: false, users: [] }
+    }
+  },
+
+  async fetchUsers() {
+    const token = localStorage.getItem('rarayvision-token')
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/v1/auth/users`, {
+        headers: { 'Authorization': `Bearer ${token}` }
+      })
+      const data = await res.json()
+      if (res.ok && data.status === 'success') {
+        return { success: true, users: data.users }
+      }
+      return { success: false, error: data.detail || 'Failed to fetch users' }
+    } catch (err) {
+      return { success: false, error: err.message }
+    }
+  },
+
+  async createUser(name, email, password) {
+    const token = localStorage.getItem('rarayvision-token')
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/v1/auth/users`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify({ name, email, password })
+      })
+      const data = await res.json()
+      if (res.ok && data.status === 'success') {
+        return { success: true, user: data.user }
+      }
+      return { success: false, error: data.detail || 'Failed to create user' }
+    } catch (err) {
+      return { success: false, error: err.message }
+    }
+  },
+
+  async updateUser(userId, name, email) {
+    const token = localStorage.getItem('rarayvision-token')
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/v1/auth/users/${userId}`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify({ name, email })
+      })
+      const data = await res.json()
+      if (res.ok && data.status === 'success') {
+        return { success: true, user: data.user }
+      }
+      return { success: false, error: data.detail || 'Failed to update user' }
+    } catch (err) {
+      return { success: false, error: err.message }
+    }
+  },
+
+  async deleteUser(userId) {
+    const token = localStorage.getItem('rarayvision-token')
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/v1/auth/users/${userId}`, {
+        method: 'DELETE',
+        headers: { 'Authorization': `Bearer ${token}` }
+      })
+      const data = await res.json()
+      if (res.ok && data.status === 'success') {
+        return { success: true }
+      }
+      return { success: false, error: data.detail || 'Failed to delete user' }
+    } catch (err) {
+      return { success: false, error: err.message }
+    }
+  },
+
   async checkHealth() {
     try {
       store.isChecking = true

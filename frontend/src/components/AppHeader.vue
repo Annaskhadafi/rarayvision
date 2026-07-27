@@ -51,6 +51,7 @@ const goTo = (path) => {
       <div class="desktop-menu">
         <a v-if="!store.isLoggedIn" href="#" :class="{ active: $route.path === '/' }" @click.prevent="goTo('/')">Home</a>
         <a v-if="store.isLoggedIn" href="#" :class="{ active: $route.path === '/dashboard' }" @click.prevent="goTo('/dashboard')">Dashboard</a>
+        <a v-if="store.isLoggedIn" href="#" :class="{ active: $route.path === '/users' }" @click.prevent="goTo('/users')">Users</a>
         <a v-if="store.isLoggedIn" href="#" :class="{ active: $route.path === '/tester' }" @click.prevent="goTo('/tester')">Tester</a>
         <a v-if="store.isLoggedIn" href="#" :class="{ active: $route.path === '/live' }" @click.prevent="goTo('/live')">Live</a>
         <a href="#" :class="{ active: $route.path === '/about' }" @click.prevent="goTo('/about')">About</a>
@@ -84,6 +85,10 @@ const goTo = (path) => {
           </button>
           <div v-if="showProfileDropdown" class="profile-dropdown-overlay" @click="closeProfileDropdown" style="position:fixed; inset:0; z-index:40;"></div>
           <div v-if="showProfileDropdown" class="profile-dropdown" style="z-index:50;">
+            <a href="#" @click.prevent="goTo('/users'); closeProfileDropdown()" style="display:flex; align-items:center; gap:8px;">
+              <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path><circle cx="9" cy="7" r="4"></circle><path d="M23 21v-2a4 4 0 0 0-3-3.87"></path><path d="M16 3.13a4 4 0 0 1 0 7.75"></path></svg>
+              Manage Users
+            </a>
             <a href="#" @click.prevent="goTo('/settings'); closeProfileDropdown()" style="display:flex; align-items:center; gap:8px;">
               <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
               Settings
@@ -101,6 +106,7 @@ const goTo = (path) => {
       <div v-if="showHeaderMenu" class="header-menu">
         <a v-if="!store.isLoggedIn" href="#" @click.prevent="goTo('/')">Home</a>
         <a v-if="store.isLoggedIn" href="#" @click.prevent="goTo('/dashboard')">Dashboard</a>
+        <a v-if="store.isLoggedIn" href="#" @click.prevent="goTo('/users')">Users</a>
         <a v-if="store.isLoggedIn" href="#" @click.prevent="goTo('/tester')">Tester</a>
         <a v-if="store.isLoggedIn" href="#" @click.prevent="goTo('/live')">Live</a>
         <a href="#" @click.prevent="goTo('/about')">About</a>

@@ -30,3 +30,8 @@ class UpdateProfileRequest(BaseModel):
 class UpdatePasswordRequest(BaseModel):
     current_password: Optional[str] = None
     new_password: str
+
+class EditUserRequest(BaseModel):
+    name: str
+    email: Optional[str] = None
+

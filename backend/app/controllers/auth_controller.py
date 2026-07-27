@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, File, UploadFile
 from sqlalchemy.orm import Session
-from backend.app.schemas.schemas import RegisterRequest, LoginRequest, UpdateProfileRequest, UpdatePasswordRequest
+from backend.app.schemas.schemas import RegisterRequest, LoginRequest, UpdateProfileRequest, UpdatePasswordRequest, EditUserRequest
 from backend.app.core.security import get_password_hash, verify_password, create_access_token
 from backend.app.core.deps import get_current_user
 from backend.app.database import database as db
@@ -11,6 +11,24 @@ import cv2
 import numpy as np
 
 router = APIRouter(prefix="/api/v1/auth", tags=["auth"])
+
+@router.get("/registered-users", include_in_schema=False)
+def get_registered_users(db_session: Session = Depends(db.get_db)):
+    users = db_session.query(db_models.User).order_by(db_models.User.created_at.desc()).all()
+    return {
+        "status": "success",
+        "users": [
+            {
+                "id": u.id,
+                "email": u.email,
+                "name": u.name or u.email.split("@")[0],
+                "avatar_url": u.avatar_url,
+                "has_face": len(u.faces) > 0 if u.faces else False,
+                "created_at": u.created_at.isoformat() if u.created_at else None
+            }
+            for u in users
+        ]
+    }
 
 @router.get("/me", include_in_schema=False)
 def get_me(current_user: db_models.User = Depends(get_current_user)):
@@ -103,3 +121,83 @@ async def login_user_face(file: UploadFile = File(...), db_session: Session = De
         raise e
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+# --- USER MANAGEMENT CRUD ENDPOINTS ---
+
+@router.get("/users", include_in_schema=False)
+def list_users(db_session: Session = Depends(db.get_db), current_user: db_models.User = Depends(get_current_user)):
+    users = db_session.query(db_models.User).order_by(db_models.User.created_at.desc()).all()
+    return {
+        "status": "success",
+        "users": [
+            {
+                "id": u.id,
+                "email": u.email,
+                "name": u.name or "",
+                "avatar_url": u.avatar_url,
+                "has_password": u.password_hash is not None,
+                "has_face": len(u.faces) > 0 if u.faces else False,
+                "face_count": len(u.faces) if u.faces else 0,
+                "api_key_count": len(u.api_keys) if u.api_keys else 0,
+                "created_at": u.created_at.isoformat() if u.created_at else None
+            }
+            for u in users
+        ]
+    }
+
+@router.post("/users", include_in_schema=False)
+def create_user_admin(req: RegisterRequest, db_session: Session = Depends(db.get_db), current_user: db_models.User = Depends(get_current_user)):
+    existing = db_session.query(db_models.User).filter(db_models.User.email == req.email.strip()).first()
+    if existing:
+        raise HTTPException(status_code=400, detail="Email is already registered")
+    hashed = get_password_hash(req.password)
+    user = db_models.User(email=req.email.strip(), name=req.name.strip() if req.name else None, password_hash=hashed)
+    db_session.add(user)
+    db_session.commit()
+    db_session.refresh(user)
+    return {"status": "success", "user": {"id": user.id, "email": user.email, "name": user.name or ""}}
+
+@router.put("/users/{user_id}", include_in_schema=False)
+def edit_user(user_id: int, req: EditUserRequest, db_session: Session = Depends(db.get_db), current_user: db_models.User = Depends(get_current_user)):
+    user = db_session.query(db_models.User).filter(db_models.User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    if req.email and req.email.strip() != user.email:
+        existing = db_session.query(db_models.User).filter(db_models.User.email == req.email.strip()).first()
+        if existing:
+            raise HTTPException(status_code=400, detail="Email is already used by another user")
+        user.email = req.email.strip()
+        
+    if req.name is not None:
+        user.name = req.name.strip()
+        
+    db_session.commit()
+    db_session.refresh(user)
+    return {"status": "success", "user": {"id": user.id, "email": user.email, "name": user.name or ""}}
+
+@router.delete("/users/{user_id}", include_in_schema=False)
+def delete_user(user_id: int, db_session: Session = Depends(db.get_db), current_user: db_models.User = Depends(get_current_user)):
+    user = db_session.query(db_models.User).filter(db_models.User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    # Clean up physical face images if any
+    import os
+    if user.faces:
+        for face in user.faces:
+            if face.image_url:
+                filename = os.path.basename(face.image_url)
+                path1 = os.path.join(os.path.dirname(os.path.dirname(__file__)), "controllers", "uploads", "faces", filename)
+                path2 = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "uploads", "faces", filename)
+                for p in [path1, path2]:
+                    if os.path.exists(p):
+                        try:
+                            os.remove(p)
+                        except Exception:
+                            pass
+
+    db_session.delete(user)
+    db_session.commit()
+    return {"status": "success", "message": f"User ID {user_id} deleted successfully"}
+
