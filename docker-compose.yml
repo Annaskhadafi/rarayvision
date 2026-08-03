@@ -1,48 +1,44 @@
-version: "3.8"
+version: "3.9"
 
 services:
-  db:
-    image: postgres:16-alpine
-    restart: unless-stopped
-    environment:
-      POSTGRES_DB: ${POSTGRES_DB:-rarayvision}
-      POSTGRES_USER: ${POSTGRES_USER:-raray}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ca66b066787710c9ecb21bf4777ce2d6}
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-raray} -d ${POSTGRES_DB:-rarayvision}"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
-
   backend:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    build: .
+    container_name: rarayvision-backend
     restart: unless-stopped
-    depends_on:
-      db:
-        condition: service_healthy
     env_file:
       - .env
     environment:
-      - DATABASE_URL=${DATABASE_URL:-postgresql+psycopg2://${POSTGRES_USER:-raray}:${POSTGRES_PASSWORD:-ca66b066787710c9ecb21bf4777ce2d6}@db:5432/${POSTGRES_DB:-rarayvision}}
-      - SECRET_KEY=${SECRET_KEY:-af8ab971bf9210d90d5b615f4e5359594707750d582e8d824a973e329726ee42}
+      ENV: production
+      DATABASE_URL: postgresql://face:Wusthochq2018-@31.97.187.38:5556/face
+      SECRET_KEY: rarayvision-secret-key-2026-chitraparatama-prod
+      ALGORITHM: HS256
+      ACCESS_TOKEN_EXPIRE_MINUTES: "10080"
+      ALLOWED_ORIGINS: https://vision.chitraparatama.com
+      RARAY_VISION_EMAIL: mochamad.khadafi@chitraparatama.co.id
+      RARAY_VISION_PASSWORD: Wusthochq2018-
+      RARAY_VISION_BASE_URL: https://vision.chitraparatama.com
     volumes:
-      - ./backend/uploads:/app/backend/uploads
-      - ./backend/models:/app/backend/models
+      - uploads_data:/app/backend/uploads
+      - models_data:/app/backend/ml_models
+    expose:
+      - "5000"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
 
   frontend:
-    build:
-      context: ./frontend
-      dockerfile: Dockerfile
+    build: ./frontend
+    container_name: rarayvision-frontend
     restart: unless-stopped
     depends_on:
-      - backend
+      backend:
+        condition: service_healthy
+    ports:
+      - "3800:80"
 
 volumes:
-  postgres_data:
-
-
-
+  uploads_data:
+  models_data:
