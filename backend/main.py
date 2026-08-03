@@ -10,6 +10,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 import socketio
 
 from backend.app.controllers import auth_controller, api_key_controller, face_controller
+from backend.app.controllers import hero_attendance_controller
 from backend.app.services.socket_service import sio
 from backend.app.database.database import Base, engine
 
@@ -23,17 +24,21 @@ def create_default_admin():
     
     db = SessionLocal()
     try:
-        admin_email = "admin@rarayvision.dfs.co.id"
+        admin_email = os.getenv("RARAY_VISION_EMAIL", "admin@rarayvision.dfs.co.id")
+        admin_password = os.getenv("RARAY_VISION_PASSWORD", "askingme")
         admin = db.query(User).filter(User.email == admin_email).first()
         if not admin:
             print(f"Creating default admin user: {admin_email}")
             admin = User(
                 email=admin_email,
-                password_hash=get_password_hash("askingme"),
+                password_hash=get_password_hash(admin_password),
                 name="System Admin"
             )
             db.add(admin)
             db.commit()
+            print(f"Default admin created successfully.")
+        else:
+            print(f"Admin user already exists: {admin_email}")
     except Exception as e:
         print(f"Failed to create default admin: {e}")
     finally:
@@ -137,6 +142,7 @@ async def filter_openapi_schema(request: Request, call_next):
 fastapi_app.include_router(auth_controller.router)
 fastapi_app.include_router(api_key_controller.router)
 fastapi_app.include_router(face_controller.router)
+fastapi_app.include_router(hero_attendance_controller.router)
 
 _FAVICON = "/api/v1/uploads/favicon.png"
 
