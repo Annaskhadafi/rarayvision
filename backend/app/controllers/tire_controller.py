@@ -104,50 +104,51 @@ def perform_direct_ocr(img: np.ndarray) -> str:
 
 
 def parse_dot_and_serial_fast(raw_text: str):
-    """Fast regex parser for DOT codes and serial numbers from raw OCR text."""
-    if not raw_text:
-        rand_id = uuid.uuid4().hex[:6].upper()
+    """Fast regex parser for DOT codes and serial numbers strictly from REAL OCR raw text."""
+    clean_raw = raw_text.strip() if raw_text else ""
+    
+    if not clean_raw:
         return {
-            "serial_number": f"SN-{rand_id}",
-            "dot_code": rand_id[:4],
-            "manufacturer": "Tire Manufacturer",
-            "model_name": "Sidewall Series",
-            "size": "Standard Size",
-            "load_speed": "Standard",
-            "special_markings": "XL, 3PMSF"
+            "serial_number": "Tidak Ada Teks Terbaca",
+            "dot_code": "Tidak Ditemukan",
+            "manufacturer": "Tidak Ditemukan",
+            "model_name": "Tidak Ditemukan",
+            "size": "Tidak Ditemukan",
+            "load_speed": "Tidak Ditemukan",
+            "special_markings": "Tidak Ditemukan"
         }
 
-    # Look for 4-digit WWYY DOT date code or DOT prefix
-    dot_match = re.search(r'\b(DOT\s*[\w\d]+|\d{4})\b', raw_text, re.IGNORECASE)
-    dot_code = dot_match.group(1) if dot_match else "N/A"
+    # Extract 4-digit WWYY DOT date code or DOT prefix from real text
+    dot_match = re.search(r'\b(DOT\s*[\w\d]+|\d{4})\b', clean_raw, re.IGNORECASE)
+    dot_code = dot_match.group(1) if dot_match else "Tidak Ditemukan"
     
-    # Serial number extraction: pick words containing digits or alphanumeric strings
-    tokens = re.findall(r'\b[A-Z0-9-]{3,16}\b', raw_text, re.IGNORECASE)
+    # Serial number: return exact text tokens extracted by OCR from the real image
+    tokens = re.findall(r'\b[A-Z0-9\s-]{2,20}\b', clean_raw, re.IGNORECASE)
     if tokens:
         serial_number = max(tokens, key=len).strip()
     else:
-        serial_number = raw_text.strip()[:16]
-    
-    # Brand detection
+        serial_number = clean_raw
+
+    # Brand detection from real OCR text
     brands = ["MICHELIN", "BRIDGESTONE", "GOODYEAR", "CONTINENTAL", "PIRELLI", "DUNLOP", "YOKOHAMA", "HANKOOK", "TOYO", "KUMHO", "ACCELERA", "GT RADIAL"]
-    found_brand = "Tire Manufacturer"
+    found_brand = "Tidak Ditemukan"
     for b in brands:
-        if b in raw_text.upper():
+        if b in clean_raw.upper():
             found_brand = b
             break
             
-    # Size detection
-    size_match = re.search(r'\b(\d{3}/\d{2}\s*R?\s*\d{2})\b', raw_text, re.IGNORECASE)
-    found_size = size_match.group(1) if size_match else "Standard Size"
+    # Size detection from real OCR text
+    size_match = re.search(r'\b(\d{3}/\d{2}\s*R?\s*\d{2})\b', clean_raw, re.IGNORECASE)
+    found_size = size_match.group(1) if size_match else "Tidak Ditemukan"
     
     return {
         "serial_number": serial_number,
         "dot_code": dot_code,
         "manufacturer": found_brand,
-        "model_name": "Sidewall Series",
+        "model_name": "Tidak Ditemukan",
         "size": found_size,
-        "load_speed": "Standard",
-        "special_markings": "XL, 3PMSF"
+        "load_speed": "Tidak Ditemukan",
+        "special_markings": "Tidak Ditemukan"
     }
 
 
