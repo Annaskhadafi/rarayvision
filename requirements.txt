@@ -19,6 +19,8 @@ torchvision
 ultralytics
 easyocr
 pytesseract
+paddlepaddle
+paddleocr
 requests
 pillow
 shapely
