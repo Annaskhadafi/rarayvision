@@ -283,6 +283,48 @@ def _fix_ambiguous_tire_patterns(text: str) -> str:
     return clean
 
 
+GENERIC_TIRE_WORDS = {
+    "SERIAL", "NUMBER", "ALWAYS", "SAY", "TE", "AL", "TUBELESS", "RADIAL", "STEEL",
+    "BELTED", "MAX", "LOAD", "PRESS", "INFLATION", "MADE", "IN", "SAFETY", "WARNING",
+    "DANGER", "TIRE", "TIRES", "PLY", "PLIES", "SIDEWALL", "TREAD", "CANNOT", "USER",
+    "UNABLE", "SORRY", "IMAGE", "ROADS", "SERVICE", "RIM", "CODE", "DOT"
+}
+
+
+def extract_best_serial_number(raw_text: str) -> str:
+    """Extract strictly high-accuracy tire serial numbers or DOT codes, filtering out generic sidewall words."""
+    if not raw_text:
+        return "Tidak Ada Teks Terbaca"
+
+    clean_text = raw_text.upper().strip()
+
+    # Priority 1: Pure 5 to 14 digit serial number (e.g. 20060315794)
+    pure_digits = re.findall(r'\b\d{5,14}\b', clean_text)
+    if pure_digits:
+        return max(pure_digits, key=len)
+
+    # Priority 2: Alphanumeric Serial Codes containing digits (e.g. MXL24000125, FRJ2920, X3612)
+    alpha_num = re.findall(r'\b[A-Z0-9\s-]{4,16}\b', clean_text)
+    valid_candidates = []
+    for token in alpha_num:
+        clean_tok = token.strip()
+        tok_words = set(clean_tok.split())
+        if not tok_words.intersection(GENERIC_TIRE_WORDS):
+            digits = re.findall(r'\d', clean_tok)
+            if len(digits) >= 1:
+                valid_candidates.append(clean_tok)
+    
+    if valid_candidates:
+        return max(valid_candidates, key=len)
+
+    # Priority 3: DOT date code (e.g. DOT 2920)
+    dot_match = re.search(r'\b(DOT\s*[A-Z0-9]{4,10}|\d{4})\b', clean_text)
+    if dot_match:
+        return dot_match.group(1).strip()
+
+    return "Tidak Ada Teks Terbaca"
+
+
 def parse_dot_and_serial_fast(raw_text: str):
     """Fast regex parser for DOT codes and serial numbers strictly from REAL OCR raw text."""
     clean_raw = raw_text.strip() if raw_text else ""
@@ -304,16 +346,10 @@ def parse_dot_and_serial_fast(raw_text: str):
     # Apply pattern corrector for O/0 and I/1 confusions
     clean_raw = _fix_ambiguous_tire_patterns(clean_raw)
 
+    serial_number = extract_best_serial_number(clean_raw)
+
     dot_match = re.search(r'\b(DOT\s*[\w\d]+|\d{4})\b', clean_raw, re.IGNORECASE)
     dot_code = dot_match.group(1) if dot_match else "Tidak Ditemukan"
-    
-    tokens = re.findall(r'\b[A-Z0-9\s-]{2,20}\b', clean_raw, re.IGNORECASE)
-    valid_tokens = [t.strip() for t in tokens if "safety" not in t.lower() and "user" not in t.lower()]
-    
-    if valid_tokens:
-        serial_number = max(valid_tokens, key=len).strip()
-    else:
-        serial_number = clean_raw
 
     brands = ["MICHELIN", "BRIDGESTONE", "GOODYEAR", "CONTINENTAL", "PIRELLI", "DUNLOP", "YOKOHAMA", "HANKOOK", "TOYO", "KUMHO", "ACCELERA", "GT RADIAL"]
     found_brand = "Tidak Ditemukan"
