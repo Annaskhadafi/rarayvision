@@ -53,8 +53,28 @@ def _warmup_easyocr():
 threading.Thread(target=_warmup_easyocr, daemon=True).start()
 
 
+# ─── RealTimeOCR YOLO Text Box Detector ───────────────────────────────────────
+_yolo_detector = None
+
+def get_yolo_detector():
+    global _yolo_detector
+    if _yolo_detector is None:
+        try:
+            model_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "ml_models", "text_detection", "best.pt")
+            if not os.path.exists(model_path):
+                model_path = r"D:\[01] PROJECT\Raray VIsion\RealTimeOCR\best.pt"
+            if os.path.exists(model_path):
+                from ultralytics import YOLO
+                _yolo_detector = YOLO(model_path)
+                logger.info("[YOLO] RealTimeOCR text box detector loaded successfully!")
+        except Exception as e:
+            logger.warning(f"[YOLO] Could not load RealTimeOCR detector: {e}")
+            _yolo_detector = False
+    return _yolo_detector
+
+
 # ─── Image helpers ────────────────────────────────────────────────────────────
-def _resize_for_ocr(img: np.ndarray, max_width: int = 1024) -> np.ndarray:
+def _resize_for_ocr(img: np.ndarray, max_width: int = 800) -> np.ndarray:
     h, w = img.shape[:2]
     if w > max_width:
         scale = max_width / w
@@ -72,66 +92,80 @@ def _preprocess_for_ocr(img: np.ndarray) -> np.ndarray:
 # ─── Main OCR function ────────────────────────────────────────────────────────
 def perform_direct_ocr(img: np.ndarray) -> str:
     """
-    Fast & Accurate Hybrid OCR Pipeline (<1.5 seconds):
-      Stage 1: OpenCV Preprocessing (CLAHE + Otsu Binarization for embossed rubber text)
-      Stage 2: Instant PyTesseract OCR on binarized image (~0.2s)
-      Stage 3: Pre-warmed EasyOCR (~0.8s)
-      Stage 4: OpenRouter Fast Vision API with 4s timeout (if local OCR empty)
+    Fast & Accurate RealTimeOCR Hybrid Pipeline (<0.8s):
+      Step 1: YOLO Text Region Cropping (best.pt from RealTimeOCR - ~15ms)
+      Step 2: OpenCV CLAHE + Otsu Binarization (~10ms)
+      Step 3: Instant PyTesseract OCR on cropped box (~0.1s)
+      Step 4: Pre-warmed EasyOCR (~0.4s)
     """
     if img is None or img.size == 0:
         return ""
 
-    # Resize image to max 800px width for fast execution
-    h, w = img.shape[:2]
-    if w > 800:
-        scale = 800.0 / w
-        img_small = cv2.resize(img, (800, int(h * scale)), interpolation=cv2.INTER_AREA)
-    else:
-        img_small = img
+    img_small = _resize_for_ocr(img, max_width=800)
 
+    # Step 1: Detect text box regions using RealTimeOCR YOLO model (best.pt)
+    yolo = get_yolo_detector()
+    cropped_regions = []
+    if yolo:
+        try:
+            results = yolo.predict(img_small, verbose=False)
+            if results and len(results) > 0 and hasattr(results[0], "boxes") and len(results[0].boxes) > 0:
+                boxes = results[0].boxes.xyxy.cpu().numpy()
+                for box in boxes:
+                    bx1, by1, bx2, by2 = map(int, box[:4])
+                    pad = 5
+                    cx1 = max(0, bx1 - pad)
+                    cy1 = max(0, by1 - pad)
+                    cx2 = min(img_small.shape[1], bx2 + pad)
+                    cy2 = min(img_small.shape[0], by2 + pad)
+                    crop = img_small[cy1:cy2, cx1:cx2]
+                    if crop.size > 0:
+                        cropped_regions.append(crop)
+        except Exception as ye:
+            logger.warning(f"[YOLO] Text box detection warning: {ye}")
+
+    # Use cropped text boxes if found by YOLO, else full resized frame
+    target_images = cropped_regions if cropped_regions else [img_small]
     texts = []
 
-    # ── STAGE 1 & 2: OpenCV Contrast Enhancement & PyTesseract (~0.2s) ───
+    # Step 2 & 3: OpenCV Enhancement & Instant PyTesseract (~0.1s)
     try:
-        gray = cv2.cvtColor(img_small, cv2.COLOR_BGR2GRAY) if len(img_small.shape) == 3 else img_small
-        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
-        enhanced = clahe.apply(gray)
-        thresh = cv2.threshold(enhanced, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
-        thresh_inv = cv2.bitwise_not(thresh)
-
         import pytesseract
-        for target_img in [thresh, thresh_inv, enhanced]:
-            txt = pytesseract.image_to_string(target_img, config='--psm 7').strip()
-            if not txt:
-                txt = pytesseract.image_to_string(target_img, config='--psm 6').strip()
-            if txt:
-                clean_t = re.sub(r'[^A-Z0-9\s-]', '', txt.upper()).strip()
-                if len(clean_t) >= 3 and "SAFETY" not in clean_t and "USER" not in clean_t:
-                    texts.append(clean_t)
-                    break
+        for target_img in target_images:
+            gray = cv2.cvtColor(target_img, cv2.COLOR_BGR2GRAY) if len(target_img.shape) == 3 else target_img
+            clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+            enhanced = clahe.apply(gray)
+            thresh = cv2.threshold(enhanced, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
+            thresh_inv = cv2.bitwise_not(thresh)
+
+            for sub in [thresh, thresh_inv, enhanced]:
+                txt = pytesseract.image_to_string(sub, config='--psm 7').strip()
+                if not txt:
+                    txt = pytesseract.image_to_string(sub, config='--psm 6').strip()
+                if txt:
+                    clean_t = re.sub(r'[^A-Z0-9\s-]', '', txt.upper()).strip()
+                    if len(clean_t) >= 3 and "SAFETY" not in clean_t and "USER" not in clean_t:
+                        texts.append(clean_t)
+                        break
     except Exception as pe:
         logger.warning(f"[OCR] PyTesseract stage error: {pe}")
 
-    # ── STAGE 3: Pre-warmed EasyOCR (~0.8s, if PyTesseract empty) ───────────
+    # Step 4: Pre-warmed EasyOCR fallback (~0.4s)
     if not texts:
-        _easyocr_ready.wait(timeout=1.0)
+        _easyocr_ready.wait(timeout=0.8)
         if _easyocr_reader:
             try:
-                results = _easyocr_reader.readtext(img_small, detail=0)
-                if not results:
-                    gray = cv2.cvtColor(img_small, cv2.COLOR_BGR2GRAY) if len(img_small.shape) == 3 else img_small
-                    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
-                    enhanced = clahe.apply(gray)
-                    results = _easyocr_reader.readtext(enhanced, detail=0)
-                if results:
-                    for r in results:
-                        clean_r = re.sub(r'[^A-Z0-9\s-]', '', str(r).upper()).strip()
-                        if len(clean_r) >= 3 and "SAFETY" not in clean_r and "USER" not in clean_r:
-                            texts.append(clean_r)
+                for target_img in target_images:
+                    results = _easyocr_reader.readtext(target_img, detail=0)
+                    if results:
+                        for r in results:
+                            clean_r = re.sub(r'[^A-Z0-9\s-]', '', str(r).upper()).strip()
+                            if len(clean_r) >= 3 and "SAFETY" not in clean_r and "USER" not in clean_r:
+                                texts.append(clean_r)
             except Exception as ee:
                 logger.warning(f"[OCR] EasyOCR stage error: {ee}")
 
-    # ── STAGE 4: OpenRouter Fast Vision API Fallback (if local OCR empty) ───
+    # Step 5: Fast Vision API Fallback (if local OCR empty)
     if not texts:
         openrouter_key = os.getenv("OPENROUTER_API_KEY", "")
         if openrouter_key:
