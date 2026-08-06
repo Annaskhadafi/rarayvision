@@ -34,7 +34,12 @@ def upload_file_to_s3(file_bytes: bytes, filename: str, content_type: str = "ima
             aws_access_key_id=access_key,
             aws_secret_access_key=secret_key,
             region_name=region,
-            config=Config(s3={"addressing_style": "path"})
+            config=Config(
+                s3={"addressing_style": "path"},
+                connect_timeout=2.0,
+                read_timeout=3.0,
+                retries={'max_attempts': 1}
+            )
         )
 
         s3_key = f"{prefix}/{filename}" if prefix else filename

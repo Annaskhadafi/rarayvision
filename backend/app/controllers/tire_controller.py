@@ -395,17 +395,24 @@ async def extract_tire_info(
         if img is None:
             raise HTTPException(status_code=400, detail="Invalid image file format")
             
-        # Upload to S3 if UPLOAD_DRIVER=s3, else save locally
+        # 1. Instant local disk save (<2ms) so file is served immediately
         filename = f"tire_{uuid.uuid4().hex[:12]}.jpg"
-        s3_url = upload_file_to_s3(contents, filename, content_type=image.content_type or "image/jpeg")
-        if s3_url:
-            image_url = s3_url
-        else:
-            uploads_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "uploads")
-            os.makedirs(uploads_dir, exist_ok=True)
-            save_path = os.path.join(uploads_dir, filename)
-            cv2.imwrite(save_path, img)
-            image_url = f"/api/v1/uploads/{filename}"
+        uploads_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "uploads")
+        os.makedirs(uploads_dir, exist_ok=True)
+        save_path = os.path.join(uploads_dir, filename)
+        cv2.imwrite(save_path, img)
+        image_url = f"/api/v1/uploads/{filename}"
+
+        # 2. Non-blocking background S3 sync (never blocks API response)
+        if os.getenv("UPLOAD_DRIVER", "local").lower() == "s3":
+            def _async_s3_bg():
+                try:
+                    s3_u = upload_file_to_s3(contents, filename, content_type=image.content_type or "image/jpeg")
+                    if s3_u:
+                        logger.info(f"[S3] Background sync complete: {s3_u}")
+                except Exception as se:
+                    logger.warning(f"[S3] Async sync notice: {se}")
+            threading.Thread(target=_async_s3_bg, daemon=True).start()
 
         # Perform fast multi-angle direct OCR
         direct_ocr_text = perform_direct_ocr(img)
@@ -524,17 +531,22 @@ async def extract_tire_info_batch(
                 })
                 continue
 
-            # Upload image to S3 Cloudhost if UPLOAD_DRIVER=s3, else save locally
+            # 1. Instant local disk save (<2ms)
             filename = f"tire_{uuid.uuid4().hex[:12]}.jpg"
-            s3_url = upload_file_to_s3(contents, filename, content_type=img_file.content_type or "image/jpeg")
-            if s3_url:
-                image_url = s3_url
-            else:
-                uploads_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "uploads")
-                os.makedirs(uploads_dir, exist_ok=True)
-                save_path = os.path.join(uploads_dir, filename)
-                cv2.imwrite(save_path, img)
-                image_url = f"/api/v1/uploads/{filename}"
+            uploads_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "uploads")
+            os.makedirs(uploads_dir, exist_ok=True)
+            save_path = os.path.join(uploads_dir, filename)
+            cv2.imwrite(save_path, img)
+            image_url = f"/api/v1/uploads/{filename}"
+
+            # 2. Non-blocking background S3 sync
+            if os.getenv("UPLOAD_DRIVER", "local").lower() == "s3":
+                def _async_batch_s3(b_bytes=contents, b_name=filename, b_ct=img_file.content_type):
+                    try:
+                        upload_file_to_s3(b_bytes, b_name, content_type=b_ct or "image/jpeg")
+                    except Exception as se:
+                        logger.warning(f"[S3] Async batch sync notice: {se}")
+                threading.Thread(target=_async_batch_s3, daemon=True).start()
 
             # Perform fast direct multi-angle OCR
             direct_ocr_text = perform_direct_ocr(img)
