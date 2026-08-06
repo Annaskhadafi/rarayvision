@@ -17,6 +17,7 @@ class User(Base):
 
     api_keys = relationship("ApiKey", back_populates="user", cascade="all, delete-orphan")
     faces = relationship("Face", back_populates="user", cascade="all, delete-orphan")
+    tire_scans = relationship("TireScan", back_populates="user", cascade="all, delete-orphan")
 
 class ApiKey(Base):
     __tablename__ = "api_keys"
@@ -44,7 +45,6 @@ class Face(Base):
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
 
     user = relationship("User", back_populates="faces")
-    tire_scans = relationship("TireScan", back_populates="user", cascade="all, delete-orphan")
 
 class TireScan(Base):
     __tablename__ = "tire_scans"
