@@ -44,76 +44,86 @@ def get_easyocr_reader():
     return _easyocr_reader
 
 
-def perform_direct_ocr(img: np.ndarray) -> str:
-    """Perform direct OCR reading from cropped or full tire image."""
-    texts = []
-    
-    # Preprocess image for embossed rubber text: Grayscale + CLAHE + Threshold
-    try:
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if len(img.shape) == 3 else img
-        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
-        enhanced_gray = clahe.apply(gray)
-        thresh_img = cv2.threshold(enhanced_gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
-    except Exception as ie:
-        logger.warning(f"Image preprocessing warning: {ie}")
-        enhanced_gray = img
-        thresh_img = img
+def _resize_for_ocr(img: np.ndarray, max_width: int = 800) -> np.ndarray:
+    """Resize image to max_width for faster API transfer without quality loss."""
+    h, w = img.shape[:2]
+    if w > max_width:
+        scale = max_width / w
+        img = cv2.resize(img, (max_width, int(h * scale)), interpolation=cv2.INTER_AREA)
+    return img
 
-    # 1. EasyOCR on original and enhanced image
+
+def _preprocess_for_ocr(img: np.ndarray):
+    """Grayscale + CLAHE contrast enhancement for embossed tire text."""
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if len(img.shape) == 3 else img
+    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+    return clahe.apply(gray)
+
+
+def perform_direct_ocr(img: np.ndarray) -> str:
+    """
+    Fast OCR pipeline — target <3 seconds:
+      1. OpenRouter Vision API (primary — fastest + most accurate ~1-2s)
+      2. EasyOCR (fallback — slow ~5-8s, only if no OpenRouter key)
+    """
+    # Resize image to keep API payload small & fast
+    img_small = _resize_for_ocr(img, max_width=800)
+
+    openrouter_key = os.getenv("OPENROUTER_API_KEY", "")
+
+    # ── PRIMARY: OpenRouter Vision API ─────────────────────────────────────
+    if openrouter_key:
+        try:
+            import base64, requests as req
+            enhanced = _preprocess_for_ocr(img_small)
+            ok, buf = cv2.imencode('.jpg', enhanced, [cv2.IMWRITE_JPEG_QUALITY, 85])
+            if ok:
+                b64 = base64.b64encode(buf.tobytes()).decode('utf-8')
+                res = req.post(
+                    "https://openrouter.ai/api/v1/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {openrouter_key}",
+                        "Content-Type": "application/json"
+                    },
+                    json={
+                        "model": os.getenv("OPENROUTER_MODEL", "google/gemma-4-26b-a4b-it:free"),
+                        "messages": [{
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": (
+                                    "This is a tire sidewall image. "
+                                    "Read ONLY the embossed alphanumeric serial number or DOT code visible (e.g. FRJ2920, X3612, DOT AB12 3456 1234). "
+                                    "Reply with ONLY the extracted characters. No explanation."
+                                )},
+                                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}
+                            ]
+                        }],
+                        "max_tokens": 30
+                    },
+                    timeout=8
+                )
+                if res.status_code == 200:
+                    content = res.json()["choices"][0]["message"]["content"].strip()
+                    # Reject guardrail / non-OCR responses
+                    bad_words = ["safety", "cannot", "unable", "sorry", "image", "sure", "here", "read"]
+                    if content and not any(w in content.lower() for w in bad_words):
+                        return content
+        except Exception as e:
+            logger.warning(f"OpenRouter Vision error: {e}")
+
+    # ── FALLBACK: EasyOCR (slow, only when no API key available) ───────────
     reader = get_easyocr_reader()
     if reader:
         try:
-            results = reader.readtext(enhanced_gray, detail=0)
-            if results:
-                texts.extend([str(r).strip() for r in results if r])
+            enhanced = _preprocess_for_ocr(img_small)
+            results = reader.readtext(enhanced, detail=0)
+            texts = [str(r).strip() for r in results if r and "safety" not in str(r).lower()]
+            if texts:
+                return " ".join(texts)
         except Exception as e:
             logger.warning(f"EasyOCR error: {e}")
 
-    # 2. PyTesseract fallback/supplement
-    if not texts:
-        try:
-            import pytesseract
-            tess_text = pytesseract.image_to_string(thresh_img, config='--psm 7').strip()
-            if not tess_text:
-                tess_text = pytesseract.image_to_string(enhanced_gray, config='--psm 6').strip()
-            if tess_text:
-                texts.append(tess_text)
-        except Exception as e:
-            logger.warning(f"PyTesseract error: {e}")
-
-    # 3. OpenRouter Vision fallback if available
-    openrouter_key = os.getenv("OPENROUTER_API_KEY", "")
-    if not texts and openrouter_key:
-        try:
-            import base64, requests
-            ok, buf = cv2.imencode('.jpg', img)
-            if ok:
-                b64 = base64.b64encode(buf.tobytes()).decode('utf-8')
-                headers = {
-                    "Authorization": f"Bearer {openrouter_key}",
-                    "Content-Type": "application/json"
-                }
-                payload = {
-                    "model": os.getenv("OPENROUTER_MODEL", "google/gemma-4-26b-a4b-it:free"),
-                    "messages": [{
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": "Read all embossed numbers and letters on this tire sidewall (e.g. FRJ2920 or X3612). Return ONLY the extracted text string."},
-                            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}
-                        ]
-                    }]
-                }
-                res = requests.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=payload, timeout=10)
-                if res.status_code == 200:
-                    vis_text = res.json()["choices"][0]["message"]["content"].strip()
-                    if vis_text and "user safety" not in vis_text.lower() and "safe" not in vis_text.lower():
-                        texts.append(vis_text)
-        except Exception as ve:
-            logger.warning(f"OpenRouter Vision error: {ve}")
-
-    # Filter out safety guardrail responses
-    filtered_texts = [t for t in texts if "user safety" not in t.lower() and "safety" not in t.lower()]
-    return " ".join(filtered_texts).strip()
+    return ""
 
 
 def parse_dot_and_serial_fast(raw_text: str):
