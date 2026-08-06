@@ -34,10 +34,7 @@ def get_pipeline():
     return _pipeline_instance
 
 
-# ─── EasyOCR Disabled to save CPU & RAM on startup ─────────────────────────────
-_easyocr_reader = False
-_easyocr_ready = threading.Event()
-_easyocr_ready.set()
+
 
 
 # ─── RealTimeOCR YOLO Text Box Detector ───────────────────────────────────────
