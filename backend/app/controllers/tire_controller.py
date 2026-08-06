@@ -85,7 +85,7 @@ def _warmup_paddle_ocr():
     try:
         from paddleocr import PaddleOCR
         logger.info("[PaddleOCR] Pre-warming PP-OCRv4 engine...")
-        _paddle_ocr_engine = PaddleOCR(use_angle_cls=False, lang='en', show_log=False)
+        _paddle_ocr_engine = PaddleOCR(use_textline_orientation=False, lang='en')
         _paddle_ocr_ready.set()
         logger.info("[PaddleOCR] PP-OCRv4 engine ready!")
     except Exception as e:
