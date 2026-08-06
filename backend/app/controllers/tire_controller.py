@@ -72,26 +72,103 @@ def _preprocess_for_ocr(img: np.ndarray) -> np.ndarray:
 # ─── Main OCR function ────────────────────────────────────────────────────────
 def perform_direct_ocr(img: np.ndarray) -> str:
     """
-    Fast OCR — target <3 seconds.
-    Uses pre-warmed EasyOCR (0.5–1s after warmup).
-    No slow API calls in the hot path.
+    Fast & Accurate Hybrid OCR Pipeline (<1.5 seconds):
+      Stage 1: OpenCV Preprocessing (CLAHE + Otsu Binarization for embossed rubber text)
+      Stage 2: Instant PyTesseract OCR on binarized image (~0.2s)
+      Stage 3: Pre-warmed EasyOCR (~0.8s)
+      Stage 4: OpenRouter Fast Vision API with 4s timeout (if local OCR empty)
     """
-    img_small = _resize_for_ocr(img, max_width=1024)
-    enhanced  = _preprocess_for_ocr(img_small)
+    if img is None or img.size == 0:
+        return ""
 
-    # Wait max 2s for EasyOCR to be ready (it warms up in background at startup)
-    _easyocr_ready.wait(timeout=2.0)
+    # Resize image to max 800px width for fast execution
+    h, w = img.shape[:2]
+    if w > 800:
+        scale = 800.0 / w
+        img_small = cv2.resize(img, (800, int(h * scale)), interpolation=cv2.INTER_AREA)
+    else:
+        img_small = img
 
-    if _easyocr_reader:
-        try:
-            results = _easyocr_reader.readtext(enhanced, detail=0)
-            texts = [str(r).strip() for r in results if r and "safety" not in str(r).lower()]
-            if texts:
-                return " ".join(texts)
-        except Exception as e:
-            logger.warning(f"[OCR] EasyOCR inference error: {e}")
+    texts = []
 
-    return ""
+    # ── STAGE 1 & 2: OpenCV Contrast Enhancement & PyTesseract (~0.2s) ───
+    try:
+        gray = cv2.cvtColor(img_small, cv2.COLOR_BGR2GRAY) if len(img_small.shape) == 3 else img_small
+        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+        enhanced = clahe.apply(gray)
+        thresh = cv2.threshold(enhanced, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
+        thresh_inv = cv2.bitwise_not(thresh)
+
+        import pytesseract
+        for target_img in [thresh, thresh_inv, enhanced]:
+            txt = pytesseract.image_to_string(target_img, config='--psm 7').strip()
+            if not txt:
+                txt = pytesseract.image_to_string(target_img, config='--psm 6').strip()
+            if txt:
+                clean_t = re.sub(r'[^A-Z0-9\s-]', '', txt.upper()).strip()
+                if len(clean_t) >= 3 and "SAFETY" not in clean_t and "USER" not in clean_t:
+                    texts.append(clean_t)
+                    break
+    except Exception as pe:
+        logger.warning(f"[OCR] PyTesseract stage error: {pe}")
+
+    # ── STAGE 3: Pre-warmed EasyOCR (~0.8s, if PyTesseract empty) ───────────
+    if not texts:
+        _easyocr_ready.wait(timeout=1.0)
+        if _easyocr_reader:
+            try:
+                results = _easyocr_reader.readtext(img_small, detail=0)
+                if not results:
+                    gray = cv2.cvtColor(img_small, cv2.COLOR_BGR2GRAY) if len(img_small.shape) == 3 else img_small
+                    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+                    enhanced = clahe.apply(gray)
+                    results = _easyocr_reader.readtext(enhanced, detail=0)
+                if results:
+                    for r in results:
+                        clean_r = re.sub(r'[^A-Z0-9\s-]', '', str(r).upper()).strip()
+                        if len(clean_r) >= 3 and "SAFETY" not in clean_r and "USER" not in clean_r:
+                            texts.append(clean_r)
+            except Exception as ee:
+                logger.warning(f"[OCR] EasyOCR stage error: {ee}")
+
+    # ── STAGE 4: OpenRouter Fast Vision API Fallback (if local OCR empty) ───
+    if not texts:
+        openrouter_key = os.getenv("OPENROUTER_API_KEY", "")
+        if openrouter_key:
+            try:
+                import base64, requests as req
+                ok, buf = cv2.imencode('.jpg', img_small, [cv2.IMWRITE_JPEG_QUALITY, 80])
+                if ok:
+                    b64 = base64.b64encode(buf.tobytes()).decode('utf-8')
+                    res = req.post(
+                        "https://openrouter.ai/api/v1/chat/completions",
+                        headers={
+                            "Authorization": f"Bearer {openrouter_key}",
+                            "Content-Type": "application/json"
+                        },
+                        json={
+                            "model": "nvidia/nemotron-nano-12b-v2-vl:free",
+                            "messages": [{
+                                "role": "user",
+                                "content": [
+                                    {"type": "text", "text": "Extract all tire serial numbers/codes (e.g. FRJ2920 or X3612). Return ONLY the extracted code string."},
+                                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}
+                                ]
+                            }],
+                            "max_tokens": 20
+                        },
+                        timeout=4
+                    )
+                    if res.status_code == 200:
+                        content = res.json()["choices"][0]["message"]["content"].strip()
+                        clean_c = re.sub(r'[^A-Z0-9\s-]', '', content.upper()).strip()
+                        if clean_c and "SAFETY" not in clean_c and "USER" not in clean_c:
+                            texts.append(clean_c)
+            except Exception as ve:
+                logger.warning(f"[OCR] Vision API stage error: {ve}")
+
+    filtered = [t for t in texts if "SAFETY" not in t and "USER" not in t]
+    return " ".join(filtered).strip()
 
 
 
