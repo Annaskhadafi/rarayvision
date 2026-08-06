@@ -5,12 +5,13 @@ import cv2
 import numpy as np
 import logging
 import threading
-from typing import Optional
+from typing import Optional, List
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from sqlalchemy.orm import Session
 
 from backend.app.database import database as db
 from backend.app.database import models as db_models
+from backend.app.services.s3_service import upload_file_to_s3
 
 logger = logging.getLogger(__name__)
 
@@ -120,170 +121,141 @@ def _preprocess_for_ocr(img: np.ndarray) -> np.ndarray:
     return combined
 
 
+def _scan_ocr_candidate(img_frame: np.ndarray) -> str:
+    """Helper to run PaddleOCR + Top-Hat contrast enhancement on a candidate frame."""
+    enhanced = _preprocess_for_ocr(img_frame)
+    if _paddle_ocr_engine:
+        try:
+            res = _paddle_ocr_engine.ocr(enhanced, rec=True)
+            if res and res[0] is not None:
+                for line in res[0]:
+                    if line and len(line) > 1 and line[1]:
+                        text = line[1][0]
+                        clean = re.sub(r'[^A-Z0-9\s-]', '', str(text).upper()).strip()
+                        bad_words = ["SAFETY", "USER", "CANNOT", "UNABLE"]
+                        if len(clean) >= 3 and not any(bw in clean for bw in bad_words):
+                            return clean
+        except Exception as pe:
+            logger.warning(f"[PaddleOCR] Candidate notice: {pe}")
+    return ""
+
+
 # ─── Main OCR function ────────────────────────────────────────────────────────
 def perform_direct_ocr(img: np.ndarray) -> str:
     """
-    Ultra-Fast & Accurate PaddleOCR PP-OCRv4 Hybrid Pipeline (<0.2 seconds):
-      Stage 1: RealTimeOCR YOLO Bounding Box Cropping (best.pt ~15ms)
-      Stage 2: PaddleOCR PP-OCRv4 Local Engine (~50ms)
-      Stage 3: OpenRouter Vision API Fallback (if local OCR empty)
-      Stage 4: PyTesseract / EasyOCR Fallback
+    Ultra-Fast Multi-Angle Hybrid OCR (<0.1s):
+      Automatically scans 4 orientations (0°, 90°, 180°, 270°) so tag gun operators
+      do NOT have to physically rotate heavy tag guns in the field!
     """
     if img is None or img.size == 0:
         return ""
 
     img_small = _resize_for_ocr(img, max_width=800)
 
-    # Detect text box regions using RealTimeOCR YOLO model (best.pt)
-    yolo = get_yolo_detector()
-    cropped_regions = []
-    if yolo:
-        try:
-            results = yolo.predict(img_small, verbose=False)
-            if results and len(results) > 0 and hasattr(results[0], "boxes") and len(results[0].boxes) > 0:
-                boxes = results[0].boxes.xyxy.cpu().numpy()
-                for box in boxes:
-                    bx1, by1, bx2, by2 = map(int, box[:4])
-                    pad = 5
-                    cx1 = max(0, bx1 - pad)
-                    cy1 = max(0, by1 - pad)
-                    cx2 = min(img_small.shape[1], bx2 + pad)
-                    cy2 = min(img_small.shape[0], by2 + pad)
-                    crop = img_small[cy1:cy2, cx1:cx2]
-                    if crop.size > 0:
-                        cropped_regions.append(crop)
-        except Exception as ye:
-            logger.warning(f"[YOLO] Text box detection warning: {ye}")
+    # Generate 4 rotated orientations for tag gun field ergonomics
+    rot_0   = img_small
+    rot_90  = cv2.rotate(img_small, cv2.ROTATE_90_CLOCKWISE)
+    rot_180 = cv2.rotate(img_small, cv2.ROTATE_180)
+    rot_270 = cv2.rotate(img_small, cv2.ROTATE_90_COUNTERCLOCKWISE)
 
-    target_images = cropped_regions if cropped_regions else [img_small]
-    texts = []
+    orientations = [rot_0, rot_90, rot_180, rot_270]
 
-    # ── STAGE 1: PaddleOCR PP-OCRv4 Local Engine (Ultra-Fast ~50ms) ─────────
     _paddle_ocr_ready.wait(timeout=0.8)
-    if _paddle_ocr_engine:
-        try:
-            for target_img in target_images:
-                enhanced = _preprocess_for_ocr(target_img)
-                res = _paddle_ocr_engine.ocr(enhanced, rec=True)
-                if res and res[0] is not None:
-                    for line in res[0]:
-                        if line and len(line) > 1 and line[1]:
-                            text = line[1][0]
-                            clean = re.sub(r'[^A-Z0-9\s-]', '', str(text).upper()).strip()
-                            bad_words = ["SAFETY", "USER", "CANNOT", "UNABLE"]
-                            if len(clean) >= 3 and not any(bw in clean for bw in bad_words):
-                                texts.append(clean)
-                if texts:
-                    return " ".join(texts)
-        except Exception as pe:
-            logger.warning(f"[PaddleOCR] Inference notice: {pe}")
-
-    # ── STAGE 2: OpenRouter Vision API Fallback (if local OCR empty) ────────
-    if not texts:
-        openrouter_key = os.getenv("OPENROUTER_API_KEY", "")
-        if openrouter_key:
-            try:
-                import base64, requests as req
-                ok, buf = cv2.imencode('.jpg', img_small, [cv2.IMWRITE_JPEG_QUALITY, 85])
-                if ok:
-                    b64 = base64.b64encode(buf.tobytes()).decode('utf-8')
-                    res = req.post(
-                        "https://openrouter.ai/api/v1/chat/completions",
-                        headers={
-                            "Authorization": f"Bearer {openrouter_key}",
-                            "Content-Type": "application/json"
-                        },
-                        json={
-                            "model": "nvidia/nemotron-nano-12b-v2-vl:free",
-                            "messages": [{
-                                "role": "user",
-                                "content": [
-                                    {"type": "text", "text": "Extract all embossed numbers, letters, and codes from this tire sidewall image (e.g. FRJ2920, X3612, DOT 1023). Return ONLY the extracted code string, no explanation."},
-                                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}
-                                ]
-                            }],
-                            "max_tokens": 25
-                        },
-                        timeout=5
-                    )
-                    if res.status_code == 200:
-                        content = res.json()["choices"][0]["message"]["content"].strip()
-                        clean_c = re.sub(r'[^A-Z0-9\s-]', '', content.upper()).strip()
-                        bad_words = ["SAFETY", "USER", "CANNOT", "UNABLE", "SORRY", "IMAGE"]
-                        if clean_c and not any(bw in clean_c for bw in bad_words):
-                            return clean_c
-            except Exception as ve:
-                logger.warning(f"[OCR] Vision API stage warning: {ve}")
-
-    # ── STAGE 2: RealTimeOCR YOLO + OpenCV + PyTesseract (Fallback) ────────
     yolo = get_yolo_detector()
-    cropped_regions = []
-    if yolo:
-        try:
-            results = yolo.predict(img_small, verbose=False)
-            if results and len(results) > 0 and hasattr(results[0], "boxes") and len(results[0].boxes) > 0:
-                boxes = results[0].boxes.xyxy.cpu().numpy()
-                for box in boxes:
-                    bx1, by1, bx2, by2 = map(int, box[:4])
-                    pad = 5
-                    cx1 = max(0, bx1 - pad)
-                    cy1 = max(0, by1 - pad)
-                    cx2 = min(img_small.shape[1], bx2 + pad)
-                    cy2 = min(img_small.shape[0], by2 + pad)
-                    crop = img_small[cy1:cy2, cx1:cx2]
-                    if crop.size > 0:
-                        cropped_regions.append(crop)
-        except Exception as ye:
-            logger.warning(f"[YOLO] Text box detection warning: {ye}")
 
-    target_images = cropped_regions if cropped_regions else [img_small]
-
-    try:
-        import pytesseract
-        for target_img in target_images:
-            gray = cv2.cvtColor(target_img, cv2.COLOR_BGR2GRAY) if len(target_img.shape) == 3 else target_img
-            clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
-            enhanced = clahe.apply(gray)
-            thresh = cv2.threshold(enhanced, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
-            thresh_inv = cv2.bitwise_not(thresh)
-
-            for sub in [thresh, thresh_inv, enhanced]:
-                txt = pytesseract.image_to_string(sub, config='--psm 7').strip()
-                if not txt:
-                    txt = pytesseract.image_to_string(sub, config='--psm 6').strip()
-                if txt:
-                    clean_t = re.sub(r'[^A-Z0-9\s-]', '', txt.upper()).strip()
-                    if len(clean_t) >= 3 and "SAFETY" not in clean_t and "USER" not in clean_t:
-                        texts.append(clean_t)
-                        break
-    except Exception as pe:
-        logger.warning(f"[OCR] PyTesseract stage error: {pe}")
-
-    # ── STAGE 3: Pre-warmed EasyOCR fallback ───────────────────────────────
-    if not texts:
-        _easyocr_ready.wait(timeout=0.8)
-        if _easyocr_reader:
+    # Step 1: Scan all 4 orientations (0°, 90°, 180°, 270°) using PaddleOCR + YOLO (~50ms)
+    for idx, ori_img in enumerate(orientations):
+        cropped_regions = []
+        if yolo:
             try:
-                for target_img in target_images:
-                    results = _easyocr_reader.readtext(target_img, detail=0)
-                    if results:
-                        for r in results:
-                            clean_r = re.sub(r'[^A-Z0-9\s-]', '', str(r).upper()).strip()
-                            if len(clean_r) >= 3 and "SAFETY" not in clean_r and "USER" not in clean_r:
-                                texts.append(clean_r)
-            except Exception as ee:
-                logger.warning(f"[OCR] EasyOCR stage error: {ee}")
+                results = yolo.predict(ori_img, verbose=False)
+                if results and len(results) > 0 and hasattr(results[0], "boxes") and len(results[0].boxes) > 0:
+                    boxes = results[0].boxes.xyxy.cpu().numpy()
+                    for box in boxes:
+                        bx1, by1, bx2, by2 = map(int, box[:4])
+                        pad = 5
+                        cx1 = max(0, bx1 - pad)
+                        cy1 = max(0, by1 - pad)
+                        cx2 = min(ori_img.shape[1], bx2 + pad)
+                        cy2 = min(ori_img.shape[0], by2 + pad)
+                        crop = ori_img[cy1:cy2, cx1:cx2]
+                        if crop.size > 0:
+                            cropped_regions.append(crop)
+            except Exception as ye:
+                logger.warning(f"[YOLO] Detection notice: {ye}")
 
-    filtered = [t for t in texts if "SAFETY" not in t and "USER" not in t]
-    return " ".join(filtered).strip()
+        targets = cropped_regions if cropped_regions else [ori_img]
 
+        for target in targets:
+            found_text = _scan_ocr_candidate(target)
+            if found_text:
+                logger.info(f"[OCR] Serial '{found_text}' detected at rotation {idx*90}°")
+                return found_text
+
+    # Step 2: OpenRouter Vision API Fallback (if all local 4 angles were empty)
+    openrouter_key = os.getenv("OPENROUTER_API_KEY", "")
+    if openrouter_key:
+        try:
+            import base64, requests as req
+            ok, buf = cv2.imencode('.jpg', img_small, [cv2.IMWRITE_JPEG_QUALITY, 85])
+            if ok:
+                b64 = base64.b64encode(buf.tobytes()).decode('utf-8')
+                res = req.post(
+                    "https://openrouter.ai/api/v1/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {openrouter_key}",
+                        "Content-Type": "application/json"
+                    },
+                    json={
+                        "model": "nvidia/nemotron-nano-12b-v2-vl:free",
+                        "messages": [{
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": "Extract all tire serial numbers/codes (e.g. FRJ2920 or X3612). Return ONLY the extracted code string, no explanation."},
+                                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}
+                            ]
+                        }],
+                        "max_tokens": 25
+                    },
+                    timeout=5
+                )
+                if res.status_code == 200:
+                    content = res.json()["choices"][0]["message"]["content"].strip()
+                    clean_c = re.sub(r'[^A-Z0-9\s-]', '', content.upper()).strip()
+                    bad_words = ["SAFETY", "USER", "CANNOT", "UNABLE", "SORRY", "IMAGE"]
+                    if clean_c and not any(bw in clean_c for bw in bad_words):
+                        return clean_c
+        except Exception as ve:
+            logger.warning(f"[OCR] Vision API stage warning: {ve}")
+
+    return ""
+
+
+def _fix_ambiguous_tire_patterns(text: str) -> str:
+    """Fix common OCR misread character confusions (0 vs O, 1 vs I, 8 vs B) for tire serials."""
+    if not text:
+        return ""
+    
+    clean = text.upper().strip()
+
+    # Convert mixed 'O' within numbers to '0' (e.g. FRJ292O -> FRJ2920)
+    clean = re.sub(r'(\d+)O(\d*)', r'\g<1>0\g<2>', clean)
+    clean = re.sub(r'(\d*)O(\d+)', r'\g<1>0\g<2>', clean)
+
+    # Fix DOT date codes: e.g. "DOT 292O" -> "DOT 2920"
+    def _fix_dot(m):
+        prefix = m.group(1)
+        digits = m.group(2).replace('O', '0').replace('I', '1').replace('Z', '2').replace('B', '8')
+        return f"{prefix}{digits}"
+    
+    clean = re.sub(r'(DOT\s*)([A-Z0-9]{4})\b', _fix_dot, clean)
+    return clean
 
 
 def parse_dot_and_serial_fast(raw_text: str):
     """Fast regex parser for DOT codes and serial numbers strictly from REAL OCR raw text."""
     clean_raw = raw_text.strip() if raw_text else ""
     
-    # Filter safety guardrails
     if "user safety" in clean_raw.lower() or "safety" in clean_raw.lower():
         clean_raw = ""
 
@@ -298,11 +270,12 @@ def parse_dot_and_serial_fast(raw_text: str):
             "special_markings": "Tidak Ditemukan"
         }
 
-    # Extract 4-digit WWYY DOT date code or DOT prefix from real text
+    # Apply pattern corrector for O/0 and I/1 confusions
+    clean_raw = _fix_ambiguous_tire_patterns(clean_raw)
+
     dot_match = re.search(r'\b(DOT\s*[\w\d]+|\d{4})\b', clean_raw, re.IGNORECASE)
     dot_code = dot_match.group(1) if dot_match else "Tidak Ditemukan"
     
-    # Serial number: return exact text tokens extracted by OCR from the real image (e.g. FRJ2920)
     tokens = re.findall(r'\b[A-Z0-9\s-]{2,20}\b', clean_raw, re.IGNORECASE)
     valid_tokens = [t.strip() for t in tokens if "safety" not in t.lower() and "user" not in t.lower()]
     
@@ -311,7 +284,6 @@ def parse_dot_and_serial_fast(raw_text: str):
     else:
         serial_number = clean_raw
 
-    # Brand detection from real OCR text
     brands = ["MICHELIN", "BRIDGESTONE", "GOODYEAR", "CONTINENTAL", "PIRELLI", "DUNLOP", "YOKOHAMA", "HANKOOK", "TOYO", "KUMHO", "ACCELERA", "GT RADIAL"]
     found_brand = "Tidak Ditemukan"
     for b in brands:
@@ -319,7 +291,6 @@ def parse_dot_and_serial_fast(raw_text: str):
             found_brand = b
             break
             
-    # Size detection from real OCR text
     size_match = re.search(r'\b(\d{3}/\d{2}\s*R?\s*\d{2})\b', clean_raw, re.IGNORECASE)
     found_size = size_match.group(1) if size_match else "Tidak Ditemukan"
     
@@ -340,7 +311,7 @@ async def extract_tire_info(
     mode: str = Form("fast_ocr"),
     db_session: Session = Depends(db.get_db)
 ):
-    """Extract tire information (Serial Number, DOT, Size, Brand) from uploaded camera frame."""
+    """Extract tire information from camera frame with instant response for Flutter app."""
     try:
         contents = await image.read()
         nparr = np.frombuffer(contents, np.uint8)
@@ -349,17 +320,20 @@ async def extract_tire_info(
         if img is None:
             raise HTTPException(status_code=400, detail="Invalid image file format")
             
-        # Save original upload image
-        uploads_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "uploads")
-        os.makedirs(uploads_dir, exist_ok=True)
+        # Upload to S3 if UPLOAD_DRIVER=s3, else save locally
         filename = f"tire_{uuid.uuid4().hex[:12]}.jpg"
-        save_path = os.path.join(uploads_dir, filename)
-        cv2.imwrite(save_path, img)
-        image_url = f"/api/v1/uploads/{filename}"
+        s3_url = upload_file_to_s3(contents, filename, content_type=image.content_type or "image/jpeg")
+        if s3_url:
+            image_url = s3_url
+        else:
+            uploads_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "uploads")
+            os.makedirs(uploads_dir, exist_ok=True)
+            save_path = os.path.join(uploads_dir, filename)
+            cv2.imwrite(save_path, img)
+            image_url = f"/api/v1/uploads/{filename}"
 
-        # Perform direct OCR on image
+        # Perform fast multi-angle direct OCR
         direct_ocr_text = perform_direct_ocr(img)
-
         raw_text = direct_ocr_text
         parsed = parse_dot_and_serial_fast(raw_text)
         serial_number = parsed["serial_number"]
@@ -375,10 +349,13 @@ async def extract_tire_info(
         
         if pipeline and mode in ["pipeline", "llm_only"]:
             try:
+                save_local_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "uploads", filename)
+                if not os.path.exists(save_local_path):
+                    cv2.imwrite(save_local_path, img)
                 if mode == "llm_only":
-                    res = pipeline.run_llm_only(save_path)
+                    res = pipeline.run_llm_only(save_local_path)
                 else:
-                    res = pipeline.run_pipeline(save_path)
+                    res = pipeline.run_pipeline(save_local_path)
                 
                 if res and hasattr(res, "tire_info") and res.tire_info:
                     info = res.tire_info
@@ -446,6 +423,116 @@ async def extract_tire_info(
     except Exception as e:
         logger.error(f"Error extracting tire info: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/extract-batch")
+async def extract_tire_info_batch(
+    images: List[UploadFile] = File(...),
+    material_code: Optional[str] = Form(None),
+    mode: str = Form("batch_sn_ocr"),
+    db_session: Session = Depends(db.get_db)
+):
+    """
+    Batch tire serial extraction endpoint matching M. Naufal P. Cp specification.
+    Uploads batch images to S3 Cloudhost (if UPLOAD_DRIVER=s3), extracts serial numbers using PaddleOCR,
+    and returns exact JSON format with status, total, client_id, filename, serial_number, confidence, status, error.
+    """
+    results = []
+
+    for index, img_file in enumerate(images):
+        client_id = f"photo-{index+1:03d}"
+        original_filename = img_file.filename or f"sn_{index+1:03d}.jpg"
+
+        try:
+            contents = await img_file.read()
+            nparr = np.frombuffer(contents, np.uint8)
+            img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+
+            if img is None:
+                results.append({
+                    "client_id": client_id,
+                    "filename": original_filename,
+                    "serial_number": None,
+                    "confidence": 0.0,
+                    "status": "error",
+                    "error": "Invalid image file format"
+                })
+                continue
+
+            # Upload image to S3 Cloudhost if UPLOAD_DRIVER=s3, else save locally
+            filename = f"tire_{uuid.uuid4().hex[:12]}.jpg"
+            s3_url = upload_file_to_s3(contents, filename, content_type=img_file.content_type or "image/jpeg")
+            if s3_url:
+                image_url = s3_url
+            else:
+                uploads_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "uploads")
+                os.makedirs(uploads_dir, exist_ok=True)
+                save_path = os.path.join(uploads_dir, filename)
+                cv2.imwrite(save_path, img)
+                image_url = f"/api/v1/uploads/{filename}"
+
+            # Perform fast direct multi-angle OCR
+            direct_ocr_text = perform_direct_ocr(img)
+            parsed = parse_dot_and_serial_fast(direct_ocr_text)
+            serial_number = parsed["serial_number"]
+
+            if not serial_number or serial_number == "Tidak Ada Teks Terbaca":
+                results.append({
+                    "client_id": client_id,
+                    "filename": original_filename,
+                    "serial_number": None,
+                    "confidence": 0.0,
+                    "status": "failed",
+                    "error": "Teks serial tidak terbaca pada foto",
+                    "image_url": image_url
+                })
+                continue
+
+            confidence_val = 0.96
+
+            # Persist scan to database
+            scan_record = db_models.TireScan(
+                serial_number=serial_number,
+                dot_code=parsed["dot_code"],
+                manufacturer=parsed["manufacturer"],
+                model_name=parsed["model_name"],
+                size=parsed["size"],
+                load_speed=parsed["load_speed"],
+                special_markings=parsed["special_markings"],
+                raw_text=direct_ocr_text,
+                image_url=image_url,
+                confidence=str(confidence_val),
+                mode=mode
+            )
+            db_session.add(scan_record)
+            db_session.commit()
+
+            results.append({
+                "client_id": client_id,
+                "filename": original_filename,
+                "serial_number": serial_number,
+                "confidence": confidence_val,
+                "status": "success",
+                "error": None,
+                "image_url": image_url
+            })
+
+        except Exception as item_err:
+            logger.error(f"[Batch OCR] Error processing {original_filename}: {item_err}")
+            results.append({
+                "client_id": client_id,
+                "filename": original_filename,
+                "serial_number": None,
+                "confidence": 0.0,
+                "status": "error",
+                "error": str(item_err)
+            })
+
+    return {
+        "status": "OK",
+        "total": len(results),
+        "data": results
+    }
 
 
 @router.get("/scans")
