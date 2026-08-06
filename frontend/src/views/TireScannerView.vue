@@ -231,7 +231,7 @@ const processUploadedFile = async () => {
     const compressedBlob = await compressImageForUpload(uploadFile.value, 800, 0.70)
     const formData = new FormData()
     formData.append('image', compressedBlob, 'upload.jpg')
-    formData.append('mode', 'pipeline')
+    formData.append('mode', 'fast_ocr')
     
     const res = await fetch(`${API_BASE_URL}/api/v1/tire/extract`, {
       method: 'POST',

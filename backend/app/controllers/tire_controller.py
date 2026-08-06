@@ -123,8 +123,10 @@ def _preprocess_for_ocr(img: np.ndarray) -> np.ndarray:
 
 
 def _scan_ocr_candidate(img_frame: np.ndarray) -> str:
-    """Helper to run PaddleOCR + Top-Hat contrast enhancement on a candidate frame."""
+    """Helper to run PaddleOCR + PyTesseract on candidate frames."""
     enhanced = _preprocess_for_ocr(img_frame)
+
+    # 1. Try PaddleOCR on enhanced image
     if _paddle_ocr_engine:
         try:
             res = _paddle_ocr_engine.ocr(enhanced, rec=True)
@@ -137,7 +139,35 @@ def _scan_ocr_candidate(img_frame: np.ndarray) -> str:
                         if len(clean) >= 3 and not any(bw in clean for bw in bad_words):
                             return clean
         except Exception as pe:
-            logger.warning(f"[PaddleOCR] Candidate notice: {pe}")
+            logger.warning(f"[PaddleOCR] Enhanced pass notice: {pe}")
+
+        # 2. Try PaddleOCR on raw unenhanced frame
+        try:
+            res = _paddle_ocr_engine.ocr(img_frame, rec=True)
+            if res and res[0] is not None:
+                for line in res[0]:
+                    if line and len(line) > 1 and line[1]:
+                        text = line[1][0]
+                        clean = re.sub(r'[^A-Z0-9\s-]', '', str(text).upper()).strip()
+                        bad_words = ["SAFETY", "USER", "CANNOT", "UNABLE"]
+                        if len(clean) >= 3 and not any(bw in clean for bw in bad_words):
+                            return clean
+        except Exception:
+            pass
+
+    # 3. Fallback to PyTesseract OCR Engine (installed in Docker OS)
+    try:
+        import pytesseract
+        text_tess = pytesseract.image_to_string(enhanced, config='--psm 6')
+        clean_tess = re.sub(r'[^A-Z0-9\s-]', '', str(text_tess).upper()).strip()
+        bad_words = ["SAFETY", "USER", "CANNOT", "UNABLE"]
+        for line in clean_tess.split('\n'):
+            line_clean = line.strip()
+            if len(line_clean) >= 3 and not any(bw in line_clean for bw in bad_words):
+                return line_clean
+    except Exception as te:
+        logger.warning(f"[PyTesseract] Candidate notice: {te}")
+
     return ""
 
 
