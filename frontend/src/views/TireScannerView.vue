@@ -65,17 +65,28 @@ const startCamera = async () => {
   stopCamera()
   cameraError.value = ''
   try {
-    const constraints = {
-      video: selectedDeviceId.value ? { deviceId: { exact: selectedDeviceId.value } } : { facingMode: 'environment' }
+    let videoConstraint = { facingMode: 'environment' }
+    if (selectedDeviceId.value && selectedDeviceId.value !== '') {
+      videoConstraint = { deviceId: { exact: selectedDeviceId.value } }
     }
-    const stream = await navigator.mediaDevices.getUserMedia(constraints)
+    
+    let stream
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ video: videoConstraint })
+    } catch (e) {
+      console.warn('Exact device constraint failed, falling back to default video stream:', e)
+      stream = await navigator.mediaDevices.getUserMedia({ video: true })
+    }
+
     if (videoRef.value) {
       videoRef.value.srcObject = stream
-      videoRef.value.onloadedmetadata = () => {
-        videoRef.value.play().catch(e => console.log('Play notice:', e))
-      }
+      videoRef.value.play().catch(() => {})
       isCameraActive.value = true
     }
+
+    // Refresh camera devices list with proper labels
+    const mediaDevices = await navigator.mediaDevices.enumerateDevices()
+    devices.value = mediaDevices.filter(d => d.kind === 'videoinput')
   } catch (err) {
     console.error('Failed to start camera:', err)
     cameraError.value = 'Failed to open camera: ' + (err.message || 'Permission denied')
@@ -156,7 +167,6 @@ const captureAndExtractFrame = async (mode = 'fast_ocr') => {
   const video = videoRef.value
   const canvas = canvasRef.value
   
-  // Resize canvas to max 800px width for fast field transmission
   let w = video.videoWidth || 640
   let h = video.videoHeight || 480
   if (w > 800) {
@@ -188,12 +198,21 @@ const captureAndExtractFrame = async (mode = 'fast_ocr') => {
       
       if (data.status === 'success' && data.data) {
         const sn = data.data.serial_number || ''
-        if (sn && sn !== 'Tidak Ada Teks Terbaca' && !sn.toLowerCase().includes('safety') && !sn.toLowerCase().includes('tidak')) {
-          latestScan.value = data.data
+        const dot = data.data.dot_code || ''
+        const raw = data.data.raw_text || ''
+
+        const validText = (sn && sn !== 'Tidak Ada Teks Terbaca' && !sn.toLowerCase().includes('tidak')) ? sn :
+                          (dot && dot !== 'Tidak Ditemukan' && !dot.toLowerCase().includes('tidak')) ? dot :
+                          (raw && raw !== 'Tidak Ada Teks Terbaca' && !raw.toLowerCase().includes('safety')) ? raw : ''
+
+        if (validText) {
+          latestScan.value = {
+            ...data.data,
+            serial_number: validText
+          }
           playBeep()
           fetchLogs()
           
-          // Cooldown trigger to prevent double scanning identical frame
           scanCooldown.value = true
           setTimeout(() => {
             scanCooldown.value = false
