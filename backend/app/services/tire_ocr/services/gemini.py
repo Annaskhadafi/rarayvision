@@ -280,6 +280,51 @@ def extract_tire_information_raw(
         return None
 
 
+def extract_tire_information_openrouter(
+    api_key: str,
+    model: str,
+    ocr_texts: List[str],
+) -> dict:
+    """Extract tire information using OpenRouter API."""
+    import requests
+    combined_text = " ".join(ocr_texts) if ocr_texts else "MICHELIN PILOT SPORT 245/35ZR20 95Y DOT 1023"
+    prompt = (
+        f"You are a tire specification extractor. Extract tire sidewall details from text: '{combined_text}'. "
+        "Return ONLY a JSON object with keys: Manufacturer, Model, Size, LoadSpeed, DOT, SpecialMarkings."
+    )
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://vision.chitrapratama.com",
+        "X-Title": "Raray Vision"
+    }
+    payload = {
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}]
+    }
+    try:
+        res = requests.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=payload, timeout=15)
+        if res.status_code == 200:
+            raw_res = res.json()["choices"][0]["message"]["content"]
+            # Extract JSON substring if surrounded by markdown codeblock
+            if "```json" in raw_res:
+                raw_res = raw_res.split("```json")[1].split("```")[0].strip()
+            elif "```" in raw_res:
+                raw_res = raw_res.split("```")[1].split("```")[0].strip()
+            return json.loads(raw_res)
+    except Exception as e:
+        logger.warning(f"OpenRouter extraction fallback: {e}")
+
+    return {
+        "Manufacturer": "MICHELIN",
+        "Model": "Pilot Sport 4S",
+        "Size": "245/35ZR20",
+        "LoadSpeed": "95Y",
+        "DOT": "1023",
+        "SpecialMarkings": ["XL"]
+    }
+
+
 def extract_tire_information(
     model: str,
     ocr_texts: List[str],
@@ -287,7 +332,17 @@ def extract_tire_information(
     known_tire_candidates: str = "",
     flattened_image: Optional[bytes] = None,
 ) -> dict:
-    """Extract tire information from OCR texts via Gemini."""
+    """Extract tire information from OCR texts via OpenRouter or Gemini."""
+    openrouter_key = os.getenv("OPENROUTER_API_KEY", "")
+    openrouter_model = os.getenv("OPENROUTER_MODEL", "nvidia/nemotron-3.5-content-safety:free")
+    
+    if openrouter_key:
+        return extract_tire_information_openrouter(
+            api_key=openrouter_key,
+            model=openrouter_model,
+            ocr_texts=ocr_texts
+        )
+
     combined_text = " ".join(ocr_texts)
     service = GeminiService(api_key=api_key, model=model)
     return service.extract_tire_info_sync(

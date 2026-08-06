@@ -60,6 +60,11 @@ class TireExtractionConfig:
     # Logging configuration
     LOGGING_LEVEL = "INFO"
 
+    # OpenRouter API configuration
+    OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
+    OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "nvidia/nemotron-3.5-content-safety:free")
+    LLM_PROVIDER = os.getenv("LLM_PROVIDER", "openrouter")
+
     # Google Gemini API configuration
     GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
     GEMINI_MODEL = "gemini-2.5-flash"
