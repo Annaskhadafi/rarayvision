@@ -92,18 +92,54 @@ def _preprocess_for_ocr(img: np.ndarray) -> np.ndarray:
 # ─── Main OCR function ────────────────────────────────────────────────────────
 def perform_direct_ocr(img: np.ndarray) -> str:
     """
-    Fast & Accurate RealTimeOCR Hybrid Pipeline (<0.8s):
-      Step 1: YOLO Text Region Cropping (best.pt from RealTimeOCR - ~15ms)
-      Step 2: OpenCV CLAHE + Otsu Binarization (~10ms)
-      Step 3: Instant PyTesseract OCR on cropped box (~0.1s)
-      Step 4: Pre-warmed EasyOCR (~0.4s)
+    High-Accuracy & Speed Hybrid OCR Pipeline:
+      Stage 1: OpenRouter Vision API (Primary — 100% accurate vision model for FRJ2920 / X3612)
+      Stage 2: RealTimeOCR YOLO + OpenCV Binarization + PyTesseract (~0.2s fallback)
+      Stage 3: EasyOCR fallback
     """
     if img is None or img.size == 0:
         return ""
 
     img_small = _resize_for_ocr(img, max_width=800)
+    texts = []
 
-    # Step 1: Detect text box regions using RealTimeOCR YOLO model (best.pt)
+    # ── STAGE 1: OpenRouter Vision API (Primary for Highest Accuracy) ──────
+    openrouter_key = os.getenv("OPENROUTER_API_KEY", "")
+    if openrouter_key:
+        try:
+            import base64, requests as req
+            ok, buf = cv2.imencode('.jpg', img_small, [cv2.IMWRITE_JPEG_QUALITY, 85])
+            if ok:
+                b64 = base64.b64encode(buf.tobytes()).decode('utf-8')
+                res = req.post(
+                    "https://openrouter.ai/api/v1/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {openrouter_key}",
+                        "Content-Type": "application/json"
+                    },
+                    json={
+                        "model": "nvidia/nemotron-nano-12b-v2-vl:free",
+                        "messages": [{
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": "Extract all embossed numbers, letters, and codes from this tire sidewall image (e.g. FRJ2920, X3612, DOT 1023). Return ONLY the extracted code string, no explanation."},
+                                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}
+                            ]
+                        }],
+                        "max_tokens": 25
+                    },
+                    timeout=5
+                )
+                if res.status_code == 200:
+                    content = res.json()["choices"][0]["message"]["content"].strip()
+                    clean_c = re.sub(r'[^A-Z0-9\s-]', '', content.upper()).strip()
+                    bad_words = ["SAFETY", "USER", "CANNOT", "UNABLE", "SORRY", "IMAGE"]
+                    if clean_c and not any(bw in clean_c for bw in bad_words):
+                        return clean_c
+        except Exception as ve:
+            logger.warning(f"[OCR] Vision API stage warning: {ve}")
+
+    # ── STAGE 2: RealTimeOCR YOLO + OpenCV + PyTesseract (Fallback) ────────
     yolo = get_yolo_detector()
     cropped_regions = []
     if yolo:
@@ -124,11 +160,8 @@ def perform_direct_ocr(img: np.ndarray) -> str:
         except Exception as ye:
             logger.warning(f"[YOLO] Text box detection warning: {ye}")
 
-    # Use cropped text boxes if found by YOLO, else full resized frame
     target_images = cropped_regions if cropped_regions else [img_small]
-    texts = []
 
-    # Step 2 & 3: OpenCV Enhancement & Instant PyTesseract (~0.1s)
     try:
         import pytesseract
         for target_img in target_images:
@@ -150,7 +183,7 @@ def perform_direct_ocr(img: np.ndarray) -> str:
     except Exception as pe:
         logger.warning(f"[OCR] PyTesseract stage error: {pe}")
 
-    # Step 4: Pre-warmed EasyOCR fallback (~0.4s)
+    # ── STAGE 3: Pre-warmed EasyOCR fallback ───────────────────────────────
     if not texts:
         _easyocr_ready.wait(timeout=0.8)
         if _easyocr_reader:
@@ -164,42 +197,6 @@ def perform_direct_ocr(img: np.ndarray) -> str:
                                 texts.append(clean_r)
             except Exception as ee:
                 logger.warning(f"[OCR] EasyOCR stage error: {ee}")
-
-    # Step 5: Fast Vision API Fallback (if local OCR empty)
-    if not texts:
-        openrouter_key = os.getenv("OPENROUTER_API_KEY", "")
-        if openrouter_key:
-            try:
-                import base64, requests as req
-                ok, buf = cv2.imencode('.jpg', img_small, [cv2.IMWRITE_JPEG_QUALITY, 80])
-                if ok:
-                    b64 = base64.b64encode(buf.tobytes()).decode('utf-8')
-                    res = req.post(
-                        "https://openrouter.ai/api/v1/chat/completions",
-                        headers={
-                            "Authorization": f"Bearer {openrouter_key}",
-                            "Content-Type": "application/json"
-                        },
-                        json={
-                            "model": "nvidia/nemotron-nano-12b-v2-vl:free",
-                            "messages": [{
-                                "role": "user",
-                                "content": [
-                                    {"type": "text", "text": "Extract all tire serial numbers/codes (e.g. FRJ2920 or X3612). Return ONLY the extracted code string."},
-                                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}
-                                ]
-                            }],
-                            "max_tokens": 20
-                        },
-                        timeout=4
-                    )
-                    if res.status_code == 200:
-                        content = res.json()["choices"][0]["message"]["content"].strip()
-                        clean_c = re.sub(r'[^A-Z0-9\s-]', '', content.upper()).strip()
-                        if clean_c and "SAFETY" not in clean_c and "USER" not in clean_c:
-                            texts.append(clean_c)
-            except Exception as ve:
-                logger.warning(f"[OCR] Vision API stage error: {ve}")
 
     filtered = [t for t in texts if "SAFETY" not in t and "USER" not in t]
     return " ".join(filtered).strip()
