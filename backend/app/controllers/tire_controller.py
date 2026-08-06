@@ -131,13 +131,15 @@ def _scan_ocr_candidate(img_frame: np.ndarray) -> str:
         try:
             res = _paddle_ocr_engine.ocr(enhanced, rec=True)
             if res and res[0] is not None:
+                lines = []
                 for line in res[0]:
                     if line and len(line) > 1 and line[1]:
-                        text = line[1][0]
-                        clean = re.sub(r'[^A-Z0-9\s-]', '', str(text).upper()).strip()
-                        bad_words = ["SAFETY", "USER", "CANNOT", "UNABLE"]
-                        if len(clean) >= 3 and not any(bw in clean for bw in bad_words):
-                            return clean
+                        lines.append(str(line[1][0]))
+                if lines:
+                    combined_text = " ".join(lines)
+                    clean = re.sub(r'[^A-Z0-9\s-]', '', combined_text.upper()).strip()
+                    if clean:
+                        return clean
         except Exception as pe:
             logger.warning(f"[PaddleOCR] Enhanced pass notice: {pe}")
 
@@ -145,26 +147,25 @@ def _scan_ocr_candidate(img_frame: np.ndarray) -> str:
         try:
             res = _paddle_ocr_engine.ocr(img_frame, rec=True)
             if res and res[0] is not None:
+                lines = []
                 for line in res[0]:
                     if line and len(line) > 1 and line[1]:
-                        text = line[1][0]
-                        clean = re.sub(r'[^A-Z0-9\s-]', '', str(text).upper()).strip()
-                        bad_words = ["SAFETY", "USER", "CANNOT", "UNABLE"]
-                        if len(clean) >= 3 and not any(bw in clean for bw in bad_words):
-                            return clean
+                        lines.append(str(line[1][0]))
+                if lines:
+                    combined_text = " ".join(lines)
+                    clean = re.sub(r'[^A-Z0-9\s-]', '', combined_text.upper()).strip()
+                    if clean:
+                        return clean
         except Exception:
             pass
 
-    # 3. Fallback to PyTesseract OCR Engine (installed in Docker OS)
+    # 3. Fallback to PyTesseract OCR Engine
     try:
         import pytesseract
         text_tess = pytesseract.image_to_string(enhanced, config='--psm 6')
         clean_tess = re.sub(r'[^A-Z0-9\s-]', '', str(text_tess).upper()).strip()
-        bad_words = ["SAFETY", "USER", "CANNOT", "UNABLE"]
-        for line in clean_tess.split('\n'):
-            line_clean = line.strip()
-            if len(line_clean) >= 3 and not any(bw in line_clean for bw in bad_words):
-                return line_clean
+        if clean_tess:
+            return clean_tess
     except Exception as te:
         logger.warning(f"[PyTesseract] Candidate notice: {te}")
 
@@ -191,7 +192,7 @@ def perform_direct_ocr(img: np.ndarray) -> str:
 
     orientations = [rot_0, rot_90, rot_180, rot_270]
 
-    _paddle_ocr_ready.wait(timeout=0.8)
+    _paddle_ocr_ready.wait(timeout=2.0)
     yolo = get_yolo_detector()
 
     # Step 1: Scan all 4 orientations (0°, 90°, 180°, 270°) using PaddleOCR + YOLO (~50ms)
@@ -204,7 +205,7 @@ def perform_direct_ocr(img: np.ndarray) -> str:
                     boxes = results[0].boxes.xyxy.cpu().numpy()
                     for box in boxes:
                         bx1, by1, bx2, by2 = map(int, box[:4])
-                        pad = 5
+                        pad = 10
                         cx1 = max(0, bx1 - pad)
                         cy1 = max(0, by1 - pad)
                         cx2 = min(ori_img.shape[1], bx2 + pad)
@@ -215,13 +216,16 @@ def perform_direct_ocr(img: np.ndarray) -> str:
             except Exception as ye:
                 logger.warning(f"[YOLO] Detection notice: {ye}")
 
-        targets = cropped_regions if cropped_regions else [ori_img]
+        # Scan BOTH cropped regions AND full orientation image to ensure 100% detection
+        targets = cropped_regions + [ori_img]
 
         for target in targets:
             found_text = _scan_ocr_candidate(target)
             if found_text:
-                logger.info(f"[OCR] Serial '{found_text}' detected at rotation {idx*90}°")
-                return found_text
+                parsed = parse_dot_and_serial_fast(found_text)
+                if parsed["serial_number"] and parsed["serial_number"] != "Tidak Ada Teks Terbaca":
+                    logger.info(f"[OCR] Serial '{parsed['serial_number']}' detected at rotation {idx*90}°")
+                    return found_text
 
     # Step 2: OpenRouter Vision API Fallback (if all local 4 angles were empty)
     openrouter_key = os.getenv("OPENROUTER_API_KEY", "")
