@@ -13,10 +13,13 @@ services:
       SECRET_KEY: rarayvision-secret-key-2026-chitraparatama-prod
       ALGORITHM: HS256
       ACCESS_TOKEN_EXPIRE_MINUTES: "10080"
-      ALLOWED_ORIGINS: https://vision.chitraparatama.com
+      ALLOWED_ORIGINS: https://vision.chitrapratama.com,https://vision.chitraparatama.com,http://localhost:3800
       RARAY_VISION_EMAIL: mochamad.khadafi@chitraparatama.co.id
       RARAY_VISION_PASSWORD: Wusthochq2018-
-      RARAY_VISION_BASE_URL: https://vision.chitraparatama.com
+      RARAY_VISION_BASE_URL: https://vision.chitrapratama.com
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY}
+      OPENROUTER_MODEL: nvidia/nemotron-nano-12b-v2-vl:free
+      LLM_PROVIDER: openrouter
     volumes:
       - uploads_data:/app/backend/uploads
       - models_data:/app/backend/ml_models

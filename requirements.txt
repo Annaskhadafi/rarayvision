@@ -4,7 +4,7 @@ gunicorn
 python-socketio
 insightface
 onnxruntime
-opencv-python
+opencv-python-headless
 numpy
 python-multipart
 SQLAlchemy>=2.0.29
@@ -14,3 +14,13 @@ cryptography
 passlib[bcrypt]==1.7.4
 PyJWT==2.8.0
 python-dotenv
+torch
+torchvision
+ultralytics
+easyocr
+pytesseract
+requests
+pillow
+shapely
+pyclipper
+ninja
