@@ -145,15 +145,18 @@ const captureAndExtractFrame = async (mode = 'fast_ocr') => {
       const data = await res.json()
       
       if (data.status === 'success' && data.data) {
-        latestScan.value = data.data
-        playBeep()
-        fetchLogs()
-        
-        // Cooldown trigger to prevent double scanning identical frame
-        scanCooldown.value = true
-        setTimeout(() => {
-          scanCooldown.value = false
-        }, 2000)
+        const sn = data.data.serial_number || ''
+        if (sn && sn !== 'Tidak Ada Teks Terbaca' && !sn.toLowerCase().includes('safety') && !sn.toLowerCase().includes('tidak')) {
+          latestScan.value = data.data
+          playBeep()
+          fetchLogs()
+          
+          // Cooldown trigger to prevent double scanning identical frame
+          scanCooldown.value = true
+          setTimeout(() => {
+            scanCooldown.value = false
+          }, 2000)
+        }
       }
     } catch (e) {
       console.error('Extraction request failed:', e)
