@@ -233,19 +233,28 @@ const processUploadedFile = async () => {
     formData.append('image', compressedBlob, 'upload.jpg')
     formData.append('mode', 'fast_ocr')
     
+    const controller = new AbortController()
+    const timeoutId = setTimeout(() => controller.abort(), 10000)
+
     const res = await fetch(`${API_BASE_URL}/api/v1/tire/extract`, {
       method: 'POST',
-      body: formData
+      body: formData,
+      signal: controller.signal
     })
+    clearTimeout(timeoutId)
+
     const data = await res.json()
     if (data.status === 'success' && data.data) {
       latestScan.value = data.data
       playBeep()
-      fetchLogs()
+      await fetchLogs()
       activeTab.value = 'logs'
     }
   } catch (e) {
     console.error('File upload extraction error:', e)
+    if (e.name === 'AbortError') {
+      alert('OCR request timed out (10s limit). Please check server connection.')
+    }
   } finally {
     isUploading.value = false
   }
@@ -433,7 +442,7 @@ onUnmounted(() => {
       </div>
 
       <button v-if="uploadFile" class="btn btn-primary mt-4" :disabled="isUploading" @click="processUploadedFile">
-        {{ isUploading ? 'Processing Pipeline...' : 'Run Pipeline Extraction' }}
+        {{ isUploading ? 'Extracting OCR...' : 'Run Fast OCR Extraction' }}
       </button>
     </div>
 
