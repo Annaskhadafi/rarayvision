@@ -57,11 +57,13 @@ const initCamera = async () => {
     await startCamera()
   } catch (err) {
     console.error('Camera access error:', err)
+    cameraError.value = 'Browser blocked camera access. Please check permissions.'
   }
 }
 
 const startCamera = async () => {
   stopCamera()
+  cameraError.value = ''
   try {
     const constraints = {
       video: selectedDeviceId.value ? { deviceId: { exact: selectedDeviceId.value } } : { facingMode: 'environment' }
@@ -69,10 +71,14 @@ const startCamera = async () => {
     const stream = await navigator.mediaDevices.getUserMedia(constraints)
     if (videoRef.value) {
       videoRef.value.srcObject = stream
+      videoRef.value.onloadedmetadata = () => {
+        videoRef.value.play().catch(e => console.log('Play notice:', e))
+      }
       isCameraActive.value = true
     }
   } catch (err) {
     console.error('Failed to start camera:', err)
+    cameraError.value = 'Failed to open camera: ' + (err.message || 'Permission denied')
     isCameraActive.value = false
   }
 }
@@ -88,11 +94,16 @@ const stopCamera = () => {
 }
 
 // Auto Scanner Loop
-const toggleAutoScan = () => {
+const toggleAutoScan = async () => {
   if (isAutoScanning.value) {
     stopAutoScan()
   } else {
-    startAutoScan()
+    if (!isCameraActive.value) {
+      await startCamera()
+    }
+    if (isCameraActive.value) {
+      startAutoScan()
+    }
   }
 }
 
@@ -326,6 +337,11 @@ onUnmounted(() => {
           </div>
         </div>
 
+        <div class="camera-alert" v-if="cameraError" style="margin: 10px 0; padding: 12px; background: rgba(239, 68, 68, 0.15); border: 1px solid #ef4444; color: #f87171; border-radius: 8px; font-size: 0.9rem; display: flex; align-items: center; justify-content: space-between;">
+          <span>⚠ {{ cameraError }}</span>
+          <button class="btn btn-secondary" style="padding: 4px 10px; font-size: 0.8rem;" @click="startCamera">Retry Camera</button>
+        </div>
+
         <div class="viewfinder">
           <video ref="videoRef" autoplay playsinline muted></video>
           <canvas ref="canvasRef" style="display: none;"></canvas>
@@ -392,7 +408,7 @@ onUnmounted(() => {
           </div>
 
           <div class="image-thumb" v-if="latestScan.image_url">
-            <img :src="`${API_BASE_URL}${latestScan.image_url}`" alt="Tire Crop" />
+            <img :src="formatImageUrl(latestScan.image_url)" alt="Tire Crop" />
           </div>
         </div>
 
@@ -443,7 +459,7 @@ onUnmounted(() => {
           <tbody>
             <tr v-for="scan in filteredLogs" :key="scan.id">
               <td>
-                <img v-if="scan.image_url" :src="`${API_BASE_URL}${scan.image_url}`" class="tbl-thumb" @click="selectedScanDetail = scan" />
+                <img v-if="scan.image_url" :src="formatImageUrl(scan.image_url)" class="tbl-thumb" @click="selectedScanDetail = scan" />
               </td>
               <td><span class="sn-tag">{{ scan.serial_number || scan.dot_code }}</span></td>
               <td><strong>{{ scan.manufacturer }}</strong></td>
