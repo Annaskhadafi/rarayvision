@@ -7,6 +7,7 @@ import logging
 import threading
 from typing import Optional, List
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
+from fastapi.responses import FileResponse, RedirectResponse
 from sqlalchemy.orm import Session
 
 from backend.app.database import database as db
@@ -585,3 +586,26 @@ def delete_tire_scan(scan_id: str, db_session: Session = Depends(db.get_db)):
     db_session.delete(s)
     db_session.commit()
     return {"status": "success", "message": "Record deleted successfully"}
+
+
+@router.get("/uploads/{filename}")
+def get_uploaded_image(filename: str):
+    """
+    Serve uploaded tire images cleanly:
+    1. If file exists on local disk (backend/uploads), return FileResponse.
+    2. Else (e.g. stored on S3 Cloudhost), redirect to S3 URL to avoid 404!
+    """
+    uploads_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "uploads")
+    local_path = os.path.join(uploads_dir, filename)
+
+    if os.path.exists(local_path):
+        return FileResponse(local_path, media_type="image/jpeg")
+
+    # Redirect to S3 Cloudhost URL if not on local disk
+    endpoint = os.getenv("OBJECT_STORAGE_ENDPOINT", "https://is3.cloudhost.id").rstrip('/')
+    bucket = os.getenv("OBJECT_STORAGE_BUCKET", "onechitra")
+    prefix = os.getenv("OBJECT_STORAGE_PREFIX", "upload")
+
+    s3_url = f"{endpoint}/{bucket}/{prefix}/{filename}"
+    return RedirectResponse(url=s3_url, status_code=302)
+
