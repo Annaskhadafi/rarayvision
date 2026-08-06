@@ -345,44 +345,34 @@ async def extract_tire_info(
         special_markings = parsed["special_markings"]
         confidence = "0.96"
 
-        pipeline = get_pipeline()
-        
-        if pipeline and mode in ["pipeline", "llm_only"]:
-            try:
-                save_local_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "uploads", filename)
-                if not os.path.exists(save_local_path):
-                    cv2.imwrite(save_local_path, img)
-                if mode == "llm_only":
-                    res = pipeline.run_llm_only(save_local_path)
-                else:
-                    res = pipeline.run_pipeline(save_local_path)
-                
-                if res and hasattr(res, "tire_info") and res.tire_info:
-                    info = res.tire_info
-                    if info.manufacturer and info.manufacturer.value != "Not found":
-                        manufacturer = info.manufacturer.value
-                    if info.model and info.model.value != "Not found":
-                        model_name = info.model.value
-                    if info.size and info.size.value != "Not found":
-                        size = info.size.value
-                    if info.load_speed and info.load_speed.value != "Not found":
-                        load_speed = info.load_speed.value
-                    if info.dot and info.dot.value != "Not found":
-                        dot_code = info.dot.value
-                        serial_number = f"DOT {dot_code}"
-            except Exception as pe:
-                logger.warning(f"Pipeline processing fallback: {pe}")
-                
-        elif mode == "fast_ocr":
-            # Fast OCR / Regex parsing
-            parsed = parse_dot_and_serial_fast(raw_text)
-            serial_number = parsed["serial_number"]
-            dot_code = parsed["dot_code"]
-            manufacturer = parsed["manufacturer"]
-            model_name = parsed["model_name"]
-            size = parsed["size"]
-            load_speed = parsed["load_speed"]
-            special_markings = parsed["special_markings"]
+        # If direct OCR already found serial number, skip heavy LLM pipeline to return instantly (<0.1s)
+        if not (serial_number and serial_number != "Tidak Ada Teks Terbaca"):
+            pipeline = get_pipeline()
+            if pipeline and mode in ["pipeline", "llm_only"]:
+                try:
+                    save_local_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "uploads", filename)
+                    if not os.path.exists(save_local_path):
+                        cv2.imwrite(save_local_path, img)
+                    if mode == "llm_only":
+                        res = pipeline.run_llm_only(save_local_path)
+                    else:
+                        res = pipeline.run_pipeline(save_local_path)
+                    
+                    if res and hasattr(res, "tire_info") and res.tire_info:
+                        info = res.tire_info
+                        if info.manufacturer and info.manufacturer.value != "Not found":
+                            manufacturer = info.manufacturer.value
+                        if info.model and info.model.value != "Not found":
+                            model_name = info.model.value
+                        if info.size and info.size.value != "Not found":
+                            size = info.size.value
+                        if info.load_speed and info.load_speed.value != "Not found":
+                            load_speed = info.load_speed.value
+                        if info.dot and info.dot.value != "Not found":
+                            dot_code = info.dot.value
+                            serial_number = f"DOT {dot_code}"
+                except Exception as pe:
+                    logger.warning(f"Pipeline processing fallback: {pe}")
 
         # Persist scan to database
         scan_record = db_models.TireScan(
