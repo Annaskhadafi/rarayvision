@@ -36,33 +36,33 @@ print("[*] Loading InsightFace Models...")
 try:
     face_app = FaceAnalysis(name='buffalo_l', providers=available_providers)
     face_app.prepare(ctx_id=0, det_size=(640, 640))
-    print("✅ InsightFace loaded successfully!")
+    print("[+] InsightFace loaded successfully!")
 except Exception as e:
-    print(f"❌ Failed to load InsightFace: {e}")
+    print(f"[-] Failed to load InsightFace: {e}")
 
 # --- 2. LOAD MODEL ANTI-SPOOFING & EMOTION (ONNX) ---
 spoof_session = None
 emotion_session = None
 
-print(f"⏳ Loading Anti-Spoofing Model ({ANTI_SPOOF_MODEL_PATH})...")
+print(f"[*] Loading Anti-Spoofing Model ({ANTI_SPOOF_MODEL_PATH})...")
 if os.path.exists(ANTI_SPOOF_MODEL_PATH):
     try:
         spoof_session = ort.InferenceSession(ANTI_SPOOF_MODEL_PATH, providers=available_providers)
-        print(f"✅ Anti-Spoofing ONNX loaded successfully!")
+        print(f"[+] Anti-Spoofing ONNX loaded successfully!")
     except Exception as e:
-        print(f"❌ Error saat load ONNX: {e}")
+        print(f"[-] Error saat load ONNX: {e}")
 else:
-    print(f"⚠️ PERINGATAN: File {ANTI_SPOOF_MODEL_PATH} TIDAK DITEMUKAN! Fitur Liveness akan menggunakan fallback sederhana.")
+    print(f"[!] PERINGATAN: File {ANTI_SPOOF_MODEL_PATH} TIDAK DITEMUKAN! Fitur Liveness akan menggunakan fallback sederhana.")
 
-print(f"⏳ Loading Emotion Model ({EMOTION_MODEL_PATH})...")
+print(f"[*] Loading Emotion Model ({EMOTION_MODEL_PATH})...")
 if os.path.exists(EMOTION_MODEL_PATH):
     try:
         emotion_session = ort.InferenceSession(EMOTION_MODEL_PATH, providers=available_providers)
-        print("✅ Emotion ONNX loaded successfully!")
+        print("[+] Emotion ONNX loaded successfully!")
     except Exception as e:
-        print(f"❌ Error saat load Emotion Model: {e}")
+        print(f"[-] Error saat load Emotion Model: {e}")
 else:
-    print(f"⚠️ PERINGATAN: File {EMOTION_MODEL_PATH} TIDAK DITEMUKAN!")
+    print(f"[!] PERINGATAN: File {EMOTION_MODEL_PATH} TIDAK DITEMUKAN!")
 
 # Thread Pool untuk memproses gambar di background
 thread_pool = ThreadPoolExecutor(max_workers=4)
