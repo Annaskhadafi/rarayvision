@@ -62,7 +62,7 @@ class TireExtractionConfig:
 
     # OpenRouter API configuration
     OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
-    OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "nvidia/nemotron-nano-12b-v2-vl:free")
+    OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "google/gemma-4-26b-a4b-it:free")
     LLM_PROVIDER = os.getenv("LLM_PROVIDER", "openrouter")
 
     # Google Gemini API configuration

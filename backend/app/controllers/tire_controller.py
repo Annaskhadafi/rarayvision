@@ -94,7 +94,7 @@ def perform_direct_ocr(img: np.ndarray) -> str:
                     "Content-Type": "application/json"
                 }
                 payload = {
-                    "model": os.getenv("OPENROUTER_MODEL", "nvidia/nemotron-nano-12b-v2-vl:free"),
+                    "model": os.getenv("OPENROUTER_MODEL", "google/gemma-4-26b-a4b-it:free"),
                     "messages": [{
                         "role": "user",
                         "content": [
