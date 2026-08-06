@@ -44,3 +44,25 @@ class Face(Base):
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
 
     user = relationship("User", back_populates="faces")
+    tire_scans = relationship("TireScan", back_populates="user", cascade="all, delete-orphan")
+
+class TireScan(Base):
+    __tablename__ = "tire_scans"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    serial_number = Column(String(255), index=True, nullable=True)
+    dot_code = Column(String(100), index=True, nullable=True)
+    manufacturer = Column(String(255), nullable=True)
+    model_name = Column(String(255), nullable=True)
+    size = Column(String(255), nullable=True)
+    load_speed = Column(String(100), nullable=True)
+    special_markings = Column(Text, nullable=True)
+    raw_text = Column(Text, nullable=True)
+    image_url = Column(String(500), nullable=True)
+    confidence = Column(String(50), default="0.95")
+    mode = Column(String(50), default="pipeline")
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+
+    user = relationship("User", back_populates="tire_scans")
+

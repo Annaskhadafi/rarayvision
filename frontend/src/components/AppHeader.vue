@@ -54,6 +54,7 @@ const goTo = (path) => {
         <a v-if="store.isLoggedIn" href="#" :class="{ active: $route.path === '/users' }" @click.prevent="goTo('/users')">Users</a>
         <a v-if="store.isLoggedIn" href="#" :class="{ active: $route.path === '/tester' }" @click.prevent="goTo('/tester')">Tester</a>
         <a v-if="store.isLoggedIn" href="#" :class="{ active: $route.path === '/live' }" @click.prevent="goTo('/live')">Live</a>
+        <a v-if="store.isLoggedIn" href="#" :class="{ active: $route.path === '/tires' }" @click.prevent="goTo('/tires')">Tire OCR</a>
         <a href="#" :class="{ active: $route.path === '/about' }" @click.prevent="goTo('/about')">About</a>
         <!-- Docs dropdown -->
         <div class="docs-menu-wrap" style="position: relative; display: inline-flex;">
@@ -109,6 +110,7 @@ const goTo = (path) => {
         <a v-if="store.isLoggedIn" href="#" @click.prevent="goTo('/users')">Users</a>
         <a v-if="store.isLoggedIn" href="#" @click.prevent="goTo('/tester')">Tester</a>
         <a v-if="store.isLoggedIn" href="#" @click.prevent="goTo('/live')">Live</a>
+        <a v-if="store.isLoggedIn" href="#" @click.prevent="goTo('/tires')">Tire OCR</a>
         <a href="#" @click.prevent="goTo('/about')">About</a>
         <!-- Docs links in mobile menu -->
 

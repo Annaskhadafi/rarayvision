@@ -6,6 +6,7 @@ import TesterView from './views/TesterView.vue'
 import LiveView from './views/LiveView.vue'
 import AboutView from './views/AboutView.vue'
 import InstallationView from './views/InstallationView.vue'
+import TireScannerView from './views/TireScannerView.vue'
 
 const routes = [
   { path: '/', redirect: '/login' },
@@ -26,6 +27,11 @@ const routes = [
   {
     path: '/live',
     component: LiveView,
+    meta: { requiresAuth: true }
+  },
+  {
+    path: '/tires',
+    component: TireScannerView,
     meta: { requiresAuth: true }
   },
   {

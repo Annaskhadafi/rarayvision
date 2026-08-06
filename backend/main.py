@@ -138,11 +138,14 @@ async def filter_openapi_schema(request: Request, call_next):
             return JSONResponse(content=json.loads(body), status_code=response.status_code)
     return response
 
+from backend.app.controllers import auth_controller, api_key_controller, face_controller, tire_controller
+
 # Include Routers
 fastapi_app.include_router(auth_controller.router)
 fastapi_app.include_router(api_key_controller.router)
 fastapi_app.include_router(face_controller.router)
 fastapi_app.include_router(hero_attendance_controller.router)
+fastapi_app.include_router(tire_controller.router)
 
 _FAVICON = "/api/v1/uploads/favicon.png"
 

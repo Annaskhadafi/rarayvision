@@ -27,12 +27,12 @@ import onnxruntime as ort_check
 available_providers = ['CPUExecutionProvider']
 if 'CUDAExecutionProvider' in ort_check.get_available_providers():
     available_providers = ['CUDAExecutionProvider', 'CPUExecutionProvider']
-    print("🚀 CUDA GPU Detected! Running ML models on GPU.")
+    print("[+] CUDA GPU Detected! Running ML models on GPU.")
 else:
-    print("💻 No GPU detected. Running ML models on CPU.")
+    print("[i] No GPU detected. Running ML models on CPU.")
 
 # --- 1. LOAD MODEL DETEKSI WAJAH (InsightFace) ---
-print("⏳ Loading InsightFace Models...")
+print("[*] Loading InsightFace Models...")
 try:
     face_app = FaceAnalysis(name='buffalo_l', providers=available_providers)
     face_app.prepare(ctx_id=0, det_size=(640, 640))
