@@ -48,11 +48,22 @@ def perform_direct_ocr(img: np.ndarray) -> str:
     """Perform direct OCR reading from cropped or full tire image."""
     texts = []
     
-    # 1. EasyOCR
+    # Preprocess image for embossed rubber text: Grayscale + CLAHE + Threshold
+    try:
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if len(img.shape) == 3 else img
+        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+        enhanced_gray = clahe.apply(gray)
+        thresh_img = cv2.threshold(enhanced_gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
+    except Exception as ie:
+        logger.warning(f"Image preprocessing warning: {ie}")
+        enhanced_gray = img
+        thresh_img = img
+
+    # 1. EasyOCR on original and enhanced image
     reader = get_easyocr_reader()
     if reader:
         try:
-            results = reader.readtext(img, detail=0)
+            results = reader.readtext(enhanced_gray, detail=0)
             if results:
                 texts.extend([str(r).strip() for r in results if r])
         except Exception as e:
@@ -62,9 +73,9 @@ def perform_direct_ocr(img: np.ndarray) -> str:
     if not texts:
         try:
             import pytesseract
-            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-            thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
-            tess_text = pytesseract.image_to_string(thresh, config='--psm 6').strip()
+            tess_text = pytesseract.image_to_string(thresh_img, config='--psm 7').strip()
+            if not tess_text:
+                tess_text = pytesseract.image_to_string(enhanced_gray, config='--psm 6').strip()
             if tess_text:
                 texts.append(tess_text)
         except Exception as e:
@@ -83,11 +94,11 @@ def perform_direct_ocr(img: np.ndarray) -> str:
                     "Content-Type": "application/json"
                 }
                 payload = {
-                    "model": os.getenv("OPENROUTER_MODEL", "nvidia/nemotron-3.5-content-safety:free"),
+                    "model": os.getenv("OPENROUTER_MODEL", "nvidia/nemotron-nano-12b-v2-vl:free"),
                     "messages": [{
                         "role": "user",
                         "content": [
-                            {"type": "text", "text": "Extract all serial numbers, numbers, and text visible in this tire sidewall image. Return ONLY the extracted text."},
+                            {"type": "text", "text": "Read all embossed numbers and letters on this tire sidewall (e.g. FRJ2920 or X3612). Return ONLY the extracted text string."},
                             {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}
                         ]
                     }]
@@ -95,18 +106,24 @@ def perform_direct_ocr(img: np.ndarray) -> str:
                 res = requests.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=payload, timeout=10)
                 if res.status_code == 200:
                     vis_text = res.json()["choices"][0]["message"]["content"].strip()
-                    if vis_text:
+                    if vis_text and "user safety" not in vis_text.lower() and "safe" not in vis_text.lower():
                         texts.append(vis_text)
         except Exception as ve:
             logger.warning(f"OpenRouter Vision error: {ve}")
 
-    return " ".join(texts).strip()
+    # Filter out safety guardrail responses
+    filtered_texts = [t for t in texts if "user safety" not in t.lower() and "safety" not in t.lower()]
+    return " ".join(filtered_texts).strip()
 
 
 def parse_dot_and_serial_fast(raw_text: str):
     """Fast regex parser for DOT codes and serial numbers strictly from REAL OCR raw text."""
     clean_raw = raw_text.strip() if raw_text else ""
     
+    # Filter safety guardrails
+    if "user safety" in clean_raw.lower() or "safety" in clean_raw.lower():
+        clean_raw = ""
+
     if not clean_raw:
         return {
             "serial_number": "Tidak Ada Teks Terbaca",
@@ -122,10 +139,12 @@ def parse_dot_and_serial_fast(raw_text: str):
     dot_match = re.search(r'\b(DOT\s*[\w\d]+|\d{4})\b', clean_raw, re.IGNORECASE)
     dot_code = dot_match.group(1) if dot_match else "Tidak Ditemukan"
     
-    # Serial number: return exact text tokens extracted by OCR from the real image
+    # Serial number: return exact text tokens extracted by OCR from the real image (e.g. FRJ2920)
     tokens = re.findall(r'\b[A-Z0-9\s-]{2,20}\b', clean_raw, re.IGNORECASE)
-    if tokens:
-        serial_number = max(tokens, key=len).strip()
+    valid_tokens = [t.strip() for t in tokens if "safety" not in t.lower() and "user" not in t.lower()]
+    
+    if valid_tokens:
+        serial_number = max(valid_tokens, key=len).strip()
     else:
         serial_number = clean_raw
 
