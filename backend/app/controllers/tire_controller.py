@@ -106,19 +106,21 @@ def _resize_for_ocr(img: np.ndarray, max_width: int = 800) -> np.ndarray:
 
 
 def _preprocess_for_ocr(img: np.ndarray) -> np.ndarray:
-    """Enhanced Morphological Top-Hat & CLAHE Preprocessing for Dark Embossed Black Rubber Tires."""
+    """Razor-sharp CLAHE + Bilateral Noise Removal for Embossed Rubber Tire Letters (Preserves strokes like F, R, J)."""
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if len(img.shape) == 3 else img
     
-    # 1. CLAHE contrast enhancement
-    clahe = cv2.createCLAHE(clipLimit=4.0, tileGridSize=(8, 8))
-    enhanced = clahe.apply(gray)
+    # 1. Bilateral filter to smooth rubber noise while preserving sharp letter edges
+    denoised = cv2.bilateralFilter(gray, d=5, sigmaColor=50, sigmaSpace=50)
 
-    # 2. Top-Hat Filter to highlight 3D raised embossed rubber letters
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (15, 15))
+    # 2. CLAHE contrast enhancement
+    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+    enhanced = clahe.apply(denoised)
+
+    # 3. Mild 5x5 kernel for subtle 3D letter contrast without distorting F, R, J strokes into digits
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
     tophat = cv2.morphologyEx(enhanced, cv2.MORPH_TOPHAT, kernel)
     
-    # 3. Combine Top-Hat with CLAHE for sharp contrast on dark rubber
-    combined = cv2.addWeighted(enhanced, 0.6, tophat, 0.4, 0)
+    combined = cv2.addWeighted(enhanced, 0.7, tophat, 0.3, 0)
     return combined
 
 
@@ -296,18 +298,28 @@ GENERIC_TIRE_WORDS = {
 
 
 def extract_best_serial_number(raw_text: str) -> str:
-    """Extract strictly high-accuracy tire serial numbers or DOT codes, filtering out generic sidewall words."""
+    """Extract strictly high-accuracy tire serial numbers, prioritizing Alphanumeric formats (e.g. FRJ2920, X3612)."""
     if not raw_text:
         return "Tidak Ada Teks Terbaca"
 
     clean_text = raw_text.upper().strip()
 
-    # Priority 1: Pure 5 to 14 digit serial number (e.g. 20060315794)
+    # Priority 1: Alphanumeric serial format (e.g. FRJ2920, FRJ 2920, MXL24000125)
+    alphanumeric_match = re.search(r'\b([A-Z]{2,4}\s*\d{3,6})\b', clean_text)
+    if alphanumeric_match:
+        return alphanumeric_match.group(1).replace(" ", "")
+
+    # Priority 2: Pure 5 to 14 digit serial number (e.g. 20060315794)
     pure_digits = re.findall(r'\b\d{5,14}\b', clean_text)
     if pure_digits:
         return max(pure_digits, key=len)
 
-    # Priority 2: Alphanumeric Serial Codes containing digits (e.g. MXL24000125, FRJ2920, X3612)
+    # Priority 3: Short Alphanumeric format (e.g. X3612 or X 3612)
+    short_alpha = re.search(r'\b([A-Z]\s*\d{3,5})\b', clean_text)
+    if short_alpha:
+        return short_alpha.group(1).replace(" ", "")
+
+    # Priority 4: Generic Alphanumeric candidate with digits
     alpha_num = re.findall(r'\b[A-Z0-9\s-]{4,16}\b', clean_text)
     valid_candidates = []
     for token in alpha_num:
@@ -321,7 +333,7 @@ def extract_best_serial_number(raw_text: str) -> str:
     if valid_candidates:
         return max(valid_candidates, key=len)
 
-    # Priority 3: DOT date code (e.g. DOT 2920)
+    # Priority 5: DOT date code (e.g. DOT 2920)
     dot_match = re.search(r'\b(DOT\s*[A-Z0-9]{4,10}|\d{4})\b', clean_text)
     if dot_match:
         return dot_match.group(1).strip()
