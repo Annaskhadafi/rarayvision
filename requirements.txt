@@ -14,13 +14,12 @@ cryptography
 passlib[bcrypt]==1.7.4
 PyJWT==2.8.0
 python-dotenv
-torch
-torchvision
 ultralytics
 easyocr
 pytesseract
 paddlepaddle
 paddleocr
+boto3
 requests
 pillow
 shapely

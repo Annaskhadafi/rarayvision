@@ -2,7 +2,7 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# Install system dependencies required by OpenCV, Tesseract OCR Engine, PyTorch, and ONNX
+# Install system dependencies for OpenCV, Tesseract, PyTorch, PaddleOCR, and ONNX
 RUN apt-get update && apt-get install -y --no-install-recommends \
     tesseract-ocr \
     tesseract-ocr-eng \
@@ -14,11 +14,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxrender-dev \
     libgomp1 \
     curl \
+    build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy requirements and install with CPU PyTorch index fallback
+# Install CPU-only PyTorch first to save disk space and RAM during Docker build
+RUN pip install --no-cache-dir torch torchvision --index-url https://download.pytorch.org/whl/cpu
+
+# Copy requirements and install remaining dependencies
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cpu
+RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application code
 COPY . .
