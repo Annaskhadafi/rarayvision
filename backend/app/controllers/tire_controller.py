@@ -104,10 +104,20 @@ def _resize_for_ocr(img: np.ndarray, max_width: int = 800) -> np.ndarray:
 
 
 def _preprocess_for_ocr(img: np.ndarray) -> np.ndarray:
-    """CLAHE contrast enhancement for embossed dark rubber text."""
+    """Enhanced Morphological Top-Hat & CLAHE Preprocessing for Dark Embossed Black Rubber Tires."""
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if len(img.shape) == 3 else img
-    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
-    return clahe.apply(gray)
+    
+    # 1. CLAHE contrast enhancement
+    clahe = cv2.createCLAHE(clipLimit=4.0, tileGridSize=(8, 8))
+    enhanced = clahe.apply(gray)
+
+    # 2. Top-Hat Filter to highlight 3D raised embossed rubber letters
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (15, 15))
+    tophat = cv2.morphologyEx(enhanced, cv2.MORPH_TOPHAT, kernel)
+    
+    # 3. Combine Top-Hat with CLAHE for sharp contrast on dark rubber
+    combined = cv2.addWeighted(enhanced, 0.6, tophat, 0.4, 0)
+    return combined
 
 
 # ─── Main OCR function ────────────────────────────────────────────────────────

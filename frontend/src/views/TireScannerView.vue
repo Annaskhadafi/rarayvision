@@ -114,6 +114,29 @@ const stopAutoScan = () => {
   }
 }
 
+// Fast Client-Side Image Compression for Field Mobile Networks (<30KB payload)
+const compressImageForUpload = (file, maxWidth = 800, quality = 0.70) => {
+  return new Promise((resolve) => {
+    const img = new Image()
+    img.src = URL.createObjectURL(file)
+    img.onload = () => {
+      let width = img.width
+      let height = img.height
+      if (width > maxWidth) {
+        height = Math.round((height * maxWidth) / width)
+        width = maxWidth
+      }
+      const canvas = document.createElement('canvas')
+      canvas.width = width
+      canvas.height = height
+      const ctx = canvas.getContext('2d')
+      ctx.drawImage(img, 0, 0, width, height)
+      canvas.toBlob((blob) => resolve(blob), 'image/jpeg', quality)
+    }
+    img.onerror = () => resolve(file)
+  })
+}
+
 // Frame Capture & API Dispatch
 const captureAndExtractFrame = async (mode = 'fast_ocr') => {
   if (!videoRef.value || !canvasRef.value) return
@@ -121,11 +144,19 @@ const captureAndExtractFrame = async (mode = 'fast_ocr') => {
   isProcessing.value = true
   const video = videoRef.value
   const canvas = canvasRef.value
-  canvas.width = video.videoWidth || 640
-  canvas.height = video.videoHeight || 480
+  
+  // Resize canvas to max 800px width for fast field transmission
+  let w = video.videoWidth || 640
+  let h = video.videoHeight || 480
+  if (w > 800) {
+    h = Math.round((h * 800) / w)
+    w = 800
+  }
+  canvas.width = w
+  canvas.height = h
   
   const ctx = canvas.getContext('2d')
-  ctx.drawImage(video, 0, 0, canvas.width, canvas.height)
+  ctx.drawImage(video, 0, 0, w, h)
   
   canvas.toBlob(async (blob) => {
     if (!blob) {
@@ -163,7 +194,7 @@ const captureAndExtractFrame = async (mode = 'fast_ocr') => {
     } finally {
       isProcessing.value = false
     }
-  }, 'image/jpeg', 0.85)
+  }, 'image/jpeg', 0.70)
 }
 
 // File Upload Handler
@@ -179,11 +210,12 @@ const processUploadedFile = async () => {
   if (!uploadFile.value) return
   isUploading.value = true
   
-  const formData = new FormData()
-  formData.append('image', uploadFile.value)
-  formData.append('mode', 'pipeline')
-  
   try {
+    const compressedBlob = await compressImageForUpload(uploadFile.value, 800, 0.70)
+    const formData = new FormData()
+    formData.append('image', compressedBlob, 'upload.jpg')
+    formData.append('mode', 'pipeline')
+    
     const res = await fetch(`${API_BASE_URL}/api/v1/tire/extract`, {
       method: 'POST',
       body: formData
