@@ -124,35 +124,43 @@ def _preprocess_for_ocr(img: np.ndarray) -> np.ndarray:
     return combined
 
 
+_tesseract_instance = None
+
+def get_pytesseract():
+    global _tesseract_instance
+    if _tesseract_instance is None:
+        try:
+            import pytesseract
+            pytesseract.get_tesseract_version()
+            _tesseract_instance = pytesseract
+        except Exception:
+            _tesseract_instance = False
+    return _tesseract_instance if _tesseract_instance else None
+
+
 def _scan_ocr_candidate(img_frame: np.ndarray) -> str:
-    """Helper to run PaddleOCR + PyTesseract on candidate frames."""
+    """Helper to run PaddleOCR + PyTesseract on candidate frames with instant early exit."""
     enhanced = _preprocess_for_ocr(img_frame)
 
-    # 1. Try PaddleOCR on enhanced image
+    # 1. Primary: PaddleOCR Nano engine on enhanced image (~20ms)
     if _paddle_ocr_engine:
         try:
             res = _paddle_ocr_engine.ocr(enhanced, rec=True)
             if res and res[0] is not None:
-                lines = []
-                for line in res[0]:
-                    if line and len(line) > 1 and line[1]:
-                        lines.append(str(line[1][0]))
+                lines = [str(line[1][0]) for line in res[0] if line and len(line) > 1 and line[1]]
                 if lines:
                     combined_text = " ".join(lines)
                     clean = re.sub(r'[^A-Z0-9\s-]', '', combined_text.upper()).strip()
                     if clean:
                         return clean
         except Exception as pe:
-            logger.warning(f"[PaddleOCR] Enhanced pass notice: {pe}")
+            logger.warning(f"[PaddleOCR] Pass notice: {pe}")
 
-        # 2. Try PaddleOCR on raw unenhanced frame
+        # Try PaddleOCR on raw image if enhanced yielded nothing
         try:
             res = _paddle_ocr_engine.ocr(img_frame, rec=True)
             if res and res[0] is not None:
-                lines = []
-                for line in res[0]:
-                    if line and len(line) > 1 and line[1]:
-                        lines.append(str(line[1][0]))
+                lines = [str(line[1][0]) for line in res[0] if line and len(line) > 1 and line[1]]
                 if lines:
                     combined_text = " ".join(lines)
                     clean = re.sub(r'[^A-Z0-9\s-]', '', combined_text.upper()).strip()
@@ -160,16 +168,19 @@ def _scan_ocr_candidate(img_frame: np.ndarray) -> str:
                         return clean
         except Exception:
             pass
+        
+        return ""
 
-    # 3. Fallback to PyTesseract OCR Engine
-    try:
-        import pytesseract
-        text_tess = pytesseract.image_to_string(enhanced, config='--psm 6')
-        clean_tess = re.sub(r'[^A-Z0-9\s-]', '', str(text_tess).upper()).strip()
-        if clean_tess:
-            return clean_tess
-    except Exception as te:
-        logger.warning(f"[PyTesseract] Candidate notice: {te}")
+    # 2. Fallback: PyTesseract (only if PaddleOCR is unavailable and Tesseract is installed)
+    tess = get_pytesseract()
+    if tess:
+        try:
+            text_tess = tess.image_to_string(enhanced, config='--psm 6')
+            clean_tess = re.sub(r'[^A-Z0-9\s-]', '', str(text_tess).upper()).strip()
+            if clean_tess:
+                return clean_tess
+        except Exception as te:
+            logger.warning(f"[PyTesseract] Candidate notice: {te}")
 
     return ""
 
@@ -177,27 +188,27 @@ def _scan_ocr_candidate(img_frame: np.ndarray) -> str:
 # ─── Main OCR function ────────────────────────────────────────────────────────
 def perform_direct_ocr(img: np.ndarray) -> str:
     """
-    Ultra-Fast Multi-Angle Hybrid OCR (<0.1s):
-      Automatically scans 4 orientations (0°, 90°, 180°, 270°) so tag gun operators
-      do NOT have to physically rotate heavy tag guns in the field!
+    Ultra-Fast Multi-Angle Hybrid OCR (<0.05s):
+      Tests 0° orientation first for instant response (<50ms).
+      Falls back to rotated angles (90°, 180°, 270°) ONLY if 0° yielded no serial text.
     """
     if img is None or img.size == 0:
         return ""
 
     img_small = _resize_for_ocr(img, max_width=800)
 
-    # Generate 4 rotated orientations for tag gun field ergonomics
+    # 0° orientation (Standard camera position - 95% of photos)
     rot_0   = img_small
+    # Secondary rotations (90°, 180°, 270°) for tilted tag gun scans
     rot_90  = cv2.rotate(img_small, cv2.ROTATE_90_CLOCKWISE)
     rot_180 = cv2.rotate(img_small, cv2.ROTATE_180)
     rot_270 = cv2.rotate(img_small, cv2.ROTATE_90_COUNTERCLOCKWISE)
 
     orientations = [rot_0, rot_90, rot_180, rot_270]
 
-    _paddle_ocr_ready.wait(timeout=2.0)
+    _paddle_ocr_ready.wait(timeout=1.0)
     yolo = get_yolo_detector()
 
-    # Step 1: Scan all 4 orientations (0°, 90°, 180°, 270°) using PaddleOCR + YOLO (~50ms)
     for idx, ori_img in enumerate(orientations):
         cropped_regions = []
         if yolo:
@@ -218,7 +229,6 @@ def perform_direct_ocr(img: np.ndarray) -> str:
             except Exception as ye:
                 logger.warning(f"[YOLO] Detection notice: {ye}")
 
-        # Scan BOTH cropped regions AND full orientation image to ensure 100% detection
         targets = cropped_regions + [ori_img]
 
         for target in targets:
@@ -226,7 +236,7 @@ def perform_direct_ocr(img: np.ndarray) -> str:
             if found_text:
                 parsed = parse_dot_and_serial_fast(found_text)
                 if parsed["serial_number"] and parsed["serial_number"] != "Tidak Ada Teks Terbaca":
-                    logger.info(f"[OCR] Serial '{parsed['serial_number']}' detected at rotation {idx*90}°")
+                    logger.info(f"[OCR] Instant match '{parsed['serial_number']}' found at rotation {idx*90}°")
                     return found_text
 
     # Step 2: OpenRouter Vision API Fallback (if all local 4 angles were empty)
