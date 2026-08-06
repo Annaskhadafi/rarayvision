@@ -34,26 +34,10 @@ def get_pipeline():
     return _pipeline_instance
 
 
-# ─── EasyOCR – pre-warmed in background thread at startup ────────────────────
-_easyocr_reader = None
+# ─── EasyOCR Disabled to save CPU & RAM on startup ─────────────────────────────
+_easyocr_reader = False
 _easyocr_ready = threading.Event()
-
-def _warmup_easyocr():
-    """Load EasyOCR model in background so first request is instant."""
-    global _easyocr_reader
-    try:
-        import easyocr
-        logger.info("[OCR] Pre-warming EasyOCR model...")
-        _easyocr_reader = easyocr.Reader(['en'], gpu=False, verbose=False)
-        _easyocr_ready.set()
-        logger.info("[OCR] EasyOCR ready!")
-    except Exception as e:
-        logger.warning(f"[OCR] EasyOCR warmup failed: {e}")
-        _easyocr_reader = False
-        _easyocr_ready.set()
-
-# Start background warmup immediately on module import
-threading.Thread(target=_warmup_easyocr, daemon=True).start()
+_easyocr_ready.set()
 
 
 # ─── RealTimeOCR YOLO Text Box Detector ───────────────────────────────────────
