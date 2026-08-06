@@ -4,6 +4,7 @@ import re
 import cv2
 import numpy as np
 import logging
+import threading
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from sqlalchemy.orm import Session
@@ -15,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/tire", tags=["Tire Sidewall OCR"])
 
-# Lazy pipeline singleton instance
+# ─── Pipeline singleton ───────────────────────────────────────────────────────
 _pipeline_instance = None
 
 def get_pipeline():
@@ -25,27 +26,35 @@ def get_pipeline():
             from app.services.tire_ocr.pipeline.core import TireImageProcessingPipeline
             _pipeline_instance = TireImageProcessingPipeline()
         except Exception as e:
-            logger.warning(f"Could not load ML pipeline models directly: {e}")
+            logger.warning(f"Could not load ML pipeline: {e}")
             _pipeline_instance = False
     return _pipeline_instance
 
 
+# ─── EasyOCR – pre-warmed in background thread at startup ────────────────────
 _easyocr_reader = None
+_easyocr_ready = threading.Event()
 
-def get_easyocr_reader():
+def _warmup_easyocr():
+    """Load EasyOCR model in background so first request is instant."""
     global _easyocr_reader
-    if _easyocr_reader is None:
-        try:
-            import easyocr
-            _easyocr_reader = easyocr.Reader(['en'], gpu=False)
-        except Exception as e:
-            logger.warning(f"EasyOCR not available: {e}")
-            _easyocr_reader = False
-    return _easyocr_reader
+    try:
+        import easyocr
+        logger.info("[OCR] Pre-warming EasyOCR model...")
+        _easyocr_reader = easyocr.Reader(['en'], gpu=False, verbose=False)
+        _easyocr_ready.set()
+        logger.info("[OCR] EasyOCR ready!")
+    except Exception as e:
+        logger.warning(f"[OCR] EasyOCR warmup failed: {e}")
+        _easyocr_reader = False
+        _easyocr_ready.set()
+
+# Start background warmup immediately on module import
+threading.Thread(target=_warmup_easyocr, daemon=True).start()
 
 
-def _resize_for_ocr(img: np.ndarray, max_width: int = 800) -> np.ndarray:
-    """Resize image to max_width for faster API transfer without quality loss."""
+# ─── Image helpers ────────────────────────────────────────────────────────────
+def _resize_for_ocr(img: np.ndarray, max_width: int = 1024) -> np.ndarray:
     h, w = img.shape[:2]
     if w > max_width:
         scale = max_width / w
@@ -53,77 +62,37 @@ def _resize_for_ocr(img: np.ndarray, max_width: int = 800) -> np.ndarray:
     return img
 
 
-def _preprocess_for_ocr(img: np.ndarray):
-    """Grayscale + CLAHE contrast enhancement for embossed tire text."""
+def _preprocess_for_ocr(img: np.ndarray) -> np.ndarray:
+    """CLAHE contrast enhancement for embossed dark rubber text."""
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if len(img.shape) == 3 else img
     clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
     return clahe.apply(gray)
 
 
+# ─── Main OCR function ────────────────────────────────────────────────────────
 def perform_direct_ocr(img: np.ndarray) -> str:
     """
-    Fast OCR pipeline — target <3 seconds:
-      1. OpenRouter Vision API (primary — fastest + most accurate ~1-2s)
-      2. EasyOCR (fallback — slow ~5-8s, only if no OpenRouter key)
+    Fast OCR — target <3 seconds.
+    Uses pre-warmed EasyOCR (0.5–1s after warmup).
+    No slow API calls in the hot path.
     """
-    # Resize image to keep API payload small & fast
-    img_small = _resize_for_ocr(img, max_width=800)
+    img_small = _resize_for_ocr(img, max_width=1024)
+    enhanced  = _preprocess_for_ocr(img_small)
 
-    openrouter_key = os.getenv("OPENROUTER_API_KEY", "")
+    # Wait max 2s for EasyOCR to be ready (it warms up in background at startup)
+    _easyocr_ready.wait(timeout=2.0)
 
-    # ── PRIMARY: OpenRouter Vision API ─────────────────────────────────────
-    if openrouter_key:
+    if _easyocr_reader:
         try:
-            import base64, requests as req
-            enhanced = _preprocess_for_ocr(img_small)
-            ok, buf = cv2.imencode('.jpg', enhanced, [cv2.IMWRITE_JPEG_QUALITY, 85])
-            if ok:
-                b64 = base64.b64encode(buf.tobytes()).decode('utf-8')
-                res = req.post(
-                    "https://openrouter.ai/api/v1/chat/completions",
-                    headers={
-                        "Authorization": f"Bearer {openrouter_key}",
-                        "Content-Type": "application/json"
-                    },
-                    json={
-                        "model": os.getenv("OPENROUTER_MODEL", "google/gemma-4-26b-a4b-it:free"),
-                        "messages": [{
-                            "role": "user",
-                            "content": [
-                                {"type": "text", "text": (
-                                    "This is a tire sidewall image. "
-                                    "Read ONLY the embossed alphanumeric serial number or DOT code visible (e.g. FRJ2920, X3612, DOT AB12 3456 1234). "
-                                    "Reply with ONLY the extracted characters. No explanation."
-                                )},
-                                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}
-                            ]
-                        }],
-                        "max_tokens": 30
-                    },
-                    timeout=8
-                )
-                if res.status_code == 200:
-                    content = res.json()["choices"][0]["message"]["content"].strip()
-                    # Reject guardrail / non-OCR responses
-                    bad_words = ["safety", "cannot", "unable", "sorry", "image", "sure", "here", "read"]
-                    if content and not any(w in content.lower() for w in bad_words):
-                        return content
-        except Exception as e:
-            logger.warning(f"OpenRouter Vision error: {e}")
-
-    # ── FALLBACK: EasyOCR (slow, only when no API key available) ───────────
-    reader = get_easyocr_reader()
-    if reader:
-        try:
-            enhanced = _preprocess_for_ocr(img_small)
-            results = reader.readtext(enhanced, detail=0)
+            results = _easyocr_reader.readtext(enhanced, detail=0)
             texts = [str(r).strip() for r in results if r and "safety" not in str(r).lower()]
             if texts:
                 return " ".join(texts)
         except Exception as e:
-            logger.warning(f"EasyOCR error: {e}")
+            logger.warning(f"[OCR] EasyOCR inference error: {e}")
 
     return ""
+
 
 
 def parse_dot_and_serial_fast(raw_text: str):
