@@ -57,39 +57,22 @@ const initCamera = async () => {
     await startCamera()
   } catch (err) {
     console.error('Camera access error:', err)
-    cameraError.value = 'Browser blocked camera access. Please check permissions.'
   }
 }
 
 const startCamera = async () => {
   stopCamera()
-  cameraError.value = ''
   try {
-    let videoConstraint = { facingMode: 'environment' }
-    if (selectedDeviceId.value && selectedDeviceId.value !== '') {
-      videoConstraint = { deviceId: { exact: selectedDeviceId.value } }
+    const constraints = {
+      video: selectedDeviceId.value ? { deviceId: { exact: selectedDeviceId.value } } : { facingMode: 'environment' }
     }
-    
-    let stream
-    try {
-      stream = await navigator.mediaDevices.getUserMedia({ video: videoConstraint })
-    } catch (e) {
-      console.warn('Exact device constraint failed, falling back to default video stream:', e)
-      stream = await navigator.mediaDevices.getUserMedia({ video: true })
-    }
-
+    const stream = await navigator.mediaDevices.getUserMedia(constraints)
     if (videoRef.value) {
       videoRef.value.srcObject = stream
-      videoRef.value.play().catch(() => {})
       isCameraActive.value = true
     }
-
-    // Refresh camera devices list with proper labels
-    const mediaDevices = await navigator.mediaDevices.enumerateDevices()
-    devices.value = mediaDevices.filter(d => d.kind === 'videoinput')
   } catch (err) {
     console.error('Failed to start camera:', err)
-    cameraError.value = 'Failed to open camera: ' + (err.message || 'Permission denied')
     isCameraActive.value = false
   }
 }
@@ -105,31 +88,30 @@ const stopCamera = () => {
 }
 
 // Auto Scanner Loop
-const toggleAutoScan = async () => {
+const toggleAutoScan = () => {
   if (isAutoScanning.value) {
     stopAutoScan()
   } else {
-    if (!isCameraActive.value) {
-      await startCamera()
-    }
-    if (isCameraActive.value) {
-      startAutoScan()
-    }
+    startAutoScan()
   }
 }
+
+const scanStatusText = ref('')
 
 const startAutoScan = () => {
   if (!isCameraActive.value) return
   isAutoScanning.value = true
+  scanStatusText.value = 'Auto Scanning...'
   scanIntervalId.value = setInterval(() => {
     if (!isProcessing.value && !scanCooldown.value) {
       captureAndExtractFrame('fast_ocr')
     }
-  }, 1000)
+  }, 600)
 }
 
 const stopAutoScan = () => {
   isAutoScanning.value = false
+  scanStatusText.value = ''
   if (scanIntervalId.value) {
     clearInterval(scanIntervalId.value)
     scanIntervalId.value = null
@@ -162,11 +144,18 @@ const compressImageForUpload = (file, maxWidth = 800, quality = 0.70) => {
 // Frame Capture & API Dispatch
 const captureAndExtractFrame = async (mode = 'fast_ocr') => {
   if (!videoRef.value || !canvasRef.value) return
-  
-  isProcessing.value = true
   const video = videoRef.value
+  
+  // Ensure video stream is playing and ready before capturing
+  if (video.readyState < 2 || video.videoWidth === 0 || video.paused) {
+    return
+  }
+
+  isProcessing.value = true
+  scanStatusText.value = 'Processing Frame...'
   const canvas = canvasRef.value
   
+  // Resize canvas to max 800px width for fast field transmission
   let w = video.videoWidth || 640
   let h = video.videoHeight || 480
   if (w > 800) {
@@ -198,29 +187,27 @@ const captureAndExtractFrame = async (mode = 'fast_ocr') => {
       
       if (data.status === 'success' && data.data) {
         const sn = data.data.serial_number || ''
-        const dot = data.data.dot_code || ''
         const raw = data.data.raw_text || ''
-
-        const validText = (sn && sn !== 'Tidak Ada Teks Terbaca' && !sn.toLowerCase().includes('tidak')) ? sn :
-                          (dot && dot !== 'Tidak Ditemukan' && !dot.toLowerCase().includes('tidak')) ? dot :
-                          (raw && raw !== 'Tidak Ada Teks Terbaca' && !raw.toLowerCase().includes('safety')) ? raw : ''
-
-        if (validText) {
-          latestScan.value = {
-            ...data.data,
-            serial_number: validText
-          }
+        
+        if (sn && sn !== 'Tidak Ada Teks Terbaca' && !sn.toLowerCase().includes('safety') && !sn.toLowerCase().includes('tidak')) {
+          latestScan.value = data.data
+          scanStatusText.value = `SUCCESS: ${sn}`
           playBeep()
           fetchLogs()
           
+          // Cooldown trigger to prevent double scanning identical frame
           scanCooldown.value = true
           setTimeout(() => {
             scanCooldown.value = false
+            if (isAutoScanning.value) scanStatusText.value = 'Auto Scanning...'
           }, 2000)
+        } else if (raw) {
+          scanStatusText.value = `Scanning: ${raw.slice(0, 20)}...`
         }
       }
     } catch (e) {
       console.error('Extraction request failed:', e)
+      scanStatusText.value = 'Connection error'
     } finally {
       isProcessing.value = false
     }
@@ -345,7 +332,7 @@ onUnmounted(() => {
         <div class="video-header">
           <div class="status-badge" :class="{ scanning: isAutoScanning, active: isCameraActive }">
             <span class="pulse-dot"></span>
-            {{ isAutoScanning ? (scanCooldown ? 'COOLDOWN (NEXT TIRE)' : 'AUTO SCANNING...') : (isCameraActive ? 'CAMERA READY' : 'CAMERA OFF') }}
+            {{ scanStatusText || (isAutoScanning ? (scanCooldown ? 'COOLDOWN (NEXT TIRE)' : 'AUTO SCANNING...') : (isCameraActive ? 'CAMERA READY' : 'CAMERA OFF')) }}
           </div>
           <div class="device-select" v-if="devices.length > 1">
             <select v-model="selectedDeviceId" @change="startCamera">
@@ -354,11 +341,6 @@ onUnmounted(() => {
               </option>
             </select>
           </div>
-        </div>
-
-        <div class="camera-alert" v-if="cameraError" style="margin: 10px 0; padding: 12px; background: rgba(239, 68, 68, 0.15); border: 1px solid #ef4444; color: #f87171; border-radius: 8px; font-size: 0.9rem; display: flex; align-items: center; justify-content: space-between;">
-          <span>⚠ {{ cameraError }}</span>
-          <button class="btn btn-secondary" style="padding: 4px 10px; font-size: 0.8rem;" @click="startCamera">Retry Camera</button>
         </div>
 
         <div class="viewfinder">
@@ -427,7 +409,7 @@ onUnmounted(() => {
           </div>
 
           <div class="image-thumb" v-if="latestScan.image_url">
-            <img :src="formatImageUrl(latestScan.image_url)" alt="Tire Crop" />
+            <img :src="`${API_BASE_URL}${latestScan.image_url}`" alt="Tire Crop" />
           </div>
         </div>
 
@@ -478,7 +460,7 @@ onUnmounted(() => {
           <tbody>
             <tr v-for="scan in filteredLogs" :key="scan.id">
               <td>
-                <img v-if="scan.image_url" :src="formatImageUrl(scan.image_url)" class="tbl-thumb" @click="selectedScanDetail = scan" />
+                <img v-if="scan.image_url" :src="`${API_BASE_URL}${scan.image_url}`" class="tbl-thumb" @click="selectedScanDetail = scan" />
               </td>
               <td><span class="sn-tag">{{ scan.serial_number || scan.dot_code }}</span></td>
               <td><strong>{{ scan.manufacturer }}</strong></td>
