@@ -49,6 +49,15 @@ const routes = [
     redirect: '/anydoc'
   },
   {
+    path: '/rag',
+    component: () => import('./views/RagKnowledgeView.vue'),
+    meta: { requiresAuth: true }
+  },
+  {
+    path: '/knowledge-base',
+    redirect: '/rag'
+  },
+  {
     path: '/anti-spoof',
     component: () => import('./views/AntiSpoofCompareView.vue'),
     meta: { requiresAuth: true }
