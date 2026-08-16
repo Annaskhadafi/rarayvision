@@ -25,6 +25,11 @@ const isIngesting = ref(false)
 const ingestSuccess = ref('')
 const ingestError = ref('')
 const isDragging = ref(false)
+const uploadProgressPercent = ref(0)
+const uploadStatsText = ref('')
+const processingStage = ref('idle') // 'idle', 'uploading', 'converting', 'storage', 'vectorizing', 'completed', 'error'
+const elapsedSeconds = ref(0)
+let timerInterval = null
 
 // External PostgreSQL State
 const externalDatabases = ref([])
@@ -154,19 +159,54 @@ const handleIngest = async () => {
   isIngesting.value = true
   ingestError.value = ''
   ingestSuccess.value = ''
+  uploadProgressPercent.value = 0
+  uploadStatsText.value = 'Menyiapkan berkas...'
+  processingStage.value = 'uploading'
+  elapsedSeconds.value = 0
+
+  if (timerInterval) clearInterval(timerInterval)
+  timerInterval = setInterval(() => {
+    elapsedSeconds.value = Number((elapsedSeconds.value + 0.5).toFixed(1))
+    if (processingStage.value === 'converting' && elapsedSeconds.value > 8) {
+      processingStage.value = 'storage'
+    }
+    if (processingStage.value === 'storage' && elapsedSeconds.value > 16) {
+      processingStage.value = 'vectorizing'
+    }
+  }, 500)
 
   try {
-    const res = await ragService.ingest(ingestFile.value, {
-      autoOcr: autoOcr.value,
-      forceOcr: forceOcr.value
-    })
-    ingestSuccess.value = `Berhasil! Dokumen "${res.filename}" telah diubah ke Markdown, disimpan di S3, dan diindeks menjadi ${res.total_chunks} vektor dalam ${res.processing_time_ms} ms.`
+    const res = await ragService.ingest(
+      ingestFile.value,
+      {
+        autoOcr: autoOcr.value,
+        forceOcr: forceOcr.value
+      },
+      (percent, loaded, total) => {
+        uploadProgressPercent.value = percent
+        const loadedMb = (loaded / (1024 * 1024)).toFixed(1)
+        const totalMb = (total / (1024 * 1024)).toFixed(1)
+        uploadStatsText.value = `${loadedMb} MB / ${totalMb} MB (${percent}%)`
+        if (percent >= 100) {
+          processingStage.value = 'converting'
+        }
+      }
+    )
+
+    processingStage.value = 'completed'
+    uploadProgressPercent.value = 100
+    ingestSuccess.value = `Berhasil! Dokumen "${res.filename}" (${res.word_count?.toLocaleString() || 0} kata) telah diubah ke Markdown, disimpan di S3, dan diindeks menjadi ${res.total_chunks} vektor dalam ${res.processing_time_ms} ms.`
     ingestFile.value = null
     await fetchLibrary()
   } catch (err) {
+    processingStage.value = 'error'
     ingestError.value = err.message || 'Gagal mengindeks dokumen ke basis pengetahuan.'
   } finally {
     isIngesting.value = false
+    if (timerInterval) {
+      clearInterval(timerInterval)
+      timerInterval = null
+    }
   }
 }
 
@@ -881,13 +921,64 @@ print("Sumber:", [s["filename"] for s in chat_res["data"]["sources"]])`
             </label>
           </div>
 
+          <!-- Active Progress Tracker Card -->
+          <div v-if="isIngesting" class="ingest-progress-card">
+            <div class="progress-header-row">
+              <div class="progress-title-col">
+                <span class="progress-step-title">
+                  <span v-if="processingStage === 'uploading'">📤 Mengunggah Berkas ke Server...</span>
+                  <span v-else-if="processingStage === 'converting'">📄 Mengekstrak Format & Tabel ke Markdown via AnyDoc...</span>
+                  <span v-else-if="processingStage === 'storage'">☁️ Mengunggah Arsip Dokumen ke S3 Object Storage...</span>
+                  <span v-else-if="processingStage === 'vectorizing'">🧠 Memotong Teks Semantik & Vektorisasi pgvector...</span>
+                  <span v-else>⚙️ Memproses Dokumen...</span>
+                </span>
+                <span class="progress-stats-sub">{{ uploadStatsText || `${uploadProgressPercent}%` }}</span>
+              </div>
+              <div class="progress-timer-col">
+                ⏱️ {{ elapsedSeconds }}s
+              </div>
+            </div>
+
+            <!-- Animated Progress Bar -->
+            <div class="progress-bar-track">
+              <div 
+                class="progress-bar-fill animated"
+                :style="{ width: `${processingStage === 'uploading' ? (uploadProgressPercent || 5) : (processingStage === 'converting' ? 50 : (processingStage === 'storage' ? 75 : 92))}%` }"
+              ></div>
+            </div>
+
+            <!-- Stage Steps Indicator -->
+            <div class="stage-steps-list">
+              <div :class="['stage-step', { done: processingStage !== 'uploading', active: processingStage === 'uploading' }]">
+                <span class="stage-dot">{{ processingStage !== 'uploading' ? '✓' : '1' }}</span>
+                <span>Upload File</span>
+              </div>
+              <div :class="['stage-step', { done: ['storage', 'vectorizing', 'completed'].includes(processingStage), active: processingStage === 'converting' }]">
+                <span class="stage-dot">{{ ['storage', 'vectorizing', 'completed'].includes(processingStage) ? '✓' : '2' }}</span>
+                <span>AnyDoc Markdown</span>
+              </div>
+              <div :class="['stage-step', { done: ['vectorizing', 'completed'].includes(processingStage), active: processingStage === 'storage' }]">
+                <span class="stage-dot">{{ ['vectorizing', 'completed'].includes(processingStage) ? '✓' : '3' }}</span>
+                <span>S3 Storage</span>
+              </div>
+              <div :class="['stage-step', { done: processingStage === 'completed', active: processingStage === 'vectorizing' }]">
+                <span class="stage-dot">{{ processingStage === 'completed' ? '✓' : '4' }}</span>
+                <span>pgvector Embed</span>
+              </div>
+            </div>
+
+            <p class="large-file-hint">
+              💡 <em>Dokumen berukuran besar diproses secara mendalam oleh AI engine. Mohon tetap berada di halaman ini hingga selesai.</em>
+            </p>
+          </div>
+
           <button 
             class="btn-submit" 
             :disabled="!ingestFile || isIngesting" 
             @click="handleIngest"
           >
             <span v-if="isIngesting" class="spinner"></span>
-            <span v-if="isIngesting">Memproses Dokumen & Vektorisasi...</span>
+            <span v-if="isIngesting">Sedang Memproses Dokumen ({{ elapsedSeconds }}s)...</span>
             <span v-else>🚀 Mulai Ingest & Vektorisasi Dokumen</span>
           </button>
         </div>
@@ -1824,6 +1915,140 @@ print("Sumber:", [s["filename"] for s in chat_res["data"]["sources"]])`
   font-size: 11.5px;
   color: #64748b;
   margin: 2px 0 0;
+}
+
+/* Ingest Progress Card */
+.ingest-progress-card {
+  background: #f8fafc;
+  border: 1.5px solid #bfdbfe;
+  border-radius: 10px;
+  padding: 16px;
+  margin-bottom: 16px;
+}
+
+.progress-header-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  margin-bottom: 10px;
+}
+
+.progress-title-col {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.progress-step-title {
+  font-size: 13.5px;
+  font-weight: 700;
+  color: #1e293b;
+}
+
+.progress-stats-sub {
+  font-size: 11.5px;
+  color: #2563eb;
+  font-weight: 600;
+}
+
+.progress-timer-col {
+  font-size: 12px;
+  font-weight: 700;
+  color: #475569;
+  background: #e2e8f0;
+  padding: 3px 8px;
+  border-radius: 6px;
+}
+
+.progress-bar-track {
+  width: 100%;
+  height: 10px;
+  background: #e2e8f0;
+  border-radius: 9999px;
+  overflow: hidden;
+  margin-bottom: 14px;
+}
+
+.progress-bar-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #2563eb, #3b82f6, #60a5fa);
+  border-radius: 9999px;
+  transition: width 0.3s ease;
+}
+
+.progress-bar-fill.animated {
+  background-size: 200% 100%;
+  animation: progressShimmer 2s linear infinite;
+}
+
+@keyframes progressShimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+.stage-steps-list {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+@media (max-width: 640px) {
+  .stage-steps-list {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+.stage-step {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11.5px;
+  color: #64748b;
+  font-weight: 600;
+}
+
+.stage-dot {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #cbd5e1;
+  color: #ffffff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  font-weight: 800;
+  flex-shrink: 0;
+}
+
+.stage-step.active {
+  color: #2563eb;
+}
+
+.stage-step.active .stage-dot {
+  background: #2563eb;
+  animation: pulseDot 1s infinite alternate;
+}
+
+.stage-step.done {
+  color: #16a34a;
+}
+
+.stage-step.done .stage-dot {
+  background: #16a34a;
+}
+
+@keyframes pulseDot {
+  from { transform: scale(1); }
+  to { transform: scale(1.15); }
+}
+
+.large-file-hint {
+  font-size: 11px;
+  color: #64748b;
+  margin: 0;
+  line-height: 1.4;
 }
 
 .btn-submit {

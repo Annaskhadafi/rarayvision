@@ -55,21 +55,60 @@ export const ragService = {
     return this._handleResponse(res)
   },
 
-  async ingest(file, { autoOcr = true, forceOcr = false, formatOverride = '' } = {}) {
-    const formData = new FormData()
-    formData.append('file', file)
-    formData.append('auto_ocr', autoOcr ? 'true' : 'false')
-    formData.append('force_ocr', forceOcr ? 'true' : 'false')
-    if (formatOverride) {
-      formData.append('format_override', formatOverride)
-    }
+  ingest(file, { autoOcr = true, forceOcr = false, formatOverride = '' } = {}, onUploadProgress = null) {
+    return new Promise((resolve, reject) => {
+      const formData = new FormData()
+      formData.append('file', file)
+      formData.append('auto_ocr', autoOcr ? 'true' : 'false')
+      formData.append('force_ocr', forceOcr ? 'true' : 'false')
+      if (formatOverride) {
+        formData.append('format_override', formatOverride)
+      }
 
-    const res = await fetch(`${API_BASE_URL}/api/v1/rag/ingest`, {
-      method: 'POST',
-      headers: this.getAuthHeaders(),
-      body: formData
+      const xhr = new XMLHttpRequest()
+      xhr.open('POST', `${API_BASE_URL}/api/v1/rag/ingest`)
+
+      const headers = this.getAuthHeaders()
+      for (const [key, value] of Object.entries(headers)) {
+        xhr.setRequestHeader(key, value)
+      }
+
+      if (onUploadProgress && xhr.upload) {
+        xhr.upload.onprogress = (event) => {
+          if (event.lengthComputable) {
+            const percent = Math.round((event.loaded / event.total) * 100)
+            onUploadProgress(percent, event.loaded, event.total)
+          }
+        }
+      }
+
+      xhr.onload = () => {
+        try {
+          const data = JSON.parse(xhr.responseText)
+          if (xhr.status >= 200 && xhr.status < 300) {
+            resolve(data)
+          } else {
+            reject(new Error(data.detail || data.message || `Request failed with status ${xhr.status}`))
+          }
+        } catch {
+          if (xhr.status >= 200 && xhr.status < 300) {
+            resolve({ status: 'success' })
+          } else {
+            reject(new Error(`Server returned HTTP ${xhr.status} (${xhr.statusText || 'Bad Gateway'}).`))
+          }
+        }
+      }
+
+      xhr.onerror = () => {
+        reject(new Error('Network error saat mengunggah file dokumen.'))
+      }
+
+      xhr.ontimeout = () => {
+        reject(new Error('Upload timeout: Koneksi terputus saat memproses dokumen.'))
+      }
+
+      xhr.send(formData)
     })
-    return this._handleResponse(res)
   },
 
   async search({ query, topK = 4, documentId = null }) {
