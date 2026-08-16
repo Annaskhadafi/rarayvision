@@ -193,6 +193,43 @@ const handleSendMessage = async () => {
   }
 }
 
+const formatMarkdown = (text) => {
+  if (!text) return ''
+  let html = text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+
+  // Code blocks
+  html = html.replace(/```([a-zA-Z0-9_-]*)\n([\s\S]*?)```/g, (_m, _lang, code) => {
+    return `<pre class="chat-code-block"><code>${code.trim()}</code></pre>`
+  })
+
+  // Inline code
+  html = html.replace(/`([^`]+)`/g, '<code class="chat-inline-code">$1</code>')
+
+  // Headings
+  html = html.replace(/^### (.*$)/gim, '<h4 class="chat-h4">$1</h4>')
+  html = html.replace(/^## (.*$)/gim, '<h3 class="chat-h3">$1</h3>')
+  html = html.replace(/^# (.*$)/gim, '<h2 class="chat-h2">$1</h2>')
+
+  // Bold (***, **, *)
+  html = html.replace(/\*\*\*(.*?)\*\*\*/g, '<strong><em>$1</em></strong>')
+  html = html.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+  html = html.replace(/\*(.*?)\*/g, '<em>$1</em>')
+
+  // Bullet points
+  html = html.replace(/^\s*[\-\*]\s+(.*$)/gim, '<li class="chat-li">$1</li>')
+  html = html.replace(/(<li class="chat-li">[\s\S]*?<\/li>)/g, '<ul class="chat-ul">$1</ul>')
+  html = html.replace(/<\/ul>\s*<ul class="chat-ul">/g, '')
+
+  // Line breaks
+  html = html.replace(/\n\n/g, '<div class="chat-spacer"></div>')
+  html = html.replace(/\n/g, '<br>')
+
+  return html
+}
+
 const copyToClipboard = async (text, type = 'code') => {
   if (!text) return
   try {
@@ -560,7 +597,7 @@ print("Sumber:", [s["filename"] for s in chat_res["data"]["sources"]])`
             >
               <div class="chat-bubble">
                 <div class="bubble-sender">{{ msg.role === 'user' ? 'Anda' : 'AI Assistant' }}</div>
-                <div class="bubble-content">{{ msg.content }}</div>
+                <div class="bubble-content" v-html="formatMarkdown(msg.content)"></div>
 
                 <!-- Sources Footnote -->
                 <div v-if="msg.sources && msg.sources.length > 0" class="sources-box">
@@ -1249,6 +1286,57 @@ print("Sumber:", [s["filename"] for s in chat_res["data"]["sources"]])`
   font-weight: 700;
   margin-bottom: 4px;
   opacity: 0.8;
+}
+
+:deep(.bubble-content) {
+  word-break: break-word;
+}
+
+:deep(.bubble-content strong) {
+  font-weight: 800;
+  color: inherit;
+}
+
+:deep(.bubble-content em) {
+  font-style: italic;
+}
+
+:deep(.chat-inline-code) {
+  background: rgba(0, 0, 0, 0.08);
+  padding: 2px 5px;
+  border-radius: 4px;
+  font-family: monospace;
+  font-size: 12px;
+}
+
+:deep(.chat-code-block) {
+  background: #0f172a;
+  color: #f8fafc;
+  padding: 10px 14px;
+  border-radius: 6px;
+  font-family: monospace;
+  font-size: 12px;
+  margin: 6px 0;
+  overflow-x: auto;
+}
+
+:deep(.chat-h2), :deep(.chat-h3), :deep(.chat-h4) {
+  font-weight: 800;
+  margin: 8px 0 4px;
+  color: inherit;
+}
+
+:deep(.chat-spacer) {
+  height: 8px;
+}
+
+:deep(.chat-ul) {
+  padding-left: 18px;
+  margin: 6px 0;
+}
+
+:deep(.chat-li) {
+  margin: 2px 0;
 }
 
 .sources-box {
