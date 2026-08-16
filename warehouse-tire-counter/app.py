@@ -321,35 +321,49 @@ class StreamManager:
 
         print("[StreamManager] Capture loop terminated.")
 
+    @property
+    def running(self) -> bool:
+        return self.is_running
+
+
 
 stream_manager = StreamManager()
 
 def ensure_default_stream():
     """Lazily start the default mining yard stream if no stream is currently active."""
-    if not stream_manager.running:
+    try:
+        if not getattr(stream_manager, "is_running", False):
+            sample_path = os.path.join(SAMPLES_DIR, "mining_yard_sample.mp4")
+            if not os.path.exists(sample_path):
+                try:
+                    from mining_yard_counter import generate_mining_yard_sample_video
+                    generate_mining_yard_sample_video(sample_path)
+                except Exception as ex:
+                    print(f"[TireCounter] Sample generator warning: {ex}")
+            if os.path.exists(sample_path):
+                stream_manager.start_stream("sample", sample_path, model_name="yolov8n.pt", conf=0.25)
+    except Exception as e:
+        print(f"[TireCounter] ensure_default_stream error: {e}")
 
-        sample_path = os.path.join(SAMPLES_DIR, "mining_yard_sample.mp4")
-        if not os.path.exists(sample_path):
-            try:
-                from mining_yard_counter import generate_mining_yard_sample_video
-                generate_mining_yard_sample_video(sample_path)
-            except Exception as ex:
-                print(f"[TireCounter] Sample generator warning: {ex}")
-        if os.path.exists(sample_path):
-            stream_manager.start_stream("sample", sample_path, model_name="yolov8n.pt", conf=0.25)
-
-# Trigger auto-start at import time
-threading.Thread(target=ensure_default_stream, daemon=True).start()
+# Trigger auto-start in background
+try:
+    threading.Thread(target=ensure_default_stream, daemon=True).start()
+except Exception as e:
+    print(f"[TireCounter] Background thread launch error: {e}")
 
 # Auto-start default sample stream on startup in background
 @app.on_event("startup")
 def startup_event():
-    ensure_default_stream()
+    try:
+        ensure_default_stream()
+    except Exception as e:
+        print(f"[TireCounter] startup_event error: {e}")
 
 
 @app.get("/")
 def index_page():
     return FileResponse(os.path.join(STATIC_DIR, "index.html"))
+
 
 
 @app.post("/api/source/select")
