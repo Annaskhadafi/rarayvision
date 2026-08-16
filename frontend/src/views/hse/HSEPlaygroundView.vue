@@ -180,6 +180,7 @@ const connectPublicCamera = async () => {
     return
   }
   isConnectingPublic.value = true
+  publicFeedUrl.value = ''
   const mod = activeTab.value === 'ppe_check' ? 'hse_ppe' : (activeTab.value === 'danger_zone' ? 'hse_danger_zone' : 'hse_near_miss')
 
   try {
