@@ -114,6 +114,7 @@ def _extract_with_ytdlp(url: str) -> str:
 
     except Exception as e:
         print(f"[TireCounter] yt-dlp resolution error: {e}")
+        raise ValueError(f"Could not extract stream from URL: {e}")
 
     return url
 
@@ -298,7 +299,15 @@ class StreamManager:
                         self.cap = cv2.VideoCapture(self.source_path, cv2.CAP_FFMPEG)
                     continue
                 else:
-                    print("[StreamManager] Source unavailable or max reconnects reached. Stopping.")
+                    print("[StreamManager] Source unavailable or max reconnects reached. Setting error frame.")
+                    err_frame = np.zeros((480, 854, 3), dtype=np.uint8)
+                    cv2.putText(err_frame, "VIDEO SOURCE UNAVAILABLE / DISCONNECTED", (70, 230),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 70, 255), 2)
+                    cv2.putText(err_frame, "Please check the stream URL and reconnect below.", (120, 270),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (180, 180, 180), 1)
+                    with self.lock:
+                        self.latest_frame = err_frame
+                        self.latest_summary["status"] = "error"
                     break
 
 
@@ -429,8 +438,10 @@ async def select_source(
         # Auto-fix missing protocol (e.g. youtube.com or www.youtube.com)
         if not any(url.lower().startswith(s) for s in ("http://", "https://", "rtsp://", "rtmp://", "udp://", "tcp://")):
             url = "https://" + url
-        # Auto-resolve YouTube / Twitch / social media URLs to real stream via yt-dlp
-        src = resolve_stream_url(url)
+        try:
+            src = resolve_stream_url(url)
+        except Exception as ex:
+            raise HTTPException(status_code=400, detail=f"Failed to load stream: {ex}")
     elif st in ("sample", "mining_yard"):
         src = os.path.join(SAMPLES_DIR, "mining_yard_sample.mp4")
     elif st in ("sample_conveyor", "conveyor"):
