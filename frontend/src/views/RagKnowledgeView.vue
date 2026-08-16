@@ -4,7 +4,7 @@ import { ragService } from '../services/ragService'
 import { API_BASE_URL } from '../utils'
 
 // Active View Tab
-const mainTab = ref('library') // 'library', 'ingest', 'chat', 'integration'
+const mainTab = ref('library') // 'library', 'ingest', 'external_db', 'chat', 'integration'
 
 // Knowledge Library State
 const documents = ref([])
@@ -26,11 +26,41 @@ const ingestSuccess = ref('')
 const ingestError = ref('')
 const isDragging = ref(false)
 
+// External PostgreSQL State
+const externalDatabases = ref([])
+const isLoadingDatabases = ref(false)
+const isTestingDb = ref(false)
+const testDbMessage = ref(null)
+const isIntrospecting = ref(false)
+const availableTables = ref([])
+const selectedTables = ref([])
+const tableSearchFilter = ref('')
+const isSavingDb = ref(false)
+const isSyncingDb = ref(false)
+const syncingDbId = ref(null)
+const syncStatusMessage = ref(null)
+const dbViewMode = ref('list') // 'list' or 'form'
+
+const dbForm = ref({
+  id: null,
+  name: '',
+  inputType: 'url', // 'url' or 'params'
+  dbUrl: '',
+  host: 'localhost',
+  port: 5432,
+  database: '',
+  username: 'postgres',
+  password: '',
+  maxRowsPerTable: 500,
+  autoSync: false,
+  syncIntervalHours: 24
+})
+
 // Chatbot Playground State
 const chatMessages = ref([
   {
     role: 'assistant',
-    content: 'Halo! Saya adalah AI Chatbot RAG terhubung ke basis pengetahuan Anda. Tanyakan apa saja mengenai dokumen yang telah Anda upload.',
+    content: 'Halo! Saya adalah AI Chatbot RAG terhubung ke basis pengetahuan Anda (didukung oleh **Groq Qwen 2.5/3.6**). Tanyakan apa saja mengenai dokumen dan data database yang telah Anda sinkronkan.',
     sources: []
   }
 ])
@@ -47,7 +77,10 @@ const copiedType = ref('')
 const ragInfo = ref(null)
 
 onMounted(async () => {
-  await fetchLibrary()
+  await Promise.all([
+    fetchLibrary(),
+    fetchExternalDatabases()
+  ])
   try {
     const res = await ragService.getInfo()
     if (res?.data) ragInfo.value = res.data
@@ -69,6 +102,20 @@ const fetchLibrary = async () => {
     console.error('Failed to fetch documents:', err)
   } finally {
     isLoadingLibrary.value = false
+  }
+}
+
+const fetchExternalDatabases = async () => {
+  isLoadingDatabases.value = true
+  try {
+    const res = await ragService.getExternalDatabases()
+    if (res?.databases) {
+      externalDatabases.value = res.databases
+    }
+  } catch (err) {
+    console.error('Failed to fetch external databases:', err)
+  } finally {
+    isLoadingDatabases.value = false
   }
 }
 
@@ -151,6 +198,253 @@ const handleDeleteDocument = async (doc) => {
   } catch (err) {
     alert('Gagal menghapus dokumen: ' + err.message)
   }
+}
+
+// --- External PostgreSQL DB Handlers ---
+const computedDbUrl = computed(() => {
+  if (dbForm.value.inputType === 'url') {
+    return dbForm.value.dbUrl.trim()
+  }
+  const u = encodeURIComponent(dbForm.value.username || '')
+  const p = encodeURIComponent(dbForm.value.password || '')
+  const h = dbForm.value.host || 'localhost'
+  const port = dbForm.value.port || 5432
+  const d = dbForm.value.database || ''
+  return `postgresql://${u}:${p}@${h}:${port}/${d}`
+})
+
+const filteredAvailableTables = computed(() => {
+  if (!tableSearchFilter.value.trim()) return availableTables.value
+  const q = tableSearchFilter.value.toLowerCase()
+  return availableTables.value.filter(t => t.table_name.toLowerCase().includes(q))
+})
+
+const handleTestConnection = async () => {
+  const url = computedDbUrl.value
+  if (!url) {
+    testDbMessage.value = { success: false, text: 'Silakan isi parameter koneksi database terlebih dahulu.' }
+    return
+  }
+
+  isTestingDb.value = true
+  testDbMessage.value = null
+
+  try {
+    const res = await ragService.testDatabaseConnection(url)
+    if (res.success) {
+      testDbMessage.value = {
+        success: true,
+        text: `✅ ${res.message} (${res.latency_ms} ms) - Versi DB: ${res.db_version?.substring(0, 45)}...`
+      }
+    } else {
+      testDbMessage.value = { success: false, text: `❌ ${res.message}` }
+    }
+  } catch (err) {
+    testDbMessage.value = { success: false, text: `❌ ${err.message}` }
+  } finally {
+    isTestingDb.value = false
+  }
+}
+
+const handleIntrospectTables = async () => {
+  const url = computedDbUrl.value
+  if (!url) {
+    testDbMessage.value = { success: false, text: 'Silakan isi parameter koneksi database terlebih dahulu.' }
+    return
+  }
+
+  isIntrospecting.value = true
+  testDbMessage.value = null
+
+  try {
+    const res = await ragService.introspectDatabaseSchema(url)
+    if (res.success && res.tables) {
+      availableTables.value = res.tables
+      testDbMessage.value = {
+        success: true,
+        text: `✅ Berhasil membaca schema: Ditemukan ${res.total_tables} tabel publik pada database.`
+      }
+    } else {
+      testDbMessage.value = { success: false, text: `❌ ${res.message || 'Gagal membaca tabel database.'}` }
+    }
+  } catch (err) {
+    testDbMessage.value = { success: false, text: `❌ ${err.message}` }
+  } finally {
+    isIntrospecting.value = false
+  }
+}
+
+const toggleSelectAllTables = (selectAll) => {
+  if (selectAll) {
+    selectedTables.value = availableTables.value.map(t => t.table_name)
+  } else {
+    selectedTables.value = []
+  }
+}
+
+const isTableSelected = (tableName) => {
+  return selectedTables.value.includes(tableName)
+}
+
+const toggleTableSelection = (tableName) => {
+  const idx = selectedTables.value.indexOf(tableName)
+  if (idx > -1) {
+    selectedTables.value.splice(idx, 1)
+  } else {
+    selectedTables.value.push(tableName)
+  }
+}
+
+const handleSaveDatabase = async () => {
+  if (!dbForm.value.name.trim()) {
+    alert('Silakan masukkan nama koneksi database (misal: "Database ERP Produksi").')
+    return
+  }
+  const url = computedDbUrl.value
+  if (!url) {
+    alert('Silakan isi connection string database.')
+    return
+  }
+
+  isSavingDb.value = true
+  syncStatusMessage.value = null
+
+  const payload = {
+    name: dbForm.value.name.trim(),
+    db_url: url,
+    host: dbForm.value.host,
+    port: Number(dbForm.value.port) || 5432,
+    database_name: dbForm.value.database,
+    username: dbForm.value.username,
+    selected_tables: selectedTables.value,
+    auto_sync: dbForm.value.autoSync,
+    sync_interval_hours: Number(dbForm.value.syncIntervalHours) || 24
+  }
+
+  try {
+    let savedDb
+    if (dbForm.value.id) {
+      const res = await ragService.updateExternalDatabase(dbForm.value.id, payload)
+      savedDb = res.database
+    } else {
+      const res = await ragService.createExternalDatabase(payload)
+      savedDb = res.database
+    }
+
+    await fetchExternalDatabases()
+
+    // Trigger sync automatically if user selected tables
+    if (selectedTables.value.length > 0) {
+      await handleSyncDatabase(savedDb)
+    } else {
+      dbViewMode.value = 'list'
+      resetDbForm()
+    }
+  } catch (err) {
+    alert('Gagal menyimpan database: ' + err.message)
+  } finally {
+    isSavingDb.value = false
+  }
+}
+
+const handleSyncDatabase = async (dbRecord) => {
+  syncingDbId.value = dbRecord.id
+  isSyncingDb.value = true
+  syncStatusMessage.value = {
+    type: 'info',
+    text: `⚡ Sedang menarik data tabel dan menyusun vektor RAG untuk "${dbRecord.name}"...`
+  }
+
+  try {
+    const res = await ragService.syncExternalDatabase(dbRecord.id, {
+      max_rows_per_table: dbForm.value.maxRowsPerTable || 500
+    })
+
+    if (res?.data?.success) {
+      syncStatusMessage.value = {
+        type: 'success',
+        text: `✅ ${res.data.message} (${res.data.elapsed_ms} ms)`
+      }
+      await Promise.all([
+        fetchExternalDatabases(),
+        fetchLibrary()
+      ])
+      dbViewMode.value = 'list'
+    } else {
+      syncStatusMessage.value = {
+        type: 'error',
+        text: `❌ ${res?.data?.message || 'Gagal sinkronisasi data tabel.'}`
+      }
+    }
+  } catch (err) {
+    syncStatusMessage.value = {
+      type: 'error',
+      text: `❌ Gagal sinkronisasi: ${err.message}`
+    }
+  } finally {
+    isSyncingDb.value = false
+    syncingDbId.value = null
+  }
+}
+
+const handleEditDatabase = async (dbRecord) => {
+  dbForm.value = {
+    id: dbRecord.id,
+    name: dbRecord.name,
+    inputType: 'url',
+    dbUrl: dbRecord.db_url,
+    host: dbRecord.host || 'localhost',
+    port: dbRecord.port || 5432,
+    database: dbRecord.database_name || '',
+    username: dbRecord.username || 'postgres',
+    password: '',
+    maxRowsPerTable: 500,
+    autoSync: dbRecord.auto_sync || false,
+    syncIntervalHours: dbRecord.sync_interval_hours || 24
+  }
+  selectedTables.value = [...(dbRecord.selected_tables || [])]
+  dbViewMode.value = 'form'
+  testDbMessage.value = null
+
+  // Auto load tables for this DB
+  await handleIntrospectTables()
+}
+
+const handleDeleteDatabase = async (dbRecord) => {
+  if (!confirm(`Hapus konfigurasi koneksi database "${dbRecord.name}"? Dokumen vektor yang sudah tersinkronisasi akan tetap tersimpan.`)) {
+    return
+  }
+  try {
+    await ragService.deleteExternalDatabase(dbRecord.id)
+    await fetchExternalDatabases()
+  } catch (err) {
+    alert('Gagal menghapus database: ' + err.message)
+  }
+}
+
+const resetDbForm = () => {
+  dbForm.value = {
+    id: null,
+    name: '',
+    inputType: 'url',
+    dbUrl: '',
+    host: 'localhost',
+    port: 5432,
+    database: '',
+    username: 'postgres',
+    password: '',
+    maxRowsPerTable: 500,
+    autoSync: false,
+    syncIntervalHours: 24
+  }
+  selectedTables.value = []
+  availableTables.value = []
+  testDbMessage.value = null
+}
+
+const startNewDatabase = () => {
+  resetDbForm()
+  dbViewMode.value = 'form'
 }
 
 // Chatbot Send
@@ -318,7 +612,7 @@ curl -X POST "${API_BASE_URL}/api/v1/rag/search" \\
   -H "Content-Type: application/json" \\
   -d '{"query": "Berapa biaya produk X?", "top_k": 4}'
 
-# 3. Chatbot Generation
+# 3. Chatbot Generation (Didukung Groq Qwen)
 curl -X POST "${API_BASE_URL}/api/v1/rag/chat" \\
   -H "Authorization: Bearer ${apiToken.value}" \\
   -H "Content-Type: application/json" \\
@@ -360,10 +654,10 @@ print("Sumber:", [s["filename"] for s in chat_res["data"]["sources"]])`
             </svg>
             RAG Knowledge Base & pgvector
           </h1>
-          <span class="pill-badge">AnyDoc + pgvector + FastEmbed ONNX</span>
+          <span class="pill-badge">AnyDoc + pgvector + Groq Qwen + External DB</span>
         </div>
         <p class="page-subtitle">
-          Basis pengetahuan cerdas untuk Chatbot: Upload dokumen (Word, PDF, Excel, PPTX, CSV, Gambar OCR), konversi otomatis ke Markdown via AnyDoc, simpan ke S3, dan indeks vektor ke PostgreSQL untuk semantic retrieval real-time di Next.js.
+          Basis pengetahuan cerdas untuk Chatbot: Konversi otomatis dokumen (Word, PDF, Excel, OCR) & sinkronisasi tabel database PostgreSQL eksternal ke vektor semantik untuk retrieval instan di Next.js.
         </p>
       </div>
 
@@ -378,8 +672,8 @@ print("Sumber:", [s["filename"] for s in chat_res["data"]["sources"]])`
           <span class="stat-lbl">Vektor Chunks</span>
         </div>
         <div class="stat-card engine-stat">
-          <span class="stat-val">384-D</span>
-          <span class="stat-lbl">Free FastEmbed ONNX</span>
+          <span class="stat-val">Groq Qwen</span>
+          <span class="stat-lbl">Fast AI Engine</span>
         </div>
       </div>
     </div>
@@ -391,6 +685,9 @@ print("Sumber:", [s["filename"] for s in chat_res["data"]["sources"]])`
       </button>
       <button :class="['tab-item', { active: mainTab === 'ingest' }]" @click="mainTab = 'ingest'">
         ⚡ Ingest & Upload File
+      </button>
+      <button :class="['tab-item', { active: mainTab === 'external_db' }]" @click="mainTab = 'external_db'">
+        🗄️ External PostgreSQL Sync ({{ externalDatabases.length }})
       </button>
       <button :class="['tab-item', { active: mainTab === 'chat' }]" @click="mainTab = 'chat'">
         💬 RAG Chatbot Playground
@@ -409,7 +706,8 @@ print("Sumber:", [s["filename"] for s in chat_res["data"]["sources"]])`
         </div>
         <div class="toolbar-actions">
           <button class="btn-refresh" @click="fetchLibrary" title="Refresh library">🔄 Refresh</button>
-          <button class="btn-primary" @click="mainTab = 'ingest'">+ Upload Dokumen Baru</button>
+          <button class="btn-primary" @click="mainTab = 'ingest'">+ Upload File</button>
+          <button class="btn-secondary" @click="mainTab = 'external_db'; startNewDatabase()">+ Connect Database</button>
         </div>
       </div>
 
@@ -422,8 +720,11 @@ print("Sumber:", [s["filename"] for s in chat_res["data"]["sources"]])`
         <div v-else-if="filteredDocuments.length === 0" class="empty-library">
           <svg viewBox="0 0 24 24" width="48" height="48" stroke="#cbd5e1" stroke-width="1.5" fill="none"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline></svg>
           <h3>Belum ada dokumen di basis pengetahuan</h3>
-          <p>Unggah file dokumen pertama Anda untuk mulai mengisi knowledge base chatbot.</p>
-          <button class="btn-primary" @click="mainTab = 'ingest'">Upload Sekarang</button>
+          <p>Unggah file dokumen atau hubungkan database PostgreSQL eksternal untuk mulai mengisi basis pengetahuan.</p>
+          <div class="empty-actions">
+            <button class="btn-primary" @click="mainTab = 'ingest'">Upload Dokumen</button>
+            <button class="btn-secondary" @click="mainTab = 'external_db'">Koneksikan PostgreSQL</button>
+          </div>
         </div>
 
         <table v-else class="library-table">
@@ -433,7 +734,7 @@ print("Sumber:", [s["filename"] for s in chat_res["data"]["sources"]])`
               <th>Format</th>
               <th>Total Chunks</th>
               <th>Karakter / Kata</th>
-              <th>Penyimpanan S3</th>
+              <th>Penyimpanan</th>
               <th>Waktu Dibuat</th>
               <th>Aksi</th>
             </tr>
@@ -442,12 +743,17 @@ print("Sumber:", [s["filename"] for s in chat_res["data"]["sources"]])`
             <tr v-for="doc in filteredDocuments" :key="doc.id">
               <td>
                 <div class="doc-title-cell">
-                  <strong>{{ doc.filename }}</strong>
+                  <span class="doc-name-row">
+                    <span v-if="doc.filename.startsWith('db_')" class="db-indicator-icon">🗄️</span>
+                    <strong>{{ doc.filename }}</strong>
+                  </span>
                   <span class="doc-id-sub">ID: {{ doc.id.substring(0, 8) }}...</span>
                 </div>
               </td>
               <td>
-                <span class="badge-format">{{ doc.format?.toUpperCase() }}</span>
+                <span :class="['badge-format', { 'db-format': doc.filename.startsWith('db_') }]">
+                  {{ doc.filename.startsWith('db_') ? 'DB TABLE' : doc.format?.toUpperCase() }}
+                </span>
               </td>
               <td>
                 <span class="chunk-badge">{{ doc.total_chunks }} Chunks</span>
@@ -570,7 +876,313 @@ print("Sumber:", [s["filename"] for s in chat_res["data"]["sources"]])`
       </div>
     </div>
 
-    <!-- Tab 3: RAG Chatbot Playground -->
+    <!-- Tab 3: External PostgreSQL Database Sync (NEW) -->
+    <div v-else-if="mainTab === 'external_db'" class="tab-content">
+      <!-- Top Action Bar -->
+      <div class="db-sync-header">
+        <div>
+          <h2 class="section-title">Koneksi Database PostgreSQL Eksternal</h2>
+          <p class="section-desc">
+            Hubungkan database PostgreSQL lain (ERP, Penjualan, CRM, Keuangan), pilih tabel mana saja yang ingin disinkronkan secara selektif dengan centang, lalu konversi ke RAG Knowledge Base.
+          </p>
+        </div>
+        <div class="db-nav-actions">
+          <button 
+            :class="['btn-toggle-view', { active: dbViewMode === 'list' }]" 
+            @click="dbViewMode = 'list'"
+          >
+            📋 Daftar Koneksi Tersimpan ({{ externalDatabases.length }})
+          </button>
+          <button 
+            :class="['btn-toggle-view', { active: dbViewMode === 'form' }]" 
+            @click="startNewDatabase"
+          >
+            ➕ Tambah Koneksi Database Baru
+          </button>
+        </div>
+      </div>
+
+      <!-- Sync Status Notification Banner -->
+      <div v-if="syncStatusMessage" :class="['alert-box', `alert-${syncStatusMessage.type}`]">
+        <div class="alert-content-row">
+          <span>{{ syncStatusMessage.text }}</span>
+          <button class="btn-close-alert" @click="syncStatusMessage = null">✕</button>
+        </div>
+      </div>
+
+      <!-- Mode 1: List Saved Databases -->
+      <div v-if="dbViewMode === 'list'" class="db-list-section">
+        <div class="table-card">
+          <div v-if="isLoadingDatabases" class="loading-state">
+            <div class="spinner"></div>
+            <span>Memuat daftar database eksternal...</span>
+          </div>
+
+          <div v-else-if="externalDatabases.length === 0" class="empty-library">
+            <svg viewBox="0 0 24 24" width="48" height="48" stroke="#cbd5e1" stroke-width="1.5" fill="none"><ellipse cx="12" cy="5" rx="9" ry="3"></ellipse><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"></path><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"></path></svg>
+            <h3>Belum ada database eksternal yang terhubung</h3>
+            <p>Tambahkan koneksi database PostgreSQL Anda untuk mulai mengambil data tabel secara selektif.</p>
+            <button class="btn-primary" @click="startNewDatabase">+ Hubungkan Database Baru</button>
+          </div>
+
+          <table v-else class="library-table">
+            <thead>
+              <tr>
+                <th>Nama Database</th>
+                <th>Koneksi Host</th>
+                <th>Tabel Terpilih</th>
+                <th>Status</th>
+                <th>Terakhir Disinkronkan</th>
+                <th>Total Chunks</th>
+                <th>Aksi</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="dbItem in externalDatabases" :key="dbItem.id">
+                <td>
+                  <div class="doc-title-cell">
+                    <strong>{{ dbItem.name }}</strong>
+                    <span class="doc-id-sub">{{ dbItem.database_name || 'PostgreSQL' }}</span>
+                  </div>
+                </td>
+                <td>
+                  <code class="db-url-pill">{{ dbItem.db_url }}</code>
+                </td>
+                <td>
+                  <div class="selected-tables-tags">
+                    <span v-for="tbl in dbItem.selected_tables" :key="tbl" class="table-tag">
+                      🗄️ {{ tbl }}
+                    </span>
+                    <span v-if="!dbItem.selected_tables || dbItem.selected_tables.length === 0" class="text-muted">
+                      Belum ada tabel
+                    </span>
+                  </div>
+                </td>
+                <td>
+                  <span :class="['status-badge', dbItem.status]">
+                    <span class="status-dot"></span>
+                    {{ dbItem.status?.toUpperCase() }}
+                  </span>
+                </td>
+                <td class="time-cell">
+                  {{ dbItem.last_synced_at ? new Date(dbItem.last_synced_at).toLocaleString('id-ID') : 'Belum pernah' }}
+                </td>
+                <td>
+                  <span class="chunk-badge">{{ dbItem.total_chunks_synced || 0 }} Chunks</span>
+                </td>
+                <td>
+                  <div class="row-actions">
+                    <button 
+                      class="btn-sync-action" 
+                      :disabled="isSyncingDb && syncingDbId === dbItem.id"
+                      @click="handleSyncDatabase(dbItem)" 
+                      title="Sinkronisasi data tabel sekarang"
+                    >
+                      <span v-if="isSyncingDb && syncingDbId === dbItem.id" class="spinner"></span>
+                      <span v-else>⚡ Sync Now</span>
+                    </button>
+                    <button class="btn-inspect" @click="handleEditDatabase(dbItem)" title="Edit konfigurasi tabel">
+                      ✏️ Edit
+                    </button>
+                    <button class="btn-delete" @click="handleDeleteDatabase(dbItem)" title="Hapus koneksi database">
+                      🗑️
+                    </button>
+                  </div>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- Mode 2: Form Add / Edit Database Connection & Selective Tables Checklist -->
+      <div v-else-if="dbViewMode === 'form'" class="db-form-section">
+        <div class="form-and-tables-grid">
+          <!-- Left Column: Database Connection Details -->
+          <div class="card db-config-card">
+            <h3 class="form-block-title">
+              {{ dbForm.id ? '✏️ Edit Konfigurasi Database' : '➕ Konfigurasi Koneksi PostgreSQL' }}
+            </h3>
+
+            <div class="form-group">
+              <label class="form-label">Nama Identifikasi Koneksi *</label>
+              <input 
+                type="text" 
+                v-model="dbForm.name" 
+                placeholder="Contoh: Database ERP Keuangan & Sales" 
+                class="form-control"
+              />
+            </div>
+
+            <div class="form-group">
+              <label class="form-label">Format Input Koneksi</label>
+              <div class="radio-row">
+                <label class="radio-label">
+                  <input type="radio" value="url" v-model="dbForm.inputType" />
+                  <span>Connection String URL</span>
+                </label>
+                <label class="radio-label">
+                  <input type="radio" value="params" v-model="dbForm.inputType" />
+                  <span>Parameter Terpisah (Host/Port/DB/User/Pass)</span>
+                </label>
+              </div>
+            </div>
+
+            <!-- Input Type 1: URL -->
+            <div v-if="dbForm.inputType === 'url'" class="form-group">
+              <label class="form-label">PostgreSQL Connection String URL *</label>
+              <input 
+                type="text" 
+                v-model="dbForm.dbUrl" 
+                placeholder="postgresql://username:password@hostname:5432/database_name" 
+                class="form-control font-mono"
+              />
+              <span class="help-text">Format: <code>postgresql://user:password@host:5432/dbname</code></span>
+            </div>
+
+            <!-- Input Type 2: Separate Params -->
+            <div v-else class="params-grid">
+              <div class="form-group">
+                <label class="form-label">Host / IP *</label>
+                <input type="text" v-model="dbForm.host" placeholder="localhost atau IP" class="form-control" />
+              </div>
+              <div class="form-group">
+                <label class="form-label">Port</label>
+                <input type="number" v-model="dbForm.port" placeholder="5432" class="form-control" />
+              </div>
+              <div class="form-group">
+                <label class="form-label">Database Name *</label>
+                <input type="text" v-model="dbForm.database" placeholder="nama_database" class="form-control" />
+              </div>
+              <div class="form-group">
+                <label class="form-label">Username *</label>
+                <input type="text" v-model="dbForm.username" placeholder="postgres" class="form-control" />
+              </div>
+              <div class="form-group full-width">
+                <label class="form-label">Password *</label>
+                <input type="password" v-model="dbForm.password" placeholder="••••••••" class="form-control" />
+              </div>
+            </div>
+
+            <div class="db-test-actions">
+              <button 
+                class="btn-test-conn" 
+                :disabled="isTestingDb || isIntrospecting" 
+                @click="handleTestConnection"
+              >
+                <span v-if="isTestingDb" class="spinner"></span>
+                <span v-else>🔌 Test Koneksi</span>
+              </button>
+
+              <button 
+                class="btn-introspect" 
+                :disabled="isIntrospecting || isTestingDb" 
+                @click="handleIntrospectTables"
+              >
+                <span v-if="isIntrospecting" class="spinner"></span>
+                <span v-else>🔍 Baca Daftar Tabel Database</span>
+              </button>
+            </div>
+
+            <!-- Test Connection Result Alert -->
+            <div v-if="testDbMessage" :class="['test-result-box', testDbMessage.success ? 'success' : 'error']">
+              {{ testDbMessage.text }}
+            </div>
+
+            <div class="form-group mt-16">
+              <label class="form-label">Batas Maksimal Baris per Tabel (Row Limit)</label>
+              <input 
+                type="number" 
+                v-model="dbForm.maxRowsPerTable" 
+                placeholder="500" 
+                class="form-control"
+              />
+              <span class="help-text">Membatasi jumlah baris per tabel agar token AI tetap efisien (default: 500 baris).</span>
+            </div>
+
+            <div class="form-footer-actions">
+              <button class="btn-cancel" @click="dbViewMode = 'list'">Batal</button>
+              <button 
+                class="btn-save-db" 
+                :disabled="isSavingDb || isSyncingDb || selectedTables.length === 0" 
+                @click="handleSaveDatabase"
+              >
+                <span v-if="isSavingDb || isSyncingDb" class="spinner"></span>
+                <span v-else>💾 Simpan & Ingest {{ selectedTables.length }} Tabel ke RAG</span>
+              </button>
+            </div>
+          </div>
+
+          <!-- Right Column: Interactive Selective Tables Checklist -->
+          <div class="card db-tables-card">
+            <div class="tables-header-row">
+              <div>
+                <h3 class="form-block-title">Pilih Tabel yang Ingin Dijadikan RAG</h3>
+                <span class="tables-sub">
+                  Centang tabel yang relevan ({{ selectedTables.length }} dari {{ availableTables.length }} tabel dipilih).
+                </span>
+              </div>
+              <div class="bulk-select-buttons" v-if="availableTables.length > 0">
+                <button class="btn-bulk" @click="toggleSelectAllTables(true)">Pilih Semua</button>
+                <button class="btn-bulk" @click="toggleSelectAllTables(false)">Batalkan Semua</button>
+              </div>
+            </div>
+
+            <!-- Search Filter for Tables -->
+            <div v-if="availableTables.length > 0" class="table-search-bar">
+              <input 
+                type="text" 
+                v-model="tableSearchFilter" 
+                placeholder="Cari nama tabel (contoh: 'customer', 'invoice')..." 
+                class="table-search-input"
+              />
+            </div>
+
+            <!-- Empty State when not loaded yet -->
+            <div v-if="availableTables.length === 0 && !isIntrospecting" class="empty-tables-prompt">
+              <div class="icon-circle">🔍</div>
+              <h4>Daftar tabel belum dimuat</h4>
+              <p>Klik tombol <strong>"Baca Daftar Tabel Database"</strong> di samping kiri untuk menampilkan seluruh tabel PostgreSQL yang tersedia.</p>
+            </div>
+
+            <!-- Loading Tables -->
+            <div v-else-if="isIntrospecting" class="loading-tables-state">
+              <div class="spinner dark"></div>
+              <span>Membaca schema dan struktur tabel PostgreSQL...</span>
+            </div>
+
+            <!-- Checkbox List of Tables -->
+            <div v-else class="tables-checklist-box">
+              <div 
+                v-for="tbl in filteredAvailableTables" 
+                :key="tbl.table_name" 
+                :class="['table-check-item', { selected: isTableSelected(tbl.table_name) }]"
+                @click="toggleTableSelection(tbl.table_name)"
+              >
+                <div class="check-left">
+                  <input 
+                    type="checkbox" 
+                    :checked="isTableSelected(tbl.table_name)" 
+                    @click.stop="toggleTableSelection(tbl.table_name)"
+                    class="checkbox-input"
+                  />
+                  <div class="table-meta-text">
+                    <strong class="table-name-label">🗄️ {{ tbl.table_name }}</strong>
+                    <span class="table-cols-sub">{{ tbl.columns_count }} kolom ({{ tbl.columns.map(c => c.name).slice(0, 4).join(', ') }}{{ tbl.columns_count > 4 ? '...' : '' }})</span>
+                  </div>
+                </div>
+
+                <div class="check-right">
+                  <span class="rows-count-badge">{{ tbl.estimated_rows.toLocaleString() }} baris</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Tab 4: RAG Chatbot Playground -->
     <div v-else-if="mainTab === 'chat'" class="tab-content">
       <div class="chat-layout">
         <!-- Chat Left Panel -->
@@ -578,7 +1190,7 @@ print("Sumber:", [s["filename"] for s in chat_res["data"]["sources"]])`
           <div class="chat-header">
             <div class="chat-title-box">
               <span class="status-indicator"></span>
-              <h3>RAG Knowledge Chatbot</h3>
+              <h3>RAG Knowledge Chatbot (Groq Qwen 2.5/3.6)</h3>
             </div>
             <div class="chat-controls">
               <select v-model="selectedDocFilter" class="filter-select">
@@ -601,10 +1213,12 @@ print("Sumber:", [s["filename"] for s in chat_res["data"]["sources"]])`
 
                 <!-- Sources Footnote -->
                 <div v-if="msg.sources && msg.sources.length > 0" class="sources-box">
-                  <div class="sources-title">📎 Sumber Rujukan Dokumen:</div>
+                  <div class="sources-title">📎 Sumber Rujukan Dokumen / Database:</div>
                   <div class="sources-tags">
                     <span v-for="(s, sIdx) in msg.sources" :key="sIdx" class="source-tag">
-                      📄 {{ s.filename }} <span v-if="s.heading">({{ s.heading }})</span> - Skor: {{ (s.similarity_score * 100).toFixed(0) }}%
+                      <span v-if="s.filename.startsWith('db_')">🗄️</span>
+                      <span v-else>📄</span>
+                      {{ s.filename }} <span v-if="s.heading">({{ s.heading }})</span> - Skor: {{ (s.similarity_score * 100).toFixed(0) }}%
                     </span>
                   </div>
                 </div>
@@ -618,7 +1232,7 @@ print("Sumber:", [s["filename"] for s in chat_res["data"]["sources"]])`
             <div v-if="isGenerating" class="chat-bubble-wrap assistant">
               <div class="chat-bubble loading">
                 <div class="typing-dots"><span></span><span></span><span></span></div>
-                <span>Mencari vektor dokumen & menyusun jawaban...</span>
+                <span>Mencari vektor dokumen & menyusun jawaban via Groq Qwen...</span>
               </div>
             </div>
           </div>
@@ -628,7 +1242,7 @@ print("Sumber:", [s["filename"] for s in chat_res["data"]["sources"]])`
             <input 
               type="text" 
               v-model="userPrompt" 
-              placeholder="Tanyakan sesuatu tentang dokumen Anda (contoh: 'Apa kesimpulan dari dokumen X?')..." 
+              placeholder="Tanyakan sesuatu tentang dokumen atau database Anda (contoh: 'Cari customer yang butuh diperhatikan')..." 
               class="chat-input"
               @keydown.enter="handleSendMessage"
             />
@@ -644,7 +1258,7 @@ print("Sumber:", [s["filename"] for s in chat_res["data"]["sources"]])`
       </div>
     </div>
 
-    <!-- Tab 4: Next.js & API Integration -->
+    <!-- Tab 5: Next.js & API Integration -->
     <div v-else-if="mainTab === 'integration'" class="tab-content">
       <div class="card integration-card">
         <h2 class="section-title">Integrasi ke Next.js & API Eksternal</h2>
@@ -690,20 +1304,13 @@ print("Sumber:", [s["filename"] for s in chat_res["data"]["sources"]])`
 
         <!-- Free Embedding Guide Box -->
         <div class="embedding-guide-box">
-          <h3>🔑 Panduan API Key Embedding Gratis</h3>
+          <h3>🔑 Panduan Konfigurasi RAG & LLM Engine</h3>
           <p>
             Raray Vision secara *default* sudah menjalankan <strong>FastEmbed ONNX (BAAI/bge-small-en-v1.5)</strong> yang <strong>100% GRATIS</strong> dan berjalan lokal di server tanpa memerlukan API Key eksternal apapun.
           </p>
           <p>
-            Jika Anda ingin menggunakan Google Gemini Cloud Embedding gratis (1.500 requests/menit):
+            Untuk mesin LLM Chatbot, sistem menggunakan **Groq API LPU (`qwen/qwen3.6-27b`)** yang memberikan respons ultra-cepat dan akurat.
           </p>
-          <ol>
-            <li>Buka <a href="https://aistudio.google.com/" target="_blank" rel="noopener">Google AI Studio</a>.</li>
-            <li>Klik <strong>"Get API key"</strong> dan buat API Key baru secara gratis.</li>
-            <li>Tambahkan ke file <code>.env</code> Anda:
-              <pre class="env-code">GEMINI_API_KEY=AIzaSy...your_key_here</pre>
-            </li>
-          </ol>
         </div>
       </div>
     </div>
@@ -928,6 +1535,21 @@ print("Sumber:", [s["filename"] for s in chat_res["data"]["sources"]])`
   background: #1d4ed8;
 }
 
+.btn-secondary {
+  background: #f8fafc;
+  border: 1px solid #cbd5e1;
+  color: #0f172a;
+  padding: 8px 14px;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.btn-secondary:hover {
+  background: #f1f5f9;
+}
+
 /* Table */
 .table-card {
   background: #ffffff;
@@ -959,6 +1581,16 @@ print("Sumber:", [s["filename"] for s in chat_res["data"]["sources"]])`
   flex-direction: column;
 }
 
+.doc-name-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.db-indicator-icon {
+  font-size: 14px;
+}
+
 .doc-id-sub {
   font-size: 11px;
   color: #94a3b8;
@@ -974,9 +1606,15 @@ print("Sumber:", [s["filename"] for s in chat_res["data"]["sources"]])`
   border-radius: 4px;
 }
 
-.chunk-badge {
+.badge-format.db-format {
   background: #fef3c7;
   color: #92400e;
+  border: 1px solid #fde68a;
+}
+
+.chunk-badge {
+  background: #f1f5f9;
+  color: #334155;
   font-size: 11px;
   font-weight: 700;
   padding: 2px 8px;
@@ -999,6 +1637,7 @@ print("Sumber:", [s["filename"] for s in chat_res["data"]["sources"]])`
 .row-actions {
   display: flex;
   gap: 6px;
+  align-items: center;
 }
 
 .btn-inspect {
@@ -1168,30 +1807,425 @@ print("Sumber:", [s["filename"] for s in chat_res["data"]["sources"]])`
   cursor: not-allowed;
 }
 
-.info-title {
-  font-size: 14px;
-  font-weight: 700;
-  color: #0f172a;
-  margin: 0 0 12px;
+/* External Database Section Styles */
+.db-sync-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  margin-bottom: 20px;
+  gap: 16px;
+  flex-wrap: wrap;
 }
 
-.info-list {
-  padding-left: 0;
-  list-style: none;
+.db-nav-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.btn-toggle-view {
+  background: #f1f5f9;
+  border: 1px solid #cbd5e1;
+  color: #475569;
+  padding: 8px 14px;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.btn-toggle-view.active {
+  background: #0f172a;
+  color: #ffffff;
+  border-color: #0f172a;
+}
+
+.form-and-tables-grid {
+  display: grid;
+  grid-template-columns: 480px 1fr;
+  gap: 24px;
+}
+
+@media (max-width: 1100px) {
+  .form-and-tables-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.form-block-title {
+  font-size: 15px;
+  font-weight: 800;
+  color: #0f172a;
+  margin: 0 0 14px;
+}
+
+.form-group {
+  margin-bottom: 14px;
+}
+
+.form-group.mt-16 {
+  margin-top: 16px;
+}
+
+.form-label {
+  display: block;
+  font-size: 12px;
+  font-weight: 700;
+  color: #334155;
+  margin-bottom: 5px;
+}
+
+.form-control {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 8px 12px;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  font-size: 13px;
+  outline: none;
+}
+
+.form-control:focus {
+  border-color: #2563eb;
+}
+
+.font-mono {
+  font-family: monospace;
+  font-size: 12px;
+}
+
+.radio-row {
+  display: flex;
+  gap: 16px;
+}
+
+.radio-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+  color: #475569;
+  cursor: pointer;
+}
+
+.params-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+.params-grid .full-width {
+  grid-column: span 2;
+}
+
+.help-text {
+  font-size: 11px;
+  color: #64748b;
+  margin-top: 4px;
+  display: block;
+}
+
+.db-test-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.btn-test-conn {
+  flex: 1;
+  background: #f1f5f9;
+  border: 1px solid #cbd5e1;
+  color: #1e293b;
+  padding: 8px 12px;
+  border-radius: 6px;
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+}
+
+.btn-introspect {
+  flex: 1.5;
+  background: #eff6ff;
+  border: 1px solid #bfdbfe;
+  color: #2563eb;
+  padding: 8px 12px;
+  border-radius: 6px;
+  font-size: 12.5px;
+  font-weight: 700;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+}
+
+.test-result-box {
+  margin-top: 10px;
+  padding: 8px 12px;
+  border-radius: 6px;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.test-result-box.success {
+  background: #f0fdf4;
+  border: 1px solid #bbf7d0;
+  color: #16a34a;
+}
+
+.test-result-box.error {
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  color: #dc2626;
+}
+
+.form-footer-actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 20px;
+  padding-top: 16px;
+  border-top: 1px solid #e2e8f0;
+}
+
+.btn-cancel {
+  background: #f1f5f9;
+  border: 1px solid #cbd5e1;
+  color: #475569;
+  padding: 9px 16px;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.btn-save-db {
+  flex: 1;
+  background: #2563eb;
+  color: #ffffff;
+  border: none;
+  padding: 9px 16px;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+}
+
+.btn-save-db:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+/* Tables Checklist Column */
+.tables-header-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  margin-bottom: 12px;
+  gap: 10px;
+}
+
+.tables-sub {
+  font-size: 12px;
+  color: #64748b;
+}
+
+.bulk-select-buttons {
+  display: flex;
+  gap: 6px;
+}
+
+.btn-bulk {
+  background: #f8fafc;
+  border: 1px solid #cbd5e1;
+  color: #334155;
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.table-search-bar {
+  margin-bottom: 10px;
+}
+
+.table-search-input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 6px 12px;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  font-size: 12.5px;
+  outline: none;
+}
+
+.tables-checklist-box {
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 6px;
+  max-height: 480px;
+  overflow-y: auto;
+  padding-right: 4px;
 }
 
-.info-list li strong {
-  font-size: 12.5px;
-  color: #1e293b;
+.table-check-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px 14px;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: #f8fafc;
+  cursor: pointer;
+  transition: all 0.15s;
 }
 
-.info-list li p {
-  font-size: 11.5px;
+.table-check-item:hover {
+  background: #eff6ff;
+  border-color: #bfdbfe;
+}
+
+.table-check-item.selected {
+  background: #eff6ff;
+  border-color: #2563eb;
+}
+
+.check-left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.checkbox-input {
+  width: 16px;
+  height: 16px;
+  accent-color: #2563eb;
+  cursor: pointer;
+}
+
+.table-meta-text {
+  display: flex;
+  flex-direction: column;
+}
+
+.table-name-label {
+  font-size: 13px;
+  color: #0f172a;
+}
+
+.table-cols-sub {
+  font-size: 11px;
   color: #64748b;
-  margin: 3px 0 0;
+}
+
+.rows-count-badge {
+  background: #e2e8f0;
+  color: #334155;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 9999px;
+}
+
+.empty-tables-prompt {
+  text-align: center;
+  padding: 50px 20px;
+  color: #64748b;
+}
+
+.icon-circle {
+  font-size: 32px;
+  margin-bottom: 8px;
+}
+
+.loading-tables-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 60px 20px;
+  gap: 12px;
+  color: #64748b;
+}
+
+.spinner.dark {
+  border-color: rgba(37,99,235,0.2);
+  border-top-color: #2563eb;
+}
+
+.db-url-pill {
+  background: #f1f5f9;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 11px;
+  color: #475569;
+}
+
+.selected-tables-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.table-tag {
+  background: #eff6ff;
+  color: #1e40af;
+  font-size: 10.5px;
+  font-weight: 600;
+  padding: 2px 6px;
+  border-radius: 4px;
+  border: 1px solid #dbeafe;
+}
+
+.status-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 9999px;
+}
+
+.status-badge.active { background: #f0fdf4; color: #15803d; }
+.status-badge.syncing { background: #eff6ff; color: #2563eb; }
+.status-badge.error { background: #fef2f2; color: #b91c1c; }
+
+.status-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.btn-sync-action {
+  background: #0f172a;
+  color: #ffffff;
+  border: none;
+  padding: 4px 10px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.btn-sync-action:hover {
+  background: #1e293b;
+}
+
+.btn-sync-action:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
 }
 
 /* Chatbot Layout */
@@ -1494,16 +2528,6 @@ print("Sumber:", [s["filename"] for s in chat_res["data"]["sources"]])`
   line-height: 1.6;
 }
 
-.env-code {
-  background: #0f172a;
-  color: #38bdf8;
-  padding: 6px 12px;
-  border-radius: 6px;
-  font-size: 12px;
-  margin: 6px 0;
-  display: inline-block;
-}
-
 /* Modal */
 .modal-overlay {
   position: fixed;
@@ -1632,8 +2656,23 @@ print("Sumber:", [s["filename"] for s in chat_res["data"]["sources"]])`
   margin-bottom: 14px;
 }
 
+.alert-content-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.btn-close-alert {
+  background: none;
+  border: none;
+  font-size: 14px;
+  cursor: pointer;
+  opacity: 0.7;
+}
+
 .alert-error { background: #fef2f2; border: 1px solid #fecaca; color: #dc2626; }
 .alert-success { background: #f0fdf4; border: 1px solid #bbf7d0; color: #16a34a; }
+.alert-info { background: #eff6ff; border: 1px solid #bfdbfe; color: #1d4ed8; }
 
 .loading-state, .empty-library {
   display: flex;
@@ -1644,5 +2683,11 @@ print("Sumber:", [s["filename"] for s in chat_res["data"]["sources"]])`
   text-align: center;
   color: #64748b;
   gap: 10px;
+}
+
+.empty-actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 8px;
 }
 </style>

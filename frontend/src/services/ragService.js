@@ -103,5 +103,82 @@ export const ragService = {
       })
     })
     return this._handleResponse(res)
+  },
+
+  // External PostgreSQL Database Endpoints
+  async testDatabaseConnection(dbUrl) {
+    const res = await fetch(`${API_BASE_URL}/api/v1/rag/databases/test`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...this.getAuthHeaders()
+      },
+      body: JSON.stringify({ db_url: dbUrl })
+    })
+    return this._handleResponse(res)
+  },
+
+  async introspectDatabaseSchema(dbUrl) {
+    const res = await fetch(`${API_BASE_URL}/api/v1/rag/databases/introspect`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...this.getAuthHeaders()
+      },
+      body: JSON.stringify({ db_url: dbUrl })
+    })
+    return this._handleResponse(res)
+  },
+
+  async getExternalDatabases() {
+    const res = await fetch(`${API_BASE_URL}/api/v1/rag/databases`, {
+      method: 'GET',
+      headers: this.getAuthHeaders()
+    })
+    return this._handleResponse(res)
+  },
+
+  async createExternalDatabase(payload) {
+    const res = await fetch(`${API_BASE_URL}/api/v1/rag/databases`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...this.getAuthHeaders()
+      },
+      body: JSON.stringify(payload)
+    })
+    return this._handleResponse(res)
+  },
+
+  async updateExternalDatabase(id, payload) {
+    const res = await fetch(`${API_BASE_URL}/api/v1/rag/databases/${id}`, {
+      method: 'PUT',
+      headers: {
+        'Content-Type': 'application/json',
+        ...this.getAuthHeaders()
+      },
+      body: JSON.stringify(payload)
+    })
+    return this._handleResponse(res)
+  },
+
+  async deleteExternalDatabase(id) {
+    const res = await fetch(`${API_BASE_URL}/api/v1/rag/databases/${id}`, {
+      method: 'DELETE',
+      headers: this.getAuthHeaders()
+    })
+    return this._handleResponse(res)
+  },
+
+  async syncExternalDatabase(id, payload = {}) {
+    const res = await fetch(`${API_BASE_URL}/api/v1/rag/databases/${id}/sync`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...this.getAuthHeaders()
+      },
+      body: JSON.stringify(payload)
+    })
+    return this._handleResponse(res)
   }
 }
