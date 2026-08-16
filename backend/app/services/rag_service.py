@@ -57,7 +57,7 @@ class RagService:
     @classmethod
     def generate_embeddings(cls, texts: List[str]) -> List[List[float]]:
         """
-        Generates vector embeddings for a list of text strings.
+        Generates vector embeddings for a list of text strings with safe batching.
         Defaults to high-speed local FastEmbed ONNX (100% free, 384-d).
         """
         if not texts:
@@ -66,9 +66,16 @@ class RagService:
         model = get_fastembed_model()
         if model:
             try:
-                # FastEmbed yields numpy arrays
-                embeddings_gen = model.embed(texts)
-                return [list(map(float, emb)) for emb in embeddings_gen]
+                import gc
+                all_embs = []
+                batch_size = 32
+                for i in range(0, len(texts), batch_size):
+                    batch_slice = texts[i:i + batch_size]
+                    gen = model.embed(batch_slice, batch_size=32)
+                    for emb in gen:
+                        all_embs.append([float(x) for x in emb])
+                    gc.collect()
+                return all_embs
             except Exception as e:
                 logger.error(f"[RagService] FastEmbed generation error: {e}")
 

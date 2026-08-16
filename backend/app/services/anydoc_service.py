@@ -157,7 +157,7 @@ class AnyDocService:
                 ocr_applied = True
                 markdown_output = cls._convert_image(file_bytes)
 
-            # 2. PDF Documents -> Hybrid (AnyDoc + PDF-Inspector + RapidOCR)
+            # 2. PDF Documents -> AnyDoc Native + Hybrid Fallback
             elif ext in PDF_EXTENSIONS:
                 if force_ocr:
                     engine_used = "rapidocr_pdf_forced"
@@ -166,23 +166,30 @@ class AnyDocService:
                     markdown_output = ocr_res.get("markdown", "")
                     extra_meta["page_count"] = ocr_res.get("page_count", 0)
                 else:
-                    # Hybrid process: analyzes structure, uses RapidOCR on scanned pages if auto_ocr=True
-                    engine_used = "pdf_inspector_hybrid"
-                    pdf_res = PdfInspectorService.process_pdf(file_bytes, auto_ocr=auto_ocr)
-                    markdown_output = pdf_res.get("markdown", "")
-                    ocr_applied = len(pdf_res.get("ocr_applied_pages", [])) > 0
-                    extra_meta["pdf_type"] = pdf_res.get("pdf_type")
-                    extra_meta["page_count"] = pdf_res.get("page_count")
-                    extra_meta["ocr_applied_pages"] = pdf_res.get("ocr_applied_pages", [])
-                    extra_meta["confidence"] = pdf_res.get("confidence")
+                    # 1. Try fast native AnyDoc extraction first (high speed, <1s, 0 memory footprint)
+                    try:
+                        markdown_output = anydoc.to_markdown_bytes(file_bytes, format="pdf")
+                        engine_used = "anydoc_native_pdf"
+                    except Exception as anydoc_err:
+                        logger.info(f"[AnyDocService] anydoc native PDF parse fallback: {anydoc_err}")
+                        markdown_output = ""
 
-                    # If hybrid markdown is empty or minimal, fallback to anydoc
-                    if not markdown_output or len(markdown_output.strip()) == 0:
-                        try:
-                            markdown_output = anydoc.to_markdown_bytes(file_bytes, format="pdf")
-                            engine_used = "anydoc"
-                        except Exception:
-                            pass
+                    # 2. If AnyDoc extracted rich text, use it immediately
+                    if markdown_output and len(markdown_output.strip()) > 200:
+                        ocr_applied = False
+                        extra_meta["pdf_type"] = "digital_text"
+                    else:
+                        # 3. Hybrid fallback: analyzes structure with safe OCR limits
+                        engine_used = "pdf_inspector_hybrid"
+                        pdf_res = PdfInspectorService.process_pdf(file_bytes, auto_ocr=auto_ocr)
+                        hybrid_md = pdf_res.get("markdown", "")
+                        if hybrid_md and len(hybrid_md.strip()) > 0:
+                            markdown_output = hybrid_md
+                        ocr_applied = len(pdf_res.get("ocr_applied_pages", [])) > 0
+                        extra_meta["pdf_type"] = pdf_res.get("pdf_type")
+                        extra_meta["page_count"] = pdf_res.get("page_count")
+                        extra_meta["ocr_applied_pages"] = pdf_res.get("ocr_applied_pages", [])
+                        extra_meta["confidence"] = pdf_res.get("confidence")
 
             # 3. Office & Structured Documents -> AnyDoc Rust Engine
             elif ext in ANYDOC_EXTENSIONS:

@@ -160,11 +160,13 @@ class PdfInspectorService:
             ocr_applied_pages = []
             final_markdown = base_markdown
 
-            # If document is scanned / image-based or has specific pages needing OCR, execute Hybrid OCR
-            needs_ocr = bool(pages_needing_ocr) or (pdf_type in ["scanned", "image_based"] and len(base_markdown.strip()) < 20)
+            # Only run Hybrid OCR if the document is genuinely an image/scan (almost zero extracted text)
+            has_digital_text = len(base_markdown.strip()) > 300
+            needs_ocr = (not has_digital_text) and (bool(pages_needing_ocr) or pdf_type in ["scanned", "image_based"])
 
             if auto_ocr and needs_ocr:
                 try:
+                    import gc
                     import pypdfium2 as pdfium
                     ocr_engine = get_rapid_ocr()
 
@@ -175,6 +177,8 @@ class PdfInspectorService:
                         target_pages = pages_needing_ocr if pages_needing_ocr else list(range(1, total_doc_pages + 1))
                         if pages:
                             target_pages = [p for p in target_pages if p in pages]
+                        # Cap OCR to max 15 pages to prevent RAM exhaustion on large files
+                        target_pages = target_pages[:15]
 
                         # Extract per-page markdown from pdf-inspector for native text pages
                         pages_result = pdf_inspector.extract_pages_markdown_bytes(file_bytes, pages=pages)
@@ -184,21 +188,23 @@ class PdfInspectorService:
                                 native_pages_dict[int(getattr(p, 'page', 0))] = getattr(p, 'markdown', "")
 
                         combined_pages = []
-                        for page_idx in range(total_doc_pages):
+                        for page_idx in range(min(total_doc_pages, 30)):
                             page_num = page_idx + 1
                             if pages and page_num not in pages:
                                 continue
 
                             if page_num in target_pages:
-                                # Render page bitmap at 2.0x scale
                                 page = pdf_doc[page_idx]
-                                bitmap = page.render(scale=2.0)
+                                bitmap = page.render(scale=1.5) # 1.5x scale is sharp and uses 50% less RAM
                                 pil_img = bitmap.to_pil()
                                 img_np = np.array(pil_img)
 
                                 ocr_res, _ = ocr_engine(img_np)
                                 page_md = format_ocr_to_markdown(ocr_res)
                                 
+                                del bitmap, pil_img, img_np
+                                gc.collect()
+
                                 if page_md:
                                     ocr_applied_pages.append(page_num)
                                     combined_pages.append(f"<!-- Page {page_num} (OCR Scanned) -->\n\n{page_md}")
