@@ -6,17 +6,118 @@ and live telemetry stats API.
 """
 
 import os
+import sys
+_DIR = os.path.dirname(os.path.abspath(__file__))
+if _DIR not in sys.path:
+    sys.path.insert(0, _DIR)
+
 import cv2
 import json
 import time
 import shutil
 import threading
+import subprocess
+
 from typing import Dict, List, Tuple, Optional, Any
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.responses import StreamingResponse, JSONResponse, FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 import numpy as np
+
+import tempfile
+
+# ── yt-dlp URL Resolver ────────────────────────────────────────────────────
+_YTDLP_DOMAINS = (
+    "youtube.com", "youtu.be",
+    "twitch.tv",
+    "facebook.com", "fb.watch",
+    "instagram.com",
+    "tiktok.com",
+    "bilibili.com",
+    "dailymotion.com",
+    "vimeo.com",
+)
+
+def _extract_with_ytdlp(url: str) -> str:
+    """
+    Use yt-dlp Python API to resolve video/stream URLs:
+    - If Live Stream: returns direct HLS / m3u8 stream URL.
+    - If VOD / Video: downloads to local temp cache and returns file path for smooth continuous playback.
+    """
+    try:
+        import yt_dlp
+    except ImportError:
+        try:
+            import subprocess
+            subprocess.run(["pip", "install", "yt-dlp", "-q"], check=True, timeout=30)
+            import yt_dlp
+        except Exception as e:
+            print(f"[TireCounter] yt-dlp install failed: {e}")
+            return url
+
+    try:
+        print(f"[TireCounter] Resolving media URL via yt-dlp: {url}")
+        ydl_opts_info = {
+            'format': 'best[ext=mp4]/best',
+            'quiet': True,
+            'no_warnings': True,
+            'noplaylist': True,
+        }
+        with yt_dlp.YoutubeDL(ydl_opts_info) as ydl:
+            info = ydl.extract_info(url, download=False)
+            is_live = info.get('is_live', False) or info.get('was_live', False)
+            video_id = info.get('id', 'stream')
+            direct_url = info.get('url', '')
+
+            # If it's a live HLS stream (.m3u8), return stream URL directly
+            if is_live and direct_url:
+                print(f"[TireCounter] Detected Live Stream: {direct_url[:80]}...")
+                return direct_url
+
+            # If it's a video file / VOD, download to local cache for 100% reliable frame decoding
+            cache_dir = os.path.join(tempfile.gettempdir(), "raray_media_cache")
+            os.makedirs(cache_dir, exist_ok=True)
+            cached_path = os.path.join(cache_dir, f"media_{video_id}.mp4")
+
+            if os.path.exists(cached_path) and os.path.getsize(cached_path) > 1000:
+                print(f"[TireCounter] Using existing cached media: {cached_path}")
+                return cached_path
+
+            print(f"[TireCounter] Downloading video to cache: {cached_path}")
+            ydl_opts_download = {
+                'format': 'best[ext=mp4]/best',
+                'outtmpl': cached_path,
+                'quiet': True,
+                'no_warnings': True,
+                'noplaylist': True,
+            }
+            with yt_dlp.YoutubeDL(ydl_opts_download) as ydl_dl:
+                ydl_dl.download([url])
+
+            if os.path.exists(cached_path):
+                print(f"[TireCounter] Video cached successfully ({os.path.getsize(cached_path)} bytes)")
+                return cached_path
+
+            if direct_url:
+                return direct_url
+
+    except Exception as e:
+        print(f"[TireCounter] yt-dlp resolution error: {e}")
+
+    return url
+
+
+def resolve_stream_url(url: str) -> str:
+    """Auto-detect social platform URLs and extract real stream via yt-dlp."""
+    if not isinstance(url, str):
+        return url
+    lowered = url.lower()
+    if any(d in lowered for d in _YTDLP_DOMAINS):
+        return _extract_with_ytdlp(url)
+    return url
+# ──────────────────────────────────────────────────────────────────────────
+
 
 from tire_counter import TireCounter
 
@@ -77,13 +178,14 @@ class StreamManager:
         self.lock = threading.Lock()
         self.thread: Optional[threading.Thread] = None
 
-    def start_stream(self, source_type: str, source_path: Any, model_name: str = "yolov8n.pt", conf: float = 0.25):
+    def start_stream(self, source_type: str, source_path: Any, model_name: str = "yolov8n.pt", conf: float = 0.25, iou: float = 0.45):
         with self.lock:
             self.stop_stream_locked()
             self.source_type = source_type
             self.source_path = source_path
             self.model_name = model_name
             self.conf_thresh = conf
+            self.iou_thresh = iou
 
             # Make sure sample video exists if selected
             if source_type == "sample":
@@ -100,7 +202,20 @@ class StreamManager:
                 line_points=self.transit_line,
             )
 
-            self.cap = cv2.VideoCapture(self.source_path)
+            # Open video capture with appropriate backend flags
+            is_network_stream = (
+                source_type in ("rtsp", "public_url")
+                or (isinstance(source_path, str) and source_path.startswith(("rtsp://", "rtmp://", "http://", "https://", "udp://", "tcp://")))
+            )
+
+            if is_network_stream:
+                # Use FFMPEG backend for maximum format compatibility (m3u8, HLS, MJPEG, RTSP, RTMP)
+                self.cap = cv2.VideoCapture(self.source_path, cv2.CAP_FFMPEG)
+                # Reduce internal buffer to get near-realtime frames from city cameras
+                self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 2)
+            else:
+                self.cap = cv2.VideoCapture(self.source_path)
+
             self.is_running = True
             self.thread = threading.Thread(target=self._capture_loop, daemon=True)
             self.thread.start()
@@ -140,17 +255,47 @@ class StreamManager:
         fps_time = time.time()
         frame_counter = 0
         fps = 0.0
+        reconnect_attempts = 0
+        max_reconnect = 5  # For network streams, try to reconnect on failure
 
-        while self.is_running and self.cap and self.cap.isOpened():
-            ret, frame = self.cap.read()
-            if not ret:
-                # If video file or sample, loop back to start
-                if self.source_type in ["sample", "upload"]:
-                    self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+        is_network = isinstance(self.source_path, str) and self.source_path.startswith(
+            ("rtsp://", "rtmp://", "http://", "https://", "udp://", "tcp://")
+        )
+        is_file = self.source_type in ("sample", "sample_conveyor", "upload")
+
+        while self.is_running:
+            if not self.cap or not self.cap.isOpened():
+                if is_network and reconnect_attempts < max_reconnect:
+                    reconnect_attempts += 1
+                    print(f"[StreamManager] Network stream disconnected. Reconnecting ({reconnect_attempts}/{max_reconnect})...")
+                    time.sleep(2)
+                    self.cap = cv2.VideoCapture(self.source_path, cv2.CAP_FFMPEG)
+                    self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 2)
                     continue
                 else:
-                    time.sleep(0.1)
+                    print("[StreamManager] Source unavailable or max reconnects reached. Stopping.")
+                    break
+
+            ret, frame = self.cap.read()
+            if not ret:
+                if is_file:
+                    # Loop file-based sources
+                    self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
                     continue
+                elif is_network and reconnect_attempts < max_reconnect:
+                    reconnect_attempts += 1
+                    print(f"[StreamManager] Frame read failed. Reconnecting ({reconnect_attempts}/{max_reconnect})...")
+                    time.sleep(1)
+                    self.cap.release()
+                    self.cap = cv2.VideoCapture(self.source_path, cv2.CAP_FFMPEG)
+                    self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 2)
+                    continue
+                else:
+                    time.sleep(0.05)
+                    continue
+
+            # Successful read — reset reconnect counter
+            reconnect_attempts = 0
 
             frame_counter += 1
             if frame_counter % 10 == 0:
@@ -164,6 +309,7 @@ class StreamManager:
             summary["fps"] = round(fps, 1)
             summary["status"] = "running"
             summary["source_type"] = self.source_type
+            summary["source_url"] = str(self.source_path) if isinstance(self.source_path, str) else f"webcam:{self.source_path}"
             summary["model"] = self.model_name
 
             with self.lock:
@@ -175,48 +321,93 @@ class StreamManager:
 
         print("[StreamManager] Capture loop terminated.")
 
-stream_manager = StreamManager()
 
-# Auto-start default sample stream on startup
+def ensure_default_stream():
+    """Lazily start the default mining yard stream if no stream is currently active."""
+    if not stream_manager.running:
+        sample_path = os.path.join(SAMPLES_DIR, "mining_yard_sample.mp4")
+        if not os.path.exists(sample_path):
+            try:
+                from mining_yard_counter import generate_mining_yard_sample_video
+                generate_mining_yard_sample_video(sample_path)
+            except Exception as ex:
+                print(f"[TireCounter] Sample generator warning: {ex}")
+        if os.path.exists(sample_path):
+            stream_manager.start_stream("sample", sample_path, model_name="yolov8n.pt", conf=0.25)
+
+# Trigger auto-start at import time
+threading.Thread(target=ensure_default_stream, daemon=True).start()
+
+# Auto-start default sample stream on startup in background
 @app.on_event("startup")
 def startup_event():
-    sample_path = os.path.join(SAMPLES_DIR, "mining_yard_sample.mp4")
-    if not os.path.exists(sample_path):
-        from mining_yard_counter import generate_mining_yard_sample_video
-        generate_mining_yard_sample_video(sample_path)
-    stream_manager.start_stream("sample", sample_path, model_name="yolov8n.pt", conf=0.25)
+    ensure_default_stream()
+
 
 @app.get("/")
 def index_page():
     return FileResponse(os.path.join(STATIC_DIR, "index.html"))
 
+
 @app.post("/api/source/select")
 async def select_source(
-    source_type: str = Form(...), # "sample", "webcam", "rtsp", "upload"
+    source_type: str = Form(...), # "sample", "webcam", "rtsp", "upload", "public_url"
     camera_index: int = Form(0),
     rtsp_url: str = Form(""),
+    public_url: str = Form(""),
     model_name: str = Form("yolov8n.pt"),
-    conf: float = Form(0.25)
+    conf: float = Form(0.25),
+    iou: float = Form(0.45),
 ):
-    """Switch video source dynamically."""
-    if source_type == "webcam":
+    """
+    Switch video source dynamically.
+    Supported source_type values:
+      - 'sample'         : Built-in simulated mining yard video
+      - 'sample_conveyor': Built-in conveyor belt simulation
+      - 'webcam'         : Local USB / integrated webcam by index
+      - 'rtsp'           : RTSP stream (rtsp://...)
+      - 'public_url'     : Any public stream URL:
+                           rtsp://, rtmp://, http://, https://
+                           including m3u8 HLS, MJPEG IP cam, city cameras, etc.
+      - 'upload'         : Previously uploaded video file
+    """
+    st = source_type.lower().strip()
+    if st in ("webcam", "camera"):
         src = camera_index
-    elif source_type == "rtsp":
-        if not rtsp_url.strip():
+    elif st in ("rtsp", "cctv"):
+        url = (rtsp_url or public_url).strip()
+        if not url:
             raise HTTPException(status_code=400, detail="RTSP URL cannot be empty.")
-        src = rtsp_url.strip()
-    elif source_type == "sample":
+        src = url
+    elif st in ("public_url", "public", "url", "stream", "city_cam", "youtube"):
+        url = (public_url or rtsp_url).strip()
+        if not url:
+            raise HTTPException(status_code=400, detail="Public URL cannot be empty.")
+        # Auto-fix missing protocol (e.g. youtube.com or www.youtube.com)
+        if not any(url.lower().startswith(s) for s in ("http://", "https://", "rtsp://", "rtmp://", "udp://", "tcp://")):
+            url = "https://" + url
+        # Auto-resolve YouTube / Twitch / social media URLs to real stream via yt-dlp
+        src = resolve_stream_url(url)
+    elif st in ("sample", "mining_yard"):
         src = os.path.join(SAMPLES_DIR, "mining_yard_sample.mp4")
-    elif source_type == "sample_conveyor":
+    elif st in ("sample_conveyor", "conveyor"):
         src = os.path.join(SAMPLES_DIR, "conveyor_sample.mp4")
         if not os.path.exists(src):
             from generate_sample_video import create_synthetic_tire_video
             create_synthetic_tire_video(src)
+    elif st == "upload":
+        src = (public_url or rtsp_url).strip()
     else:
-        raise HTTPException(status_code=400, detail="Invalid source type.")
+        # Fallback: if it starts with http/rtsp, treat as public_url
+        if any(source_type.lower().startswith(s) for s in ("http://", "https://", "rtsp://", "rtmp://")):
+            src = resolve_stream_url(source_type.strip())
+            st = "public_url"
+        else:
+            raise HTTPException(status_code=400, detail=f"Invalid source type: '{source_type}'.")
 
-    stream_manager.start_stream(source_type, src, model_name=model_name, conf=conf)
-    return {"status": "ok", "source_type": source_type, "source": str(src), "model": model_name}
+    stream_manager.start_stream(st, src, model_name=model_name, conf=conf, iou=iou)
+    return {"status": "ok", "source_type": st, "source": str(src), "model": model_name}
+
 
 @app.post("/api/source/upload")
 async def upload_video(
@@ -235,12 +426,27 @@ async def upload_video(
 @app.get("/api/stream")
 def video_feed():
     """Generates MJPEG multipart stream from latest analyzed frame."""
+    ensure_default_stream()
+
     def generate():
+        standby_rendered = False
         while True:
             with stream_manager.lock:
                 frame = stream_manager.latest_frame
+
             if frame is None:
-                time.sleep(0.05)
+                # Render a standby frame so the browser doesn't wait with a blank black screen
+                standby = np.zeros((480, 854, 3), dtype=np.uint8)
+                cv2.putText(standby, "MINING OTR & WAREHOUSE TIRE COUNTER", (80, 210),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.75, (255, 255, 255), 2)
+                cv2.putText(standby, "Initializing YOLO Model & Video Pipeline...", (140, 260),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 215, 255), 1)
+                cv2.putText(standby, "Select source or model below to stream live detection", (120, 300),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.45, (180, 180, 180), 1)
+                _, buffer = cv2.imencode('.jpg', standby, [cv2.IMWRITE_JPEG_QUALITY, 80])
+                yield (b'--frame\r\n'
+                       b'Content-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n')
+                time.sleep(0.5)
                 continue
 
             # Encode as JPEG
@@ -259,6 +465,7 @@ def video_feed():
 @app.get("/api/telemetry")
 def get_telemetry():
     """Returns current live stock, FPS, zone breakdown, and recent logs."""
+    ensure_default_stream()
     with stream_manager.lock:
         summary = dict(stream_manager.latest_summary)
         logs = list(stream_manager.counter.event_logs[-20:]) if stream_manager.counter else []
@@ -267,6 +474,7 @@ def get_telemetry():
         "recent_events": logs,
         "configured_zones": list(stream_manager.yard_zones.keys()),
     }
+
 
 @app.post("/api/zones/update")
 async def update_zones(payload: Dict[str, Any]):
@@ -301,5 +509,5 @@ def export_json():
 
 if __name__ == "__main__":
     import uvicorn
-    print("Starting Mining Tire Counter Web Server at http://localhost:8000")
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    print("Starting Mining Tire Counter Web Server at http://localhost:8001")
+    uvicorn.run(app, host="0.0.0.0", port=8001)
