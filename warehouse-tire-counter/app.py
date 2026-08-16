@@ -322,9 +322,12 @@ class StreamManager:
         print("[StreamManager] Capture loop terminated.")
 
 
+stream_manager = StreamManager()
+
 def ensure_default_stream():
     """Lazily start the default mining yard stream if no stream is currently active."""
     if not stream_manager.running:
+
         sample_path = os.path.join(SAMPLES_DIR, "mining_yard_sample.mp4")
         if not os.path.exists(sample_path):
             try:
