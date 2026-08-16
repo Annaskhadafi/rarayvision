@@ -6,7 +6,7 @@ const isLocalVite = typeof window !== 'undefined' && (window.location.hostname =
 const TIRE_API = isLocalVite ? 'http://localhost:8001' : '/tire-api'
 
 // Stream & Status
-const streamSrc = ref(`${TIRE_API}/api/stream?t=${Date.now()}`)
+const streamSrc = ref('')
 const sourceBadge = ref('SIMULATED MINING YARD')
 const fps = ref('0.0')
 const statusActive = ref(false)
@@ -176,11 +176,16 @@ async function pollTelemetry() {
 
 onMounted(() => {
   pollTelemetry()
-  pollingTimer = setInterval(pollTelemetry, 800)
+  pollingTimer = setInterval(pollTelemetry, 1000)
+  // Attach stream after initial DOM mount to complete browser document load state and stop tab spinner
+  setTimeout(() => {
+    streamSrc.value = `${TIRE_API}/api/stream?t=${Date.now()}`
+  }, 350)
 })
 
 onBeforeUnmount(() => {
   clearInterval(pollingTimer)
+  streamSrc.value = ''
 })
 </script>
 
@@ -222,8 +227,12 @@ onBeforeUnmount(() => {
       <div class="tc-left">
         <!-- Video Stream -->
         <div class="tc-video-wrap">
-          <img :src="streamSrc" alt="Tire Detection Live Stream" class="tc-video-img" />
+          <img v-if="streamSrc" :src="streamSrc" alt="Tire Detection Live Stream" class="tc-video-img" />
+          <div v-else class="tc-video-img" style="display:flex; align-items:center; justify-content:center; background:#0b1120; color:#94a3b8; font-size:14px;">
+            <span>⏳ Loading video stream...</span>
+          </div>
           <div class="tc-video-badge">{{ sourceBadge }}</div>
+
           <div class="tc-stream-actions">
             <button class="tc-icon-btn" @click="reloadStream" title="Refresh Stream">
               <svg viewBox="0 0 24 24" width="17" height="17" stroke="currentColor" stroke-width="2" fill="none"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.19"/></svg>
