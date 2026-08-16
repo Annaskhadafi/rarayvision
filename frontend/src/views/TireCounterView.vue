@@ -1,7 +1,9 @@
 <script setup>
 import { ref, onMounted, onBeforeUnmount } from 'vue'
 
-const TIRE_API = 'http://localhost:8001'
+// Dynamic API base URL: Use Nginx reverse proxy /tire-api in Docker/Dokploy production, or localhost:8001 for local Vite dev
+const isLocalVite = typeof window !== 'undefined' && (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') && window.location.port === '5173'
+const TIRE_API = isLocalVite ? 'http://localhost:8001' : '/tire-api'
 
 // Stream & Status
 const streamSrc = ref(`${TIRE_API}/api/stream?t=${Date.now()}`)
@@ -205,10 +207,15 @@ onBeforeUnmount(() => {
 
     <!-- Offline Banner -->
     <div v-if="serverOffline" class="tc-offline-banner">
-      ⚠️ Tire Counter service is not running on <strong>localhost:8001</strong>. Start it with:
-      <code>python "d:/[01] PROJECT/Raray VIsion/warehouse-tire-counter/app.py"</code>
-      &nbsp;then refresh.
+      ⚠️ Tire Counter microservice sedang tidak aktif / connecting ke <strong>{{ isLocalVite ? 'localhost:8001' : '/tire-api' }}</strong>.
+      <span v-if="isLocalVite">
+        &nbsp;Jalankan: <code>python "d:/[01] PROJECT/Raray VIsion/warehouse-tire-counter/app.py"</code> lalu refresh.
+      </span>
+      <span v-else>
+        &nbsp;Pastikan container <code>rarayvision-tire-counter</code> aktif di Dokploy.
+      </span>
     </div>
+
 
     <div class="tc-grid">
       <!-- LEFT: Video Feed + Source Controls -->
