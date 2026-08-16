@@ -100,8 +100,11 @@ async function applySource(type, extra = {}) {
       }
       sourceBadge.value = badgeMap[type] || type.toUpperCase()
       activeSourceUrl.value = extra.public_url || extra.rtsp_url || ''
-      setTimeout(reloadStream, 450)
+      setTimeout(reloadStream, 500)
+      setTimeout(reloadStream, 2000)
+      setTimeout(reloadStream, 4000)
     } else {
+
       const err = await res.json().catch(() => ({}))
       alert(`Error: ${err.detail || 'Failed to switch source'}`)
     }

@@ -227,10 +227,11 @@ class StreamManager:
             if is_network_stream:
                 # Use FFMPEG backend for maximum format compatibility (m3u8, HLS, MJPEG, RTSP, RTMP)
                 self.cap = cv2.VideoCapture(self.source_path, cv2.CAP_FFMPEG)
-                # Reduce internal buffer to get near-realtime frames from city cameras
                 self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 2)
             else:
                 self.cap = cv2.VideoCapture(self.source_path)
+                if not self.cap.isOpened() and isinstance(self.source_path, str):
+                    self.cap = cv2.VideoCapture(self.source_path, cv2.CAP_FFMPEG)
 
             self.is_running = True
             self.thread = threading.Thread(target=self._capture_loop, daemon=True)
@@ -288,9 +289,18 @@ class StreamManager:
                     self.cap = cv2.VideoCapture(self.source_path, cv2.CAP_FFMPEG)
                     self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 2)
                     continue
+                elif is_file and reconnect_attempts < max_reconnect:
+                    reconnect_attempts += 1
+                    print(f"[StreamManager] Opening file source ({reconnect_attempts}/{max_reconnect})...")
+                    time.sleep(1)
+                    self.cap = cv2.VideoCapture(self.source_path)
+                    if not self.cap.isOpened():
+                        self.cap = cv2.VideoCapture(self.source_path, cv2.CAP_FFMPEG)
+                    continue
                 else:
                     print("[StreamManager] Source unavailable or max reconnects reached. Stopping.")
                     break
+
 
             ret, frame = self.cap.read()
             if not ret:
