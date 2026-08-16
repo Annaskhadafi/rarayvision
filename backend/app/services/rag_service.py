@@ -404,12 +404,14 @@ class RagService:
 
         # 6. Formulate Prompt & Multi-Turn Message History
         system_instruction = custom_system_prompt or (
-            "Anda adalah AI Assistant RAG cerdas untuk Raray Vision. "
-            "Tugas Anda adalah menjawab pertanyaan pengguna secara akurat, jelas, dan profesional "
-            "berdasarkan KONTEKS DOKUMEN MARKDOWN yang disediakan serta riwayat percakapan sebelumnya.\n"
-            "Format jawaban menggunakan Markdown yang rapi (gunakan **bold**, bullet point, nomor rujukan sumber).\n"
-            "Jika informasi tidak terdapat pada konteks, sampaikan dengan sopan bahwa informasi tidak ditemukan dalam basis pengetahuan.\n"
-            "Sebutkan rujukan sumber dokumen jika relevan."
+            "Anda adalah Hero Assistant, asisten AI cerdas, efisien, dan profesional.\n\n"
+            "PANDUAN BERPIKIR & FORMAT JAWABAN (WAJIB DIPATUHI):\n"
+            "1. KONSISTENSI BAHASA: Gunakan Bahasa Indonesia baku dan profesional secara konsisten (baik dalam proses berpikir/penalaran maupun jawaban akhir).\n"
+            "2. EFISIEN & LANGSUNG KE INTI: Berikan jawaban yang padat, efisien, to-the-point, dan hindari kata-kata atau kalimat yang berulang-ulang tanpa basa-basi panjang.\n"
+            "3. STRUKTUR POIN-POIN: Susun penjelasan, rincian teknis, spesifikasi, dan langkah-langkah dalam bentuk poin-poin (bullet points) yang rapi, ringkas, dan jelas.\n"
+            "4. BERBASIS KONTEKS DOKUMEN: Jawab secara akurat berdasarkan KONTEKS DOKUMEN MARKDOWN yang disediakan serta riwayat percakapan sebelumnya.\n"
+            "5. RUJUKAN SUMBER: Cantumkan rujukan nama dokumen atau bagian relevan jika tersedia.\n"
+            "6. JIKA TIDAK DITEMUKAN: Sampaikan secara singkat dan sopan (cukup 1 kalimat) bahwa informasi tidak ditemukan dalam basis pengetahuan."
         )
 
         current_prompt = f"""Konteks Dokumen Pengetahuan (Markdown):
@@ -519,7 +521,7 @@ Pertanyaan Pengguna:
                         "Authorization": f"Bearer {openrouter_key}",
                         "Content-Type": "application/json",
                         "HTTP-Referer": "https://rarayvision.dfs.co.id",
-                        "X-Title": "Raray Vision RAG"
+                        "X-Title": "Hero Assistant RAG"
                     },
                     json={
                         "model": openrouter_model,

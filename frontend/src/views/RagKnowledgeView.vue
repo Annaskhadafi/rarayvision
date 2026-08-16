@@ -69,7 +69,7 @@ const redisStatus = ref(null)
 const chatMessages = ref([
   {
     role: 'assistant',
-    content: 'Halo! Saya adalah AI Chatbot RAG terhubung ke basis pengetahuan Anda (didukung oleh **Groq Qwen 2.5/3.6** & **Redis Memory**). Tanyakan apa saja mengenai dokumen dan data database yang telah Anda sinkronkan.',
+    content: 'Halo! Saya adalah Hero Assistant terhubung ke basis pengetahuan Anda (didukung oleh **Groq Qwen 2.5/3.6** & **Redis Memory**). Tanyakan apa saja mengenai dokumen dan data database yang telah Anda sinkronkan.',
     sources: []
   }
 ])
@@ -556,7 +556,7 @@ const clearChat = async () => {
   chatMessages.value = [
     {
       role: 'assistant',
-      content: 'Halo! Sesi percakapan baru telah dibuat. Saya adalah AI Chatbot RAG terhubung ke basis pengetahuan Anda (didukung oleh **Groq Qwen 2.5/3.6** dan **Redis Memory**). Tanyakan apa saja mengenai dokumen dan data database yang telah Anda sinkronkan.',
+      content: 'Halo! Sesi percakapan baru telah dibuat. Saya adalah Hero Assistant terhubung ke basis pengetahuan Anda (didukung oleh **Groq Qwen 2.5/3.6** dan **Redis Memory**). Tanyakan apa saja mengenai dokumen dan data database yang telah Anda sinkronkan.',
       sources: []
     }
   ]
@@ -1396,7 +1396,7 @@ print("Sumber:", [s["filename"] for s in chat_res["data"]["sources"]])`
               :class="['chat-bubble-wrap', msg.role]"
             >
               <div class="chat-bubble">
-                <div class="bubble-sender">{{ msg.role === 'user' ? 'Anda' : 'AI Assistant' }}</div>
+                <div class="bubble-sender">{{ msg.role === 'user' ? 'Anda' : 'Hero Assistant' }}</div>
                 <div class="bubble-content" v-html="formatMarkdown(msg.content)"></div>
 
                 <!-- Sources Footnote -->
