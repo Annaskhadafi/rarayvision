@@ -8,12 +8,20 @@ from typing import Optional, Dict, Any, List
 import numpy as np
 
 import anydoc
-from backend.app.services.s3_service import upload_file_to_s3
-from backend.app.services.pdf_inspector_service import (
-    PdfInspectorService,
-    get_rapid_ocr,
-    format_ocr_to_markdown
-)
+try:
+    from app.services.s3_service import upload_file_to_s3
+    from app.services.pdf_inspector_service import (
+        PdfInspectorService,
+        get_rapid_ocr,
+        format_ocr_to_markdown
+    )
+except ImportError:
+    from backend.app.services.s3_service import upload_file_to_s3
+    from backend.app.services.pdf_inspector_service import (
+        PdfInspectorService,
+        get_rapid_ocr,
+        format_ocr_to_markdown
+    )
 
 logger = logging.getLogger(__name__)
 
@@ -270,9 +278,16 @@ class AnyDocService:
         if not ocr_engine:
             raise ValueError("RapidOCR ONNX engine is not available on this server.")
 
-        from PIL import Image
-        image = Image.open(io.BytesIO(file_bytes)).convert("RGB")
-        img_np = np.array(image)
+        try:
+            import cv2
+            nparr = np.frombuffer(file_bytes, np.uint8)
+            img_np = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+            if img_np is None:
+                raise ValueError("cv2 decode returned None")
+        except Exception:
+            from PIL import Image
+            image = Image.open(io.BytesIO(file_bytes)).convert("RGB")
+            img_np = np.array(image)
 
         ocr_result, _ = ocr_engine(img_np)
         return format_ocr_to_markdown(ocr_result)

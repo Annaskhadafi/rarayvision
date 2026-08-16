@@ -89,8 +89,11 @@ class TireImageProcessingPipeline:
         logger.info(f"Downloading image from URL: {image_url}")
         response = requests.get(image_url, timeout=30)
         response.raise_for_status()
-        pil_image = Image.open(BytesIO(response.content))
-        return cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
+        img = cv2.imdecode(np.frombuffer(response.content, np.uint8), cv2.IMREAD_COLOR)
+        if img is None:
+            pil_image = Image.open(BytesIO(response.content))
+            return cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
+        return img
 
     def preprocess_tire_image(self, flattened_image: np.ndarray) -> np.ndarray:
         """Crop to non-zero region and apply configured preprocessing."""

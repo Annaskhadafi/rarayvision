@@ -15,7 +15,13 @@ def get_rapid_ocr():
         try:
             from rapidocr_onnxruntime import RapidOCR
             _rapid_ocr_instance = RapidOCR()
-            logger.info("[PdfInspectorService] RapidOCR ONNX engine initialized successfully.")
+            # Fast warm-up to pre-compile ONNX graph and eliminate first-request latency
+            try:
+                dummy_img = np.zeros((64, 64, 3), dtype=np.uint8)
+                _rapid_ocr_instance(dummy_img)
+            except Exception:
+                pass
+            logger.info("[PdfInspectorService] RapidOCR ONNX engine initialized and warmed up successfully.")
         except Exception as e:
             logger.error(f"[PdfInspectorService] Could not initialize RapidOCR: {e}")
             _rapid_ocr_instance = False
@@ -26,11 +32,11 @@ def format_ocr_to_markdown(ocr_result: list) -> str:
     """
     Reconstructs raw OCR bounding boxes and text tokens into clean, structured Markdown
     (Headings #/##, Lists, Tables, and Paragraphs) based on spatial geometry and line heights.
+    Optimized for high-speed clustering with zero redundant allocations.
     """
     if not ocr_result:
         return ""
 
-    # Parse and extract bounding box metrics
     parsed_items = []
     heights = []
     for item in ocr_result:
@@ -49,7 +55,7 @@ def format_ocr_to_markdown(ocr_result: list) -> str:
         min_y, max_y = min(ys), max(ys)
         h = max(max_y - min_y, 1.0)
         w = max(max_x - min_x, 1.0)
-        center_y = (min_y + max_y) / 2.0
+        center_y = (min_y + max_y) * 0.5
 
         heights.append(h)
         parsed_items.append({
@@ -70,8 +76,9 @@ def format_ocr_to_markdown(ocr_result: list) -> str:
     # Sort all items from top to bottom
     parsed_items.sort(key=lambda it: it["center_y"])
     median_height = float(np.median(heights)) if heights else 14.0
+    y_threshold = median_height * 0.6
 
-    # Group items into horizontal lines
+    # Group items into horizontal lines with O(1) running average
     lines = []
     current_line = []
     current_line_y = None
@@ -81,10 +88,12 @@ def format_ocr_to_markdown(ocr_result: list) -> str:
             current_line = [item]
             current_line_y = item["center_y"]
         else:
-            # If vertical distance is within 55% of line height, treat as same line
-            if abs(item["center_y"] - current_line_y) < (median_height * 0.6):
+            # If vertical distance is within threshold of line height, treat as same line
+            if abs(item["center_y"] - current_line_y) < y_threshold:
                 current_line.append(item)
-                current_line_y = np.mean([it["center_y"] for it in current_line])
+                # O(1) update to running average center
+                count = len(current_line)
+                current_line_y = (current_line_y * (count - 1) + item["center_y"]) / count
             else:
                 current_line.sort(key=lambda it: it["min_x"])
                 lines.append(current_line)
@@ -103,7 +112,7 @@ def format_ocr_to_markdown(ocr_result: list) -> str:
             continue
 
         line_texts = [it["text"] for it in line]
-        line_height = np.mean([it["height"] for it in line])
+        line_height = sum(it["height"] for it in line) / len(line)
         line_str = " ".join(line_texts).strip()
 
         if not line_str:
@@ -166,7 +175,6 @@ class PdfInspectorService:
 
             if auto_ocr and needs_ocr:
                 try:
-                    import gc
                     import pypdfium2 as pdfium
                     ocr_engine = get_rapid_ocr()
 
@@ -195,15 +203,12 @@ class PdfInspectorService:
 
                             if page_num in target_pages:
                                 page = pdf_doc[page_idx]
-                                bitmap = page.render(scale=1.5) # 1.5x scale is sharp and uses 50% less RAM
-                                pil_img = bitmap.to_pil()
-                                img_np = np.array(pil_img)
+                                # Zero-copy rendering direct to numpy array (1.5x scale)
+                                bitmap = page.render(scale=1.5)
+                                img_np = bitmap.to_numpy()
 
                                 ocr_res, _ = ocr_engine(img_np)
                                 page_md = format_ocr_to_markdown(ocr_res)
-                                
-                                del bitmap, pil_img, img_np
-                                gc.collect()
 
                                 if page_md:
                                     ocr_applied_pages.append(page_num)
@@ -269,8 +274,7 @@ class PdfInspectorService:
 
                 page = pdf_doc[page_idx]
                 bitmap = page.render(scale=2.0)
-                pil_img = bitmap.to_pil()
-                img_np = np.array(pil_img)
+                img_np = bitmap.to_numpy()
 
                 ocr_res, _ = ocr_engine(img_np)
                 page_md = format_ocr_to_markdown(ocr_res)
