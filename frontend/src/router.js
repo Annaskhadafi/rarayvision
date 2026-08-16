@@ -40,6 +40,15 @@ const routes = [
     meta: { requiresAuth: true }
   },
   {
+    path: '/anydoc',
+    component: () => import('./views/AnyDocConverterView.vue'),
+    meta: { requiresAuth: true }
+  },
+  {
+    path: '/document-converter',
+    redirect: '/anydoc'
+  },
+  {
     path: '/anti-spoof',
     component: () => import('./views/AntiSpoofCompareView.vue'),
     meta: { requiresAuth: true }

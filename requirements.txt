@@ -27,6 +27,7 @@ ninja
 supervision>=0.25.0
 inference-sdk>=0.9.0
 pdf-inspector>=1.14.2
+firecrawl-anydoc>=0.1.9
 rapidocr_onnxruntime>=1.4.4
 pypdfium2>=4.30.0
 uniface>=4.0.0
