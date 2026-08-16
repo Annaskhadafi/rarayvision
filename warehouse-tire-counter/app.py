@@ -60,6 +60,11 @@ def _extract_with_ytdlp(url: str) -> str:
         print(f"[TireCounter] Resolving media URL via yt-dlp: {url}")
         ydl_opts_info = {
             'format': 'best[ext=mp4]/best',
+            'extractor_args': {
+                'youtube': {
+                    'player_client': ['android', 'web']
+                }
+            },
             'quiet': True,
             'no_warnings': True,
             'noplaylist': True,
@@ -88,6 +93,11 @@ def _extract_with_ytdlp(url: str) -> str:
             ydl_opts_download = {
                 'format': 'best[ext=mp4]/best',
                 'outtmpl': cached_path,
+                'extractor_args': {
+                    'youtube': {
+                        'player_client': ['android', 'web']
+                    }
+                },
                 'quiet': True,
                 'no_warnings': True,
                 'noplaylist': True,
@@ -181,6 +191,7 @@ class StreamManager:
     def start_stream(self, source_type: str, source_path: Any, model_name: str = "yolov8n.pt", conf: float = 0.25, iou: float = 0.45):
         with self.lock:
             self.stop_stream_locked()
+            self.latest_frame = None
             self.source_type = source_type
             self.source_path = source_path
             self.model_name = model_name
@@ -194,18 +205,23 @@ class StreamManager:
                     generate_mining_yard_sample_video(self.source_path)
 
             print(f"[StreamManager] Initializing TireCounter with {model_name} on {source_path}")
+            # Use predefined zones only for built-in sample yard simulation
+            use_zones = self.yard_zones if source_type == "sample" else {}
+            use_line = self.transit_line if source_type == "sample" else None
+
             self.counter = TireCounter(
                 model_path=self.model_name,
                 conf_threshold=self.conf_thresh,
                 iou_threshold=self.iou_thresh,
-                zones=self.yard_zones,
-                line_points=self.transit_line,
+                zones=use_zones,
+                line_points=use_line,
             )
 
             # Open video capture with appropriate backend flags
             is_network_stream = (
                 source_type in ("rtsp", "public_url")
-                or (isinstance(source_path, str) and source_path.startswith(("rtsp://", "rtmp://", "http://", "https://", "udp://", "tcp://")))
+                and isinstance(source_path, str)
+                and source_path.startswith(("rtsp://", "rtmp://", "http://", "https://", "udp://", "tcp://"))
             )
 
             if is_network_stream:
@@ -261,7 +277,7 @@ class StreamManager:
         is_network = isinstance(self.source_path, str) and self.source_path.startswith(
             ("rtsp://", "rtmp://", "http://", "https://", "udp://", "tcp://")
         )
-        is_file = self.source_type in ("sample", "sample_conveyor", "upload")
+        is_file = (not is_network) or self.source_type in ("sample", "sample_conveyor", "upload", "public_url")
 
         while self.is_running:
             if not self.cap or not self.cap.isOpened():
