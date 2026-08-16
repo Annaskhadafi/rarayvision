@@ -1,13 +1,33 @@
+import logging
 from typing import List, Optional, Dict, Any
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
-from ..database.database import get_db
+from ..database.database import get_db, SessionLocal
 from ..database.rag_datasource_models import RagExternalDatabase
 from ..services.rag_datasource_service import RagDatasourceService
 
+logger = logging.getLogger("rarayvision.rag_datasource")
 router = APIRouter(prefix="/api/v1/rag/databases", tags=["RAG External Databases"])
+
+
+def _run_background_sync(db_id: str, override_tables: Optional[List[str]], max_rows: int):
+    """Runs table sync and embedding in isolated background task."""
+    db = SessionLocal()
+    try:
+        logger.info(f"[RagDatasource] Starting background sync for database {db_id}...")
+        res = RagDatasourceService.sync_database_tables(
+            db_session=db,
+            connection_id=db_id,
+            selected_tables_override=override_tables,
+            max_rows_per_table=max_rows
+        )
+        logger.info(f"[RagDatasource] Background sync finished for {db_id}: {res.get('message')}")
+    except Exception as e:
+        logger.error(f"[RagDatasource] Background sync uncaught error for {db_id}: {e}")
+    finally:
+        db.close()
 
 
 class TestConnectionRequest(BaseModel):
@@ -184,27 +204,42 @@ def delete_external_database(db_id: str, db: Session = Depends(get_db)):
 @router.post("/{db_id}/sync")
 def sync_external_database(
     db_id: str,
+    background_tasks: BackgroundTasks,
     req: Optional[SyncDatabaseRequest] = None,
     db: Session = Depends(get_db)
 ):
-    """Triggers table extraction, Markdown serialization, and vector ingestion into RAG."""
+    """Triggers table extraction, Markdown serialization, and vector ingestion into RAG in the background."""
+    record = db.query(RagExternalDatabase).filter(RagExternalDatabase.id == db_id).first()
+    if not record:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Koneksi database tidak ditemukan.")
+
     override_tables = req.selected_tables if req else None
-    max_rows = req.max_rows_per_table if req and req.max_rows_per_table else 500
-
-    result = RagDatasourceService.sync_database_tables(
-        db_session=db,
-        connection_id=db_id,
-        selected_tables_override=override_tables,
-        max_rows_per_table=max_rows
-    )
-
-    if not result.get("success"):
+    tables_to_sync = override_tables or record.selected_tables or []
+    if not tables_to_sync:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=result.get("message", "Gagal menyinkronkan tabel ke basis data pengetahuan.")
+            detail="Tidak ada tabel yang dipilih untuk disinkronkan. Silakan centang minimal 1 tabel."
         )
+
+    # Immediately mark as syncing in DB so other endpoints see status
+    record.status = "syncing"
+    db.commit()
+
+    max_rows = req.max_rows_per_table if req and req.max_rows_per_table else 500
+
+    background_tasks.add_task(
+        _run_background_sync,
+        db_id=db_id,
+        override_tables=override_tables,
+        max_rows=max_rows
+    )
 
     return {
         "status": "success",
-        "data": result
+        "message": f"Sinkronisasi {len(tables_to_sync)} tabel untuk database '{record.name}' telah dimulai di latar belakang.",
+        "data": {
+            "database_id": db_id,
+            "status": "syncing",
+            "tables": tables_to_sync
+        }
     }

@@ -18,8 +18,8 @@ cleanup() {
 trap cleanup SIGINT SIGTERM
 
 # 2. Start Main Raray Vision FastAPI Backend (Port 5000) in foreground
-echo "-> Starting Main Vision API on port 5000..."
-cd /app && uvicorn backend.main:app --host 0.0.0.0 --port 5000 &
+echo "-> Starting Main Vision API on port 5000 with multi-worker support..."
+cd /app && uvicorn backend.main:app --host 0.0.0.0 --port 5000 --workers 2 --timeout-keep-alive 65 &
 MAIN_PID=$!
 
 # Wait for any process to exit

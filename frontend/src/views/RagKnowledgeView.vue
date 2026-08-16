@@ -347,41 +347,81 @@ const handleSaveDatabase = async () => {
   }
 }
 
+let syncPollInterval = null
+
+const startSyncPolling = (dbId, dbName) => {
+  if (syncPollInterval) clearInterval(syncPollInterval)
+  let attempts = 0
+
+  syncPollInterval = setInterval(async () => {
+    attempts++
+    try {
+      await fetchExternalDatabases()
+      const currentDb = externalDatabases.value.find(d => d.id === dbId)
+      if (currentDb) {
+        if (currentDb.status === 'active' && currentDb.last_sync_status === 'success') {
+          clearInterval(syncPollInterval)
+          syncPollInterval = null
+          isSyncingDb.value = false
+          syncingDbId.value = null
+          syncStatusMessage.value = {
+            type: 'success',
+            text: `✅ Sukses! Tabel database "${dbName}" (${currentDb.total_chunks_synced || 0} chunks) telah selesai disinkronkan ke Knowledge Base.`
+          }
+          await fetchLibrary()
+        } else if (currentDb.status === 'error') {
+          clearInterval(syncPollInterval)
+          syncPollInterval = null
+          isSyncingDb.value = false
+          syncingDbId.value = null
+          syncStatusMessage.value = {
+            type: 'error',
+            text: `❌ Sinkronisasi database gagal: ${currentDb.last_error_message || 'Terjadi kesalahan saat memproses data tabel.'}`
+          }
+        }
+      }
+      if (attempts > 50) { // Stop polling after ~2.5 minutes
+        clearInterval(syncPollInterval)
+        syncPollInterval = null
+        isSyncingDb.value = false
+        syncingDbId.value = null
+      }
+    } catch (e) {
+      console.warn('Sync poll error:', e)
+    }
+  }, 3000)
+}
+
 const handleSyncDatabase = async (dbRecord) => {
   syncingDbId.value = dbRecord.id
   isSyncingDb.value = true
   syncStatusMessage.value = {
     type: 'info',
-    text: `⚡ Sedang menarik data tabel dan menyusun vektor RAG untuk "${dbRecord.name}"...`
+    text: `⚡ Sinkronisasi tabel untuk "${dbRecord.name}" telah dimulai di latar belakang...`
   }
 
   try {
     const res = await ragService.syncExternalDatabase(dbRecord.id, {
-      max_rows_per_table: dbForm.value.maxRowsPerTable || 500
+      max_rows_per_table: dbForm.value.maxRowsPerTable || 300
     })
 
-    if (res?.data?.success) {
-      syncStatusMessage.value = {
-        type: 'success',
-        text: `✅ ${res.data.message} (${res.data.elapsed_ms} ms)`
-      }
-      await Promise.all([
-        fetchExternalDatabases(),
-        fetchLibrary()
-      ])
+    if (res?.status === 'success') {
       dbViewMode.value = 'list'
+      await fetchExternalDatabases()
+      startSyncPolling(dbRecord.id, dbRecord.name)
     } else {
       syncStatusMessage.value = {
         type: 'error',
-        text: `❌ ${res?.data?.message || 'Gagal sinkronisasi data tabel.'}`
+        text: `❌ ${res?.message || 'Gagal memulai sinkronisasi.'}`
       }
+      isSyncingDb.value = false
+      syncingDbId.value = null
     }
   } catch (err) {
     syncStatusMessage.value = {
       type: 'error',
       text: `❌ Gagal sinkronisasi: ${err.message}`
     }
-  } finally {
     isSyncingDb.value = false
     syncingDbId.value = null
   }
