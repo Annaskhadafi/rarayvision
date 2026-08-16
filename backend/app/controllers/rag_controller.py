@@ -39,6 +39,9 @@ def get_rag_info():
     }
 
 
+from starlette.concurrency import run_in_threadpool
+
+
 @router.post("/ingest", summary="Ingest Document to Knowledge Base & pgvector")
 async def ingest_document(
     file: UploadFile = File(..., description="Document file (DOCX, PDF, XLSX, PPTX, CSV, EPUB, Images)"),
@@ -55,13 +58,15 @@ async def ingest_document(
     3. Splits Markdown into semantic chunk blocks.
     4. Generates vector embeddings via FastEmbed ONNX (100% free offline).
     5. Saves into PostgreSQL pgvector table for real-time similarity search.
+    Executed in thread pool to prevent blocking the async event loop.
     """
     try:
         file_bytes = await file.read()
         if not file_bytes:
             raise HTTPException(status_code=400, detail="Uploaded file is empty")
 
-        result = RagService.ingest_document(
+        result = await run_in_threadpool(
+            RagService.ingest_document,
             db=db,
             file_bytes=file_bytes,
             filename=file.filename or "document",
@@ -79,7 +84,7 @@ async def ingest_document(
 
 
 @router.post("/search", summary="Semantic Vector Search (pgvector Cosine Distance)")
-def search_knowledge(
+async def search_knowledge(
     req: SearchRequest,
     db: Session = Depends(get_db),
     current_user: db_models.User = Depends(get_current_user)
@@ -91,7 +96,8 @@ def search_knowledge(
     if not req.query.strip():
         raise HTTPException(status_code=400, detail="Search query cannot be empty")
 
-    results = RagService.search_similar_chunks(
+    results = await run_in_threadpool(
+        RagService.search_similar_chunks,
         db=db,
         query=req.query,
         top_k=req.top_k,
@@ -107,7 +113,7 @@ def search_knowledge(
 
 
 @router.post("/chat", summary="RAG Chatbot Endpoint (Retrieve Context + Generate Answer)")
-def rag_chat(
+async def rag_chat(
     req: ChatRequest,
     db: Session = Depends(get_db),
     current_user: db_models.User = Depends(get_current_user)
@@ -121,7 +127,8 @@ def rag_chat(
     if not req.query.strip():
         raise HTTPException(status_code=400, detail="Query cannot be empty")
 
-    chat_res = RagService.chat_completion(
+    chat_res = await run_in_threadpool(
+        RagService.chat_completion,
         db=db,
         query=req.query,
         messages=req.messages,
