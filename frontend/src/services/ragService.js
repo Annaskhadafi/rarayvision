@@ -127,7 +127,7 @@ export const ragService = {
     return this._handleResponse(res)
   },
 
-  async chat({ query, messages = null, topK = 4, documentId = null, systemPrompt = null }) {
+  async chat({ query, messages = null, sessionId = null, topK = 4, documentId = null, systemPrompt = null }) {
     const res = await fetch(`${API_BASE_URL}/api/v1/rag/chat`, {
       method: 'POST',
       headers: {
@@ -137,10 +137,33 @@ export const ragService = {
       body: JSON.stringify({
         query,
         messages,
+        session_id: sessionId,
         top_k: topK,
         document_id: documentId,
         system_prompt: systemPrompt
       })
+    })
+    return this._handleResponse(res)
+  },
+
+  async getRedisStatus() {
+    const res = await fetch(`${API_BASE_URL}/api/v1/rag/redis/status`, {
+      headers: this.getAuthHeaders()
+    })
+    return this._handleResponse(res)
+  },
+
+  async getChatSessionHistory(sessionId, limit = 15) {
+    const res = await fetch(`${API_BASE_URL}/api/v1/rag/chat/session/${sessionId}/history?limit=${limit}`, {
+      headers: this.getAuthHeaders()
+    })
+    return this._handleResponse(res)
+  },
+
+  async clearChatSession(sessionId) {
+    const res = await fetch(`${API_BASE_URL}/api/v1/rag/chat/session/${sessionId}`, {
+      method: 'DELETE',
+      headers: this.getAuthHeaders()
     })
     return this._handleResponse(res)
   },

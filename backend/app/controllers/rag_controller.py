@@ -24,6 +24,7 @@ class SearchRequest(BaseModel):
 class ChatRequest(BaseModel):
     query: str
     messages: Optional[List[Dict[str, Any]]] = None # Multi-turn conversation history
+    session_id: Optional[str] = None # Redis session ID for persistent memory
     top_k: int = 4
     document_id: Optional[str] = None
     system_prompt: Optional[str] = None
@@ -124,6 +125,7 @@ def rag_chat(
         db=db,
         query=req.query,
         messages=req.messages,
+        session_id=req.session_id,
         top_k=req.top_k,
         document_id=req.document_id,
         custom_system_prompt=req.system_prompt
@@ -132,6 +134,39 @@ def rag_chat(
     return {
         "status": "success",
         "data": chat_res
+    }
+
+
+@router.get("/redis/status", summary="Get Redis Status & Latency")
+def get_redis_status():
+    """Returns Redis connection status, ping latency, and memory statistics."""
+    from ..services.redis_service import RedisService
+    return {
+        "status": "success",
+        "data": RedisService.get_status()
+    }
+
+
+@router.get("/chat/session/{session_id}/history", summary="Get Chat Session History from Redis")
+def get_session_history(session_id: str, limit: int = Query(10, ge=1, le=50)):
+    """Retrieves persistent chat history for a session from Redis."""
+    from ..services.redis_service import RedisService
+    history = RedisService.get_chat_history(session_id, limit=limit)
+    return {
+        "status": "success",
+        "session_id": session_id,
+        "history": history
+    }
+
+
+@router.delete("/chat/session/{session_id}", summary="Clear Chat Session History from Redis")
+def clear_session_history(session_id: str):
+    """Deletes conversation memory for a session in Redis."""
+    from ..services.redis_service import RedisService
+    success = RedisService.clear_chat_history(session_id)
+    return {
+        "status": "success" if success else "not_found",
+        "message": f"Session '{session_id}' chat history cleared."
     }
 
 

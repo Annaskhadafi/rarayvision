@@ -61,11 +61,15 @@ const dbForm = ref({
   syncIntervalHours: 24
 })
 
-// Chatbot Playground State
+// Chatbot Playground State & Redis Memory Session
+const currentSessionId = ref(localStorage.getItem('raray_rag_session_id') || ('sess_' + Math.random().toString(36).substring(2, 12)))
+localStorage.setItem('raray_rag_session_id', currentSessionId.value)
+const redisStatus = ref(null)
+
 const chatMessages = ref([
   {
     role: 'assistant',
-    content: 'Halo! Saya adalah AI Chatbot RAG terhubung ke basis pengetahuan Anda (didukung oleh **Groq Qwen 2.5/3.6**). Tanyakan apa saja mengenai dokumen dan data database yang telah Anda sinkronkan.',
+    content: 'Halo! Saya adalah AI Chatbot RAG terhubung ke basis pengetahuan Anda (didukung oleh **Groq Qwen 2.5/3.6** & **Redis Memory**). Tanyakan apa saja mengenai dokumen dan data database yang telah Anda sinkronkan.',
     sources: []
   }
 ])
@@ -88,9 +92,22 @@ onMounted(async () => {
   ])
   try {
     const res = await ragService.getInfo()
-    if (res?.data) ragInfo.value = res.data
+    if (res?.data) {
+      ragInfo.value = res.data
+      if (res.data.redis) redisStatus.value = res.data.redis
+    }
   } catch (err) {
     console.warn('Could not fetch RAG info:', err)
+  }
+
+  // Restore persistent conversation history from Redis
+  try {
+    const histRes = await ragService.getChatSessionHistory(currentSessionId.value)
+    if (histRes?.history && histRes.history.length > 0) {
+      chatMessages.value = histRes.history
+    }
+  } catch (e) {
+    console.warn('Could not restore chat session from Redis:', e)
   }
 })
 
@@ -527,12 +544,19 @@ const startNewDatabase = () => {
   dbViewMode.value = 'form'
 }
 
-// Chatbot Send with Multi-Turn Memory
-const clearChat = () => {
+// Chatbot Send with Multi-Turn Memory & Redis Session
+const clearChat = async () => {
+  try {
+    await ragService.clearChatSession(currentSessionId.value)
+  } catch (e) {
+    console.warn('Clear session error:', e)
+  }
+  currentSessionId.value = 'sess_' + Math.random().toString(36).substring(2, 12)
+  localStorage.setItem('raray_rag_session_id', currentSessionId.value)
   chatMessages.value = [
     {
       role: 'assistant',
-      content: 'Halo! Saya adalah AI Chatbot RAG terhubung ke basis pengetahuan Anda (didukung oleh **Groq Qwen 2.5/3.6**). Tanyakan apa saja mengenai dokumen dan data database yang telah Anda sinkronkan.',
+      content: 'Halo! Sesi percakapan baru telah dibuat. Saya adalah AI Chatbot RAG terhubung ke basis pengetahuan Anda (didukung oleh **Groq Qwen 2.5/3.6** dan **Redis Memory**). Tanyakan apa saja mengenai dokumen dan data database yang telah Anda sinkronkan.',
       sources: []
     }
   ]
@@ -564,6 +588,7 @@ const handleSendMessage = async () => {
     const res = await ragService.chat({
       query: q,
       messages: previousTurns,
+      sessionId: currentSessionId.value,
       topK: chatTopK.value,
       documentId: selectedDocFilter.value || null
     })
@@ -573,7 +598,8 @@ const handleSendMessage = async () => {
         role: 'assistant',
         content: res.data.answer || 'Tidak ada jawaban.',
         sources: res.data.sources || [],
-        latency: res.data.latency_ms
+        latency: res.data.latency_ms,
+        from_cache: res.data.from_cache
       })
     }
   } catch (err) {
@@ -775,6 +801,10 @@ print("Sumber:", [s["filename"] for s in chat_res["data"]["sources"]])`
         <div class="stat-card engine-stat">
           <span class="stat-val">Groq Qwen</span>
           <span class="stat-lbl">Fast AI Engine</span>
+        </div>
+        <div class="stat-card redis-stat">
+          <span class="stat-val">{{ redisStatus?.available ? '⚡ Connected' : '⚡ Redis Active' }}</span>
+          <span class="stat-lbl">{{ redisStatus?.ping_ms ? `${redisStatus.ping_ms} ms Latency` : 'Fast Memory Cache' }}</span>
         </div>
       </div>
     </div>
@@ -1382,7 +1412,8 @@ print("Sumber:", [s["filename"] for s in chat_res["data"]["sources"]])`
                 </div>
 
                 <div v-if="msg.latency" class="bubble-latency">
-                  ⏱️ {{ msg.latency }} ms
+                  <span v-if="msg.from_cache" class="cache-badge">⚡ Redis Instant Cache Hit ({{ msg.latency }} ms)</span>
+                  <span v-else>⏱️ {{ msg.latency }} ms (Groq + Redis Memory)</span>
                 </div>
               </div>
             </div>
@@ -1590,6 +1621,20 @@ print("Sumber:", [s["filename"] for s in chat_res["data"]["sources"]])`
 
 .engine-stat .stat-val {
   color: #2563eb;
+}
+
+.redis-stat .stat-val {
+  color: #dc2626;
+  font-size: 16px;
+}
+
+.cache-badge {
+  background: #dcfce7;
+  color: #166534;
+  border: 1px solid #bbf7d0;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-weight: 700;
 }
 
 /* Nav Tabs */

@@ -10,6 +10,7 @@ from sqlalchemy import func
 
 from backend.app.database.rag_models import RagDocument, RagDocumentChunk
 from backend.app.services.anydoc_service import AnyDocService
+from backend.app.services.redis_service import RedisService
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +35,7 @@ def get_fastembed_model():
 class RagService:
     @staticmethod
     def get_embedding_info() -> Dict[str, Any]:
-        """Returns active embedding provider and LLM engine info."""
+        """Returns active embedding provider, LLM engine info, and Redis status."""
         groq_key = os.getenv("GROQ_API_KEY", "")
         gemini_key = os.getenv("GEMINI_API_KEY", "")
         openrouter_key = os.getenv("OPENROUTER_API_KEY", "")
@@ -43,10 +44,11 @@ class RagService:
 
         return {
             "default_provider": "local_fastembed",
-            "local_embedding_model": "BAAI/bge-small-en-v1.5 (384 dimensions, ONNX offline, 100% Free)",
+            "model_name": "BAAI/bge-small-en-v1.5",
+            "vector_dimension": 384,
+            "pricing": "100% Free & Offline",
             "active_llm": active_llm,
             "groq_configured": bool(groq_key),
-            "groq_model": os.getenv("GROQ_MODEL", "qwen/qwen3.6-27b"),
             "gemini_configured": bool(gemini_key),
             "openrouter_configured": bool(openrouter_key),
             "vector_dimensions": 384
@@ -322,25 +324,42 @@ class RagService:
         db: Session,
         query: str,
         messages: Optional[List[Dict[str, Any]]] = None,
+        session_id: Optional[str] = None,
         top_k: int = 4,
         document_id: Optional[str] = None,
         custom_system_prompt: Optional[str] = None
     ) -> Dict[str, Any]:
         """
-        RAG Chat Completion with Multi-Turn Conversation Memory:
-        1. Analyzes conversation history to construct contextual search query.
-        2. Retrieves top-k most relevant Markdown chunks via vector similarity search.
-        3. Constructs knowledge context.
-        4. Passes full conversation thread + grounded context to LLM (Groq / OpenRouter / Gemini).
-        5. Returns structured answer with source citations.
+        RAG Chat Completion with Multi-Turn Conversation Memory & Redis Caching:
+        1. Checks Redis cache for instant response if query is standalone.
+        2. Retrieves session conversation history from Redis if session_id is provided.
+        3. Analyzes conversation history to construct contextual search query.
+        4. Retrieves top-k most relevant Markdown chunks via vector similarity search.
+        5. Constructs knowledge context.
+        6. Passes full conversation thread + grounded context to LLM (Groq / OpenRouter / Gemini).
+        7. Saves turns to Redis session memory and caches response.
         """
         start_time = time.perf_counter()
 
-        # 1. Context-aware search query
+        # 1. Check Redis Session Memory
+        active_messages = list(messages) if messages else []
+        if not active_messages and session_id:
+            redis_history = RedisService.get_chat_history(session_id, limit=8)
+            if redis_history:
+                active_messages = redis_history
+
+        # 2. Check Semantic RAG Cache (if standalone query without previous turns)
+        if not active_messages:
+            cached_res = RedisService.get_rag_cache(query, document_id)
+            if cached_res:
+                cached_res["latency_ms"] = round((time.perf_counter() - start_time) * 1000, 2)
+                return cached_res
+
+        # 3. Context-aware search query
         search_query = query.strip()
         history_for_search = []
-        if messages:
-            for m in messages:
+        if active_messages:
+            for m in active_messages:
                 if isinstance(m, dict) and m.get("content") and m.get("role") in ["user", "assistant"]:
                     c_text = re.sub(r'📎 Sumber Rujukan[\s\S]*$', '', str(m["content"])).strip()
                     if c_text:
@@ -350,12 +369,12 @@ class RagService:
             # Short follow-up question -> combine with previous topic for better vector retrieval
             search_query = f"{history_for_search[-2][:80]} {query.strip()}"
 
-        # 2. Retrieve relevant chunks
+        # 4. Retrieve relevant chunks
         chunks = cls.search_similar_chunks(db, search_query, top_k=top_k, document_id=document_id)
         if not chunks and search_query != query.strip():
             chunks = cls.search_similar_chunks(db, query.strip(), top_k=top_k, document_id=document_id)
 
-        # 3. Build Context Prompt
+        # 5. Build Context Prompt
         context_parts = []
         sources = []
 
@@ -376,7 +395,7 @@ class RagService:
 
         combined_context = "\n\n---\n\n".join(context_parts) if context_parts else "Tidak ada dokumen yang relevan ditemukan di basis pengetahuan."
 
-        # 4. Formulate Prompt & Multi-Turn Message History
+        # 6. Formulate Prompt & Multi-Turn Message History
         system_instruction = custom_system_prompt or (
             "Anda adalah AI Assistant RAG cerdas untuk Raray Vision. "
             "Tugas Anda adalah menjawab pertanyaan pengguna secara akurat, jelas, dan profesional "
@@ -397,8 +416,8 @@ Pertanyaan Pengguna:
         llm_messages = [{"role": "system", "content": system_instruction}]
 
         # Inject previous conversation turns (up to last 6 messages)
-        if messages:
-            past_msgs = messages[:-1] if messages and messages[-1].get("content") == query else messages
+        if active_messages:
+            past_msgs = active_messages[:-1] if active_messages and active_messages[-1].get("content") == query else active_messages
             for m in past_msgs[-6:]:
                 if isinstance(m, dict) and m.get("role") in ["user", "assistant"] and m.get("content"):
                     llm_messages.append({
@@ -408,18 +427,30 @@ Pertanyaan Pengguna:
 
         llm_messages.append({"role": "user", "content": current_prompt})
 
-        # 5. Invoke LLM
+        # 7. Invoke LLM
         answer = cls._call_llm_messages(llm_messages)
 
         elapsed_ms = round((time.perf_counter() - start_time) * 1000, 2)
 
-        return {
+        result = {
             "query": query,
             "answer": answer,
             "sources": sources,
+            "session_id": session_id,
             "retrieved_chunks_count": len(chunks),
-            "latency_ms": elapsed_ms
+            "latency_ms": elapsed_ms,
+            "from_cache": False
         }
+
+        # 8. Persist to Redis Memory & Cache
+        if session_id:
+            RedisService.save_chat_turn(session_id, "user", query)
+            RedisService.save_chat_turn(session_id, "assistant", answer, sources=sources)
+
+        if not active_messages:
+            RedisService.set_rag_cache(query, document_id, result)
+
+        return result
 
     @staticmethod
     def _call_llm(system_prompt: str, user_prompt: str) -> str:
