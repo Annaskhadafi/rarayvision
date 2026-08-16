@@ -1,0 +1,547 @@
+# Raray Vision
+
+Raray Vision is an open-source, self-hosted face recognition API built with FastAPI, InsightFace, ArcFace, and ONNX Runtime. It provides production-ready endpoints for face recognition, liveness detection, face verification, and facial analysis.
+
+The name comes from the Sundanese word **Raray**, meaning face.
+
+---
+
+## Features
+
+- 1:N face recognition using ArcFace (ResNet50) embeddings
+- 1:1 face verification (cosine similarity matching)
+- Anti-spoofing liveness detection using a custom ONNX model
+- Face registration, update, and deletion with persistent storage
+- Real-time multi-mode face recognition via live camera stream
+- Face embedding and landmark extraction
+- API key authentication per tenant
+- JWT-based user authentication (Email, Google OAuth, Face Login)
+- Socket.IO real-time event support
+- Swagger UI and ReDoc documentation included
+- Fully self-hostable via Docker or bare metal
+
+---
+
+## AI and Computer Vision Stack
+
+- **Buffalo-L (InsightFace)** — Face recognition, landmarks, age, and gender estimation
+- **ArcFace (ResNet50)** — 512-dimensional facial embeddings for high-accuracy matching
+- **SCRFD** — Real-time face detection
+- **Custom ONNX Anti-Spoofing Model** — Liveness verification and spoof attack detection
+- **ONNX Runtime** — High-performance model inference engine
+- **OpenCV** — Computer vision and image processing
+- **NumPy** — Numerical and vector computations
+
+---
+
+## How Face Embedding Works
+
+Raray Vision uses the ArcFace algorithm with a ResNet50 backbone. ArcFace applies an Additive Angular Margin Loss during training, which forces the model to learn highly discriminative features by maximizing the angular distance between different identities in the embedding space.
+
+Each detected face is aligned using 5-point facial landmarks, then passed through the ResNet50 network to produce a compact 512-dimensional float32 vector (embedding). This vector is a unique numerical "fingerprint" of the face.
+
+Matching is performed using Cosine Similarity — measuring the angle between two embedding vectors. A similarity score above 0.45 (1:1 verification) or 0.50 (1:N identification) indicates a positive match.
+
+---
+
+## Technology Stack
+
+| Layer | Technology |
+|---|---|
+| Backend Framework | FastAPI + Uvicorn |
+| Real-time | Python Socket.IO |
+| Database | MySQL / MariaDB via SQLAlchemy |
+| Auth | JWT (PyJWT) + Passlib bcrypt |
+| Frontend | Vue 3 + Vite |
+| Process Manager | PM2 |
+| Reverse Proxy | Nginx |
+
+---
+
+## Project Structure
+
+```
+rarayvision/
+  backend/
+    main.py                  — FastAPI application entry point
+    app/
+      controllers/           — Route handlers (face, auth, api key)
+      services/              — Business logic and ML inference
+      database/              — SQLAlchemy models and session
+      schemas/               — Pydantic request/response schemas
+      core/                  — Security, JWT, dependencies
+    models/                  — ONNX model files
+    uploads/                 — Stored face images
+  frontend/
+    src/
+      views/                 — Vue page components
+      components/            — Shared UI components
+      services/              — API service layers
+  requirements.txt
+  ecosystem.config.js        — PM2 process config
+  Dockerfile
+  docker-compose.yml
+```
+
+---
+
+## API Endpoints
+
+| Method | Path | Description |
+|---|---|---|
+| POST | /api/v1/faces | Register a new face with liveness check |
+| GET | /api/v1/faces | List all registered faces |
+| GET | /api/v1/faces/{user_id} | Get a registered face by user_id |
+| PUT | /api/v1/faces/{user_id} | Update an existing registered face |
+| DELETE | /api/v1/faces/{user_id} | Delete a registered face |
+| POST | /api/v1/faces/liveness | Verify face liveness / anti-spoofing |
+| POST | /api/v1/faces/compare | 1:1 face verification |
+| POST | /api/v1/faces/extract | Extract embeddings and landmarks |
+| POST | /api/v1/faces/no-liveness | Register face without liveness check |
+| POST | /api/v1/faces/live | Register face from live camera |
+| POST | /api/v1/faces/recognize | 1:N face identification |
+| POST | /api/v1/faces/recognize/multi | 1:N face identification for multiple faces |
+| POST | /api/v1/faces/recognize/live | Real-time multi-mode recognition |
+| POST | /api/v1/faces/recognize/live-multi | Real-time multiple face recognition (live stream) |
+
+Full interactive documentation:
+- Swagger UI: `http://localhost:5000/docs`
+- ReDoc: `http://localhost:5000/redoc`
+
+---
+
+## Self-Hosting: Option 1 — Docker (Recommended)
+
+### Prerequisites
+
+- Docker Engine 24+
+- Docker Compose v2+
+- MySQL or MariaDB instance (can be included via compose)
+
+### 1. Clone the repository
+
+```bash
+git clone https://github.com/dedin7766/rarayvision.git
+cd rarayvision
+```
+
+### 2. Configure environment variables
+
+Create a `.env` file in the project root:
+
+```env
+# Database (Default uses local SQLite file, no MySQL needed!)
+
+# DB_USER=
+# DB_PASS=
+# DB_HOST=localhost
+# DB_NAME=
+
+DATABASE_URL=sqlite:///./rarayvision.db
+SECRET_KEY=your-secret-key-here
+ALGORITHM=HS256
+ACCESS_TOKEN_EXPIRE_MINUTES=10080
+```
+
+### 3. Create the Dockerfile
+
+If not already present, create `Dockerfile` in the project root:
+
+```dockerfile
+FROM python:3.11-slim
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y \
+    libgl1 \
+    libglib2.0-0 \
+    libsm6 \
+    libxext6 \
+    libxrender-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY . .
+
+EXPOSE 5000
+
+CMD ["uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "5000"]
+```
+
+### 4. Create docker-compose.yml
+
+```yaml
+version: "3.9"
+
+services:
+  db:
+    image: mariadb:10.11
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: rootpassword
+      MYSQL_DATABASE: rarayvision
+      MYSQL_USER: raray
+      MYSQL_PASSWORD: yourpassword
+    volumes:
+      - db_data:/var/lib/mysql
+    ports:
+      - "3306:3306"
+
+  backend:
+    build: .
+    container_name: rarayvision-backend
+    restart: unless-stopped
+    depends_on:
+      - db
+    env_file:
+      - .env
+    volumes:
+      - ./backend/uploads:/app/backend/uploads
+      - ./backend/models:/app/backend/models
+
+  frontend:
+    build: ./frontend
+    container_name: rarayvision-frontend
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - "80:80"
+
+volumes:
+  db_data:
+```
+
+### 5. Build and start
+
+```bash
+docker compose up --build -d
+```
+
+### 6. Verify the service is running
+
+```bash
+curl http://localhost/
+# This will serve the Vue frontend. API is available at http://localhost/api/v1/
+```
+
+### 7. Access documentation
+
+- Swagger UI: `http://localhost/docs`
+- ReDoc: `http://localhost/redoc`
+
+---
+
+## Self-Hosting: Option 2 — Bare Metal (Linux)
+
+### Prerequisites
+
+- Ubuntu 20.04 / 22.04 or Debian 11+
+- Python 3.10+
+- Node.js 18+ and npm
+- MySQL or MariaDB
+- Nginx
+- PM2 (`npm install -g pm2`)
+
+### 1. Clone the repository
+
+```bash
+git clone https://github.com/dedin7766/rarayvision.git
+cd rarayvision
+```
+
+### 2. Install Python dependencies
+
+```bash
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+```
+
+### 3. Configure the database
+
+Create the database and user in MySQL:
+
+```sql
+CREATE DATABASE rarayvision CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+CREATE USER 'raray'@'localhost' IDENTIFIED BY 'yourpassword';
+GRANT ALL PRIVILEGES ON rarayvision.* TO 'raray'@'localhost';
+FLUSH PRIVILEGES;
+```
+
+### 4. Configure environment variables
+
+Copy the example environment file:
+
+```bash
+cp .env.example .env
+```
+
+Edit the `.env` file and configure the values (use your MySQL credentials):
+
+```env
+# Database (Default uses local SQLite file, no MySQL needed!)
+
+# DB_USER=
+# DB_PASS=
+# DB_HOST=localhost
+# DB_NAME=
+
+DATABASE_URL=sqlite:///./rarayvision.db
+SECRET_KEY=your-secret-key-here
+ALGORITHM=HS256
+ACCESS_TOKEN_EXPIRE_MINUTES=10080
+```
+
+InsightFace models (buffalo_l) are downloaded automatically on first run into `~/.insightface/models/`.
+
+### 5. Start the backend with PM2
+
+```bash
+pm2 start ecosystem.config.js
+pm2 save
+pm2 startup
+```
+
+Or manually:
+
+```bash
+uvicorn backend.main:app --host 0.0.0.0 --port 5000
+```
+
+### 6. Build the frontend
+
+```bash
+cd frontend
+npm install
+npm run build
+```
+
+The output is in `frontend/dist/`. Serve it via Nginx.
+
+### 7. Configure Nginx
+
+Create `/etc/nginx/sites-available/rarayvision`:
+
+```nginx
+server {
+    listen 80;
+    server_name yourdomain.com;
+
+    # Frontend (Vue SPA)
+    root /path/to/rarayvision/frontend/dist;
+    index index.html;
+
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+
+    # Backend API proxy
+    location /api/ {
+        proxy_pass http://127.0.0.1:5000;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_read_timeout 300s;
+        client_max_body_size 20M;
+    }
+
+    # Swagger UI and ReDoc
+    location ~ ^/(docs|redoc|openapi.json) {
+        proxy_pass http://127.0.0.1:5000;
+        proxy_set_header Host $host;
+    }
+
+    # Socket.IO
+    location /socket.io/ {
+        proxy_pass http://127.0.0.1:5000;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+    }
+}
+```
+
+Enable and reload:
+
+```bash
+ln -s /etc/nginx/sites-available/rarayvision /etc/nginx/sites-enabled/
+nginx -t
+systemctl reload nginx
+```
+
+### 8. Enable HTTPS with Certbot (optional but recommended)
+
+```bash
+apt install certbot python3-certbot-nginx
+certbot --nginx -d yourdomain.com
+```
+
+---
+
+## Option 3 — Local Development (Laptop / PC)
+
+If you just want to run the project locally on your computer (Windows/Mac/Linux) without Docker or Nginx, follow these steps:
+
+### 1. Clone the repository
+
+```bash
+git clone https://github.com/dedin7766/rarayvision.git
+cd rarayvision
+```
+
+### 2. Configure environment variables
+
+Create a `.env` file in the project root. The default configuration uses SQLite, so you don't need to install MySQL!
+
+```env
+# Database (Default uses local SQLite file, no MySQL needed!)
+
+# DB_USER=
+# DB_PASS=
+# DB_HOST=localhost
+# DB_NAME=
+
+DATABASE_URL=sqlite:///./rarayvision.db
+SECRET_KEY=change-me-to-a-random-secret-key
+ALGORITHM=HS256
+ACCESS_TOKEN_EXPIRE_MINUTES=10080
+```
+
+### 3. Start the Backend
+
+Open a terminal in the project root:
+
+```bash
+python3 -m venv venv
+source venv/bin/activate  # Or `venv\Scripts\activate` on Windows
+pip install -r requirements.txt
+uvicorn backend.main:app --host 0.0.0.0 --port 5000 --reload
+```
+
+### 4. Start the Frontend
+
+Open a **new** terminal window:
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+The web interface will be available at `http://localhost:5173`.
+
+---
+
+## Changing API Endpoint URL & Custom Domain
+
+By default, the frontend communicates with `http://127.0.0.1:5000` (for localhost) or `https://apirv.dfs.co.id` (for production). 
+If you are deploying this application to your own custom domain, you must configure the frontend to point to your new backend API URL.
+
+### 1. Update Frontend Environment Variables
+Inside the `frontend` directory, create or edit the `.env` file:
+```env
+VITE_API_BASE_URL=https://api.yourcustomdomain.com
+```
+
+### 2. Rebuild the Frontend
+After saving the `.env` file, you must rebuild the frontend for the changes to take effect:
+```bash
+cd frontend
+npm install
+npm run build
+```
+This bakes the new API URL into the static frontend files located in `frontend/dist/`.
+
+### 3. Backend API Domain (Reverse Proxy)
+Raray Vision is designed to run the frontend and backend on the **same domain**. 
+- In **Docker**, the `frontend` container includes an Nginx server that automatically proxies any request starting with `/api/` or `/docs` directly to the `backend` container.
+- In **Bare Metal**, the provided Nginx configuration (in step 8) does the exact same thing.
+
+Therefore, you only need to expose **one domain** (e.g., `https://yourcustomdomain.com`), and both your User Interface and API endpoints will be accessible seamlessly!
+
+---
+
+## API Authentication
+
+All face endpoints require a JWT Bearer token in the `Authorization` header:
+
+```
+Authorization: Bearer <your-jwt-token>
+```
+
+To obtain a token, call one of the login endpoints:
+
+### Standard Login
+```bash
+curl -X POST https://yourdomain.com/api/v1/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"email":"user@example.com","password":"yourpassword"}'
+```
+
+### Google OAuth Login
+Pass the Google ID token obtained from the frontend `vue3-google-login` component:
+```bash
+curl -X POST https://yourdomain.com/api/v1/auth/google \
+  -H "Content-Type: application/json" \
+  -d '{"credential":"<google-id-token>"}'
+```
+
+### Face Login
+Pass an image blob to authenticate via facial recognition (requires prior registration):
+```bash
+curl -X POST https://yourdomain.com/api/v1/auth/login-face \
+  -F "file=@face.jpg"
+```
+
+---
+
+## Face Model Notes
+
+- InsightFace downloads the `buffalo_l` model pack automatically on first run. This requires an internet connection during initial startup.
+- CPU inference is fully supported. GPU (CUDA) is supported if `onnxruntime-gpu` is installed instead of `onnxruntime`.
+
+---
+
+## License
+
+Raray Vision is licensed under the GNU Affero General Public License v3.0 (AGPLv3).
+
+Any modifications, including software offered as a network service (SaaS), must also be released under the same license. See [LICENSE](LICENSE) for details.
+
+## Trademark
+
+"Raray Vision" and its logos are trademarks of Dedin Toyibah.
+
+Forks, derivative works, or modified versions may not use the Raray Vision name, logo, or branding without explicit permission. See [TRADEMARK.md](TRADEMARK.md) for details.
+
+---
+
+## Support
+
+If you find this project useful and want to support its development, you can buy me a coffee (or cendol ☕):
+
+<a href="https://trakteer.id/dedin_toyibah" target="_blank"><img src="https://cdn.trakteer.id/images/embed/trbtn-red-1.png" height="36" alt="Trakteer Saya"></a>
+
+---
+
+## Contact
+
+For business inquiries, collaboration, or custom development:
+
+- **WhatsApp**: [Chat with Dedin](https://wa.me/6282299331066)
+- **Email**: dedintoyibah70@gmail.com
+
+---
+
+## Links
+
+- Live Demo: https://rarayvision.dfs.co.id
+- API Base URL: https://apirv.dfs.co.id/api/v1
+- Swagger UI: https://apirv.dfs.co.id/docs
+- ReDoc: https://apirv.dfs.co.id/redoc
+- Trakteer: https://trakteer.id/dedin_toyibah 

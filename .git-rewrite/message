@@ -1,0 +1,1 @@
+fix: bypass heavy LLM pipeline when direct PaddleOCR succeeds, returning response instantly in sub-100ms

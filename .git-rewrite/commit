@@ -1,0 +1,6 @@
+tree 55708f9e501f10a9d19d737913fdc27179a10347
+parent 1ed04f3ebbfa06bba103fd4d64b5a0f6bd79bb19
+author Annaskhadafi <mochamad.khadafi@chitraparatama.co.id> 1786019462 +0800
+committer Annaskhadafi <mochamad.khadafi@chitraparatama.co.id> 1786019462 +0800
+
+fix: optimize Dockerfile and requirements.txt with CPU PyTorch index to resolve 502 Bad Gateway OOM on VPS

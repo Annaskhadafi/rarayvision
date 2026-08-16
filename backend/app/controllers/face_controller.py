@@ -1,0 +1,646 @@
+from fastapi import APIRouter, File, UploadFile, HTTPException, Form, Depends, Request
+from sqlalchemy.orm import Session
+import json
+import base64
+import asyncio
+import cv2
+import numpy as np
+import uuid
+import os
+
+from backend.app.database import database as db
+from backend.app.database import models as db_models
+from backend.app.core.deps import get_current_user
+from backend.app.services.ml_service import (
+    process_liveness_only,
+    process_compare_logic,
+    process_register_logic,
+    process_register_live,
+    process_recognize_logic,
+    process_recognize_live,
+    process_recognize_multi,
+    get_tenant_faces,
+    save_face_to_db,
+    delete_face_from_db,
+    thread_pool
+)
+from backend.app.schemas.schemas import FeedbackRequest
+
+router = APIRouter(prefix="/api/v1")
+
+@router.post(
+    "/faces/liveness",
+    tags=["Liveness"],
+    summary="Verify face liveness and detect spoof attacks",
+    description="""
+Verify whether a face is real or spoofed using a custom ONNX anti-spoofing model.
+
+**Note:** This endpoint is exclusively designed to process real-time live streaming frames directly from a camera. It does NOT support processing raw image file uploads.
+
+Supported detections:
+- Printed photos
+- Mobile screens
+- Replay attacks
+"""
+)
+async def check_liveness_endpoint(file: UploadFile = File(...)):
+    try:
+        contents = await file.read()
+        if len(contents) > 5 * 1024 * 1024:
+            return {"status": "error", "message": "File size exceeds the 5MB limit"}
+        nparr = np.frombuffer(contents, np.uint8)
+        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        if img is None: return {"status": "error", "message": "Invalid or corrupted image"}
+        
+        loop = asyncio.get_running_loop()
+        result = await loop.run_in_executor(thread_pool, process_liveness_only, img)
+        return result
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+# --- 2. COMPARE FACE (Verification Step 2) ---
+@router.post(
+    "/faces/compare",
+    tags=["Recognition"],
+    summary="Perform 1:1 face verification",
+    description="""
+Compare an uploaded face with a registered user identity
+using ArcFace similarity matching.
+"""
+)
+async def compare_face_endpoint(
+    user_id: str = Form(None),
+    file: UploadFile = File(...),
+    current_user: db_models.User = Depends(get_current_user),
+    db_session: Session = Depends(db.get_db)
+):
+    try:
+        contents = await file.read()
+        if len(contents) > 5 * 1024 * 1024:
+            return {"status": "error", "message": "File size exceeds the 5MB limit"}
+        nparr = np.frombuffer(contents, np.uint8)
+        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        if img is None: return {"status": "error", "message": "Invalid or corrupted image"}
+
+        tenant_faces = get_tenant_faces(db_session, current_user.id)
+        loop = asyncio.get_running_loop()
+        result = await loop.run_in_executor(thread_pool, process_compare_logic, img, user_id, tenant_faces)
+        return result
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+# --- 3. REGISTER (Extract Embedding) ---
+@router.post(
+    "/faces/extract",
+    tags=["Analysis"],
+    summary="Extract face embeddings and facial landmarks",
+    description="""
+Extract:
+
+- Face embeddings
+- Facial landmarks
+- Gender estimation
+- Age estimation
+"""
+)
+async def extract_face_endpoint(file: UploadFile = File(...)):
+    try:
+        contents = await file.read()
+        if len(contents) > 5 * 1024 * 1024:
+            return {"status": "error", "message": "File size exceeds the 5MB limit"}
+        nparr = np.frombuffer(contents, np.uint8)
+        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        if img is None: return {"status": "error", "message": "Invalid or corrupted image"}
+        
+        loop = asyncio.get_running_loop()
+        result = await loop.run_in_executor(thread_pool, lambda: process_register_logic(img, check_spoof=False))
+        return result
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+# --- 3. REGISTER FACE (Save to Local Face DB) ---
+@router.post(
+    "/faces",
+    tags=["Registration"],
+    summary="Register a new face with liveness verification"
+)
+async def register_face_endpoint(
+    request: Request,
+    user_id: str = Form(None),
+    user_name: str = Form(None),
+    file: UploadFile = File(...),
+    current_user: db_models.User = Depends(get_current_user),
+    db_session: Session = Depends(db.get_db)
+):
+    if not user_id:
+        user_id = "face_" + uuid.uuid4().hex[:8]
+    known_faces_db = get_tenant_faces(db_session, current_user.id)
+    if any(str(item.get("id")) == str(user_id) for item in known_faces_db):
+        return {"status": "error", "message": f"User ID '{user_id}' is already registered."}
+    try:
+        contents = await file.read()
+        if len(contents) > 5 * 1024 * 1024:
+            return {"status": "error", "message": "File size exceeds the 5MB limit"}
+        nparr = np.frombuffer(contents, np.uint8)
+        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        if img is None:
+            return {"status": "error", "message": "Invalid or corrupted image"}
+
+        loop = asyncio.get_running_loop()
+        result = await loop.run_in_executor(thread_pool, lambda: process_register_logic(img, check_spoof=True))
+        if result.get("status") != "success":
+            return result
+
+        embedding = np.array(result["embedding"], dtype=np.float32)
+        final_name = user_name.strip() if user_name and user_name.strip() else user_id
+        
+        image_url = None
+        if getattr(current_user, "store_images", False):
+            # Save image to disk
+            filename = f"{current_user.id}_{user_id}.jpg"
+            uploads_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "uploads", "faces")
+            os.makedirs(uploads_dir, exist_ok=True)
+            file_path = os.path.join(uploads_dir, filename)
+            cv2.imwrite(file_path, img)
+            base_url = str(request.base_url).rstrip("/") if request else ""
+            image_url = f"{base_url}/api/v1/uploads/faces/{filename}"
+        
+        # (ID uniqueness check already performed above)
+        known_faces_db.append({
+            "id": user_id,
+            "name": final_name,
+            "embedding": embedding
+        })
+        save_face_to_db(db_session, current_user.id, user_id, final_name, embedding, image_url if getattr(current_user, "store_images", False) else None)
+
+        return {
+            "status": "success",
+            "message": "Face registered and saved to database",
+            "database": "PostgreSQL",
+            "user_id": user_id,
+            "user_name": final_name,
+            "liveness_score": result.get("liveness_score"),
+            "image_url": image_url,
+            "total": len(known_faces_db)
+        }
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+# --- 3.1. UPDATE FACE ---
+@router.put(
+    "/faces/{user_id}",
+    tags=["Registration"],
+    summary="Update an existing registered face"
+)
+async def update_face_endpoint(
+    user_id: str,
+    user_name: str = Form(None),
+    file: UploadFile = File(...),
+    current_user: db_models.User = Depends(get_current_user),
+    db_session: Session = Depends(db.get_db)
+):
+    if not user_id:
+        return {"status": "error", "message": "user_id is required."}
+    known_faces_db = get_tenant_faces(db_session, current_user.id)
+    try:
+        contents = await file.read()
+        if len(contents) > 5 * 1024 * 1024:
+            return {"status": "error", "message": "File size exceeds the 5MB limit"}
+        nparr = np.frombuffer(contents, np.uint8)
+        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        if img is None:
+            return {"status": "error", "message": "Invalid or corrupted image"}
+
+        loop = asyncio.get_running_loop()
+        result = await loop.run_in_executor(thread_pool, lambda: process_register_logic(img, check_spoof=False))
+        if result.get("status") != "success":
+            return result
+
+        embedding = np.array(result["embedding"], dtype=np.float32)
+        
+        old_face = db_session.query(db_models.Face).filter(db_models.Face.user_id == current_user.id, db_models.Face.face_id == user_id).first()
+        final_name = user_name.strip() if user_name and user_name.strip() else (old_face.name if old_face else user_id)
+        
+        known_faces_db = [item for item in known_faces_db if str(item.get("id")) != str(user_id)]
+        known_faces_db.append({
+            "id": user_id,
+            "name": final_name,
+            "embedding": embedding
+        })
+        save_face_to_db(db_session, current_user.id, user_id, final_name, embedding)
+
+        return {
+            "status": "success",
+            "message": "Face updated and saved to database",
+            "database": "PostgreSQL",
+            "id": user_id,
+            "liveness_score": result.get("liveness_score"),
+            "total": len(known_faces_db)
+        }
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+# --- 3.2. DELETE FACE ---
+@router.delete(
+    "/faces/{user_id}",
+    tags=["Registration"],
+    summary="Delete a registered face"
+)
+async def delete_face_endpoint(
+    user_id: str,
+    current_user: db_models.User = Depends(get_current_user),
+    db_session: Session = Depends(db.get_db)
+):
+    if not user_id:
+        return {"status": "error", "message": "user_id is required."}
+    known_faces_db = get_tenant_faces(db_session, current_user.id)
+    try:
+        before_count = len(known_faces_db)
+        known_faces_db = [item for item in known_faces_db if str(item.get("id")) != str(user_id)]
+        delete_face_from_db(db_session, current_user.id, user_id)
+
+        # Delete physical image if exists
+        uploads_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "uploads", "faces")
+        file_path = os.path.join(uploads_dir, f"{current_user.id}_{user_id}.jpg")
+        if os.path.exists(file_path):
+            try:
+                os.remove(file_path)
+            except Exception as ex:
+                print(f"Failed to delete physical image: {ex}")
+
+        return {
+            "status": "success",
+            "message": "Face deleted from database",
+            "database": "PostgreSQL",
+            "id": user_id,
+            "deleted": before_count != len(known_faces_db),
+            "total": len(known_faces_db)
+        }
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+# --- 4. LIST FACES ---
+@router.get(
+    "/faces",
+    tags=["Management"],
+    summary="List all registered faces"
+)
+async def list_faces_endpoint(
+    page: int = 1,
+    limit: int = 50,
+    search: str = None,
+    current_user: db_models.User = Depends(get_current_user),
+    db_session: Session = Depends(db.get_db)
+):
+    try:
+        query = db_session.query(db_models.Face).filter(db_models.Face.user_id == current_user.id)
+        
+        if search:
+            search_term = f"%{search}%"
+            query = query.filter(db_models.Face.name.ilike(search_term) | db_models.Face.face_id.ilike(search_term))
+            
+        total_count = query.count()
+        faces = query.order_by(db_models.Face.created_at.desc()).offset((page - 1) * limit).limit(limit).all()
+        
+        result = []
+        for f in faces:
+            result.append({
+                "id": f.face_id,
+                "name": f.name,
+                "image_url": f.image_url,
+                "created_at": f.created_at.isoformat() if f.created_at else None,
+                "updated_at": f.created_at.isoformat() if f.created_at else None
+            })
+        return {
+            "status": "success",
+            "total": total_count,
+            "page": page,
+            "limit": limit,
+            "faces": result,
+        }
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+@router.get(
+    "/faces/{user_id}",
+    tags=["Management"],
+    summary="Get a registered face by user_id"
+)
+async def get_face_by_id_endpoint(
+    user_id: str,
+    current_user: db_models.User = Depends(get_current_user),
+    db_session: Session = Depends(db.get_db)
+):
+    try:
+        face = db_session.query(db_models.Face).filter(
+            db_models.Face.user_id == current_user.id,
+            db_models.Face.face_id == user_id
+        ).first()
+        
+        if not face:
+            return {"status": "error", "message": f"Face with user_id {user_id} not found."}
+            
+        return {
+            "status": "success",
+            "face": {
+                "id": face.face_id,
+                "name": face.name,
+                "image_url": face.image_url,
+                "created_at": face.created_at.isoformat() if face.created_at else None,
+                "updated_at": face.created_at.isoformat() if face.created_at else None
+            }
+        }
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
+# --- REGISTER FACE LIVE (skip liveness check, untuk live camera) ---
+@router.post(
+    "/faces/no-liveness",
+    tags=["Registration"],
+    summary="Register a face without liveness verification"
+)
+async def register_face_noliveness_endpoint(
+    request: Request,
+    user_id: str = Form(None),
+    user_name: str = Form(None),
+    file: UploadFile = File(...),
+    current_user: db_models.User = Depends(get_current_user),
+    db_session: Session = Depends(db.get_db)
+):
+    if not user_id:
+        user_id = "face_" + uuid.uuid4().hex[:8]
+    known_faces_db = get_tenant_faces(db_session, current_user.id)
+    if any(str(item.get("id")) == str(user_id) for item in known_faces_db):
+        return {"status": "error", "message": f"User ID '{user_id}' is already registered."}
+    try:
+        contents = await file.read()
+        if len(contents) > 5 * 1024 * 1024:
+            return {"status": "error", "message": "File size exceeds the 5MB limit"}
+        nparr = np.frombuffer(contents, np.uint8)
+        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        if img is None:
+            return {"status": "error", "message": "Invalid image"}
+
+        loop = asyncio.get_running_loop()
+        result = await loop.run_in_executor(thread_pool, lambda: process_register_logic(img, check_spoof=False))
+        if result.get("status") != "success":
+            return result
+
+        embedding = np.array(result["embedding"], dtype=np.float32)
+        final_name = user_name.strip() if user_name and user_name.strip() else user_id
+        
+        image_url = None
+        if getattr(current_user, "store_images", False):
+            # Save image to disk
+            filename = f"{current_user.id}_{user_id}.jpg"
+            uploads_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "uploads", "faces")
+            os.makedirs(uploads_dir, exist_ok=True)
+            file_path = os.path.join(uploads_dir, filename)
+            cv2.imwrite(file_path, img)
+            base_url = str(request.base_url).rstrip("/") if request else ""
+            image_url = f"{base_url}/api/v1/uploads/faces/{filename}"
+        
+        # (ID uniqueness check already performed above)
+        known_faces_db.append({
+            "id": user_id,
+            "name": final_name,
+            "embedding": embedding
+        })
+        save_face_to_db(db_session, current_user.id, user_id, final_name, embedding, image_url if getattr(current_user, "store_images", False) else None)
+
+        return {
+            "status": "success",
+            "message": "Face registered successfully without liveness check",
+            "user_id": user_id,
+            "user_name": final_name,
+            "image_url": image_url,
+            "total": len(known_faces_db)
+        }
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+# --- REGISTER FACE LIVE (skip liveness check, untuk live camera) ---
+@router.post(
+    "/faces/live",
+    tags=["Registration"],
+    summary="Register a face from live camera input"
+)
+async def register_face_live_endpoint(
+    request: Request,
+    user_id: str = Form(None),
+    user_name: str = Form(None),
+    file: UploadFile = File(...),
+    current_user: db_models.User = Depends(get_current_user),
+    db_session: Session = Depends(db.get_db)
+):
+    if not user_id:
+        user_id = "face_" + uuid.uuid4().hex[:8]
+    print(f"DEBUG REGISTER: user_id={user_id}, user_name={user_name}")
+    known_faces_db = get_tenant_faces(db_session, current_user.id)
+    if any(str(item.get("id")) == str(user_id) for item in known_faces_db):
+        return {"status": "error", "message": f"User ID '{user_id}' is already registered."}
+    try:
+        contents = await file.read()
+        if len(contents) > 5 * 1024 * 1024:
+            return {"status": "error", "message": "File size exceeds the 5MB limit"}
+        nparr = np.frombuffer(contents, np.uint8)
+        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        if img is None:
+            return {"status": "error", "message": "Invalid or corrupted image"}
+
+        loop = asyncio.get_running_loop()
+        result = await loop.run_in_executor(thread_pool, lambda: process_register_live(img, check_spoof=False))
+        if result.get("status") != "success":
+            return result
+
+        embedding = np.array(result["embedding"], dtype=np.float32)
+        final_name = user_name.strip() if user_name and user_name.strip() else user_id
+        
+        image_url = None
+        if getattr(current_user, "store_images", False):
+            # Save image to disk
+            filename = f"{current_user.id}_{user_id}.jpg"
+            uploads_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "uploads", "faces")
+            os.makedirs(uploads_dir, exist_ok=True)
+            file_path = os.path.join(uploads_dir, filename)
+            cv2.imwrite(file_path, img)
+            base_url = str(request.base_url).rstrip("/") if request else ""
+            image_url = f"{base_url}/api/v1/uploads/faces/{filename}"
+        
+        # (ID uniqueness check already performed above)
+        known_faces_db.append({"id": user_id, "name": final_name, "embedding": embedding})
+        save_face_to_db(db_session, current_user.id, user_id, final_name, embedding, image_url if getattr(current_user, "store_images", False) else None)
+
+        return {
+            "status": "success",
+            "message": "Face registered and saved to database",
+            "user_id": user_id,
+            "user_name": final_name,
+            "liveness_score": result.get("liveness_score"),
+            "image_url": image_url,
+            "total": len(known_faces_db)
+        }
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
+# --- RECOGNIZE LIVE (skip liveness check, untuk live camera stream) ---
+@router.post(
+    "/faces/recognize/live",
+    tags=["Recognition"],
+    summary="Real-time face recognition and analysis",
+    description="""
+Real-time face recognition supporting multiple modes:
+
+- identify
+- liveness (Anti-Spoofing & Active KYC)
+- emotion
+- attributes
+- analyze
+
+**Note:** This endpoint is exclusively designed to process real-time live streaming frames directly from a camera. It does NOT support processing raw image file uploads.
+"""
+)
+async def recognize_live_endpoint(file: UploadFile = File(...), mode: str = Form("identify"), current_user: db_models.User = Depends(get_current_user), db_session: Session = Depends(db.get_db)):
+    try:
+        contents = await file.read()
+        if len(contents) > 5 * 1024 * 1024:
+            return {"status": "error", "message": "File size exceeds the 5MB limit"}
+        nparr = np.frombuffer(contents, np.uint8)
+        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        if img is None:
+            return {"status": "error", "message": "Invalid or corrupted image"}
+
+        loop = asyncio.get_running_loop()
+        tenant_faces = get_tenant_faces(db_session, current_user.id)
+        result = await loop.run_in_executor(thread_pool, process_recognize_live, img, tenant_faces, mode)
+        return result
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+@router.post(
+    "/faces/recognize",
+    tags=["Recognition"],
+    summary="Recognize a face against registered identities",
+    description="""
+Perform 1:N face identification using ArcFace embeddings
+powered by Buffalo-L (InsightFace).
+"""
+)
+async def recognize_endpoint(file: UploadFile = File(...), current_user: db_models.User = Depends(get_current_user), db_session: Session = Depends(db.get_db)):
+    try:
+        contents = await file.read()
+        if len(contents) > 5 * 1024 * 1024:
+            return {"status": "error", "message": "File size exceeds the 5MB limit"}
+        nparr = np.frombuffer(contents, np.uint8)
+        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        if img is None: return {"status": "error", "message": "Invalid or corrupted image"}
+        
+        loop = asyncio.get_running_loop()
+        tenant_faces = get_tenant_faces(db_session, current_user.id)
+        result = await loop.run_in_executor(thread_pool, process_recognize_logic, img, tenant_faces)
+        return result
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+@router.post(
+    "/faces/recognize/multi",
+    tags=["Recognition"],
+    summary="Identify multiple faces in a single uploaded image",
+    description="""
+Perform 1:N face identification for **multiple faces** present in an uploaded raw image file.
+This endpoint returns an array of recognized faces along with their bounding boxes.
+"""
+)
+async def recognize_multi_endpoint(file: UploadFile = File(...), current_user: db_models.User = Depends(get_current_user), db_session: Session = Depends(db.get_db)):
+    try:
+        contents = await file.read()
+        if len(contents) > 5 * 1024 * 1024:
+            return {"status": "error", "message": "File size exceeds the 5MB limit"}
+        nparr = np.frombuffer(contents, np.uint8)
+        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        if img is None: return {"status": "error", "message": "Invalid or corrupted image"}
+        
+        loop = asyncio.get_running_loop()
+        tenant_faces = get_tenant_faces(db_session, current_user.id)
+        result = await loop.run_in_executor(thread_pool, process_recognize_multi, img, tenant_faces)
+        return result
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+@router.post(
+    "/faces/recognize/live-multi",
+    tags=["Recognition"],
+    summary="Identify multiple faces in a real-time live stream frame",
+    description="""
+Perform 1:N face identification for **multiple faces** present in a live streaming frame.
+**Note:** This endpoint is exclusively designed for live camera feeds, returning an array of recognized faces.
+"""
+)
+async def recognize_live_multi_endpoint(file: UploadFile = File(...), current_user: db_models.User = Depends(get_current_user), db_session: Session = Depends(db.get_db)):
+    try:
+        contents = await file.read()
+        if len(contents) > 5 * 1024 * 1024:
+            return {"status": "error", "message": "File size exceeds the 5MB limit"}
+        nparr = np.frombuffer(contents, np.uint8)
+        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        if img is None:
+            return {"status": "error", "message": "Invalid or corrupted image"}
+
+        loop = asyncio.get_running_loop()
+        tenant_faces = get_tenant_faces(db_session, current_user.id)
+        result = await loop.run_in_executor(thread_pool, process_recognize_multi, img, tenant_faces)
+        return result
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+# --- REGISTER LOGIN FACE (dedicated endpoint for face login registration) ---
+@router.post("/faces/login", include_in_schema=False)
+async def register_login_face_endpoint(
+    request: Request,
+    file: UploadFile = File(...),
+    current_user: db_models.User = Depends(get_current_user),
+    db_session: Session = Depends(db.get_db)
+):
+    """Register or update the user's login face. face_id = user's actual ID."""
+    try:
+        contents = await file.read()
+        if len(contents) > 5 * 1024 * 1024:
+            return {"status": "error", "message": "File size exceeds the 5MB limit"}
+        nparr = np.frombuffer(contents, np.uint8)
+        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        if img is None:
+            return {"status": "error", "message": "Invalid or corrupted image"}
+
+        loop = asyncio.get_running_loop()
+        result = await loop.run_in_executor(thread_pool, lambda: process_register_live(img, check_spoof=False))
+        if result.get("status") != "success":
+            return result
+
+        embedding = np.array(result["embedding"], dtype=np.float32)
+        face_id = str(current_user.id)
+        face_name = "Face Login Profile"
+        
+        image_url = None
+        if getattr(current_user, "store_images", False):
+            # Save image to the correct uploads directory
+            uploads_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "uploads", "faces")
+            os.makedirs(uploads_dir, exist_ok=True)
+            filename = f"{current_user.id}_login_face.jpg"
+            file_path = os.path.join(uploads_dir, filename)
+            cv2.imwrite(file_path, img)
+            base_url = str(request.base_url).rstrip("/") if request else ""
+            image_url = f"{base_url}/api/v1/uploads/faces/{filename}"
+        
+        # Upsert: save_face_to_db already handles update if face_id exists
+        save_face_to_db(db_session, current_user.id, face_id, face_name, embedding, image_url if getattr(current_user, "store_images", False) else None)
+
+        return {
+            "status": "success",
+            "message": "Login face registered successfully",
+            "face_id": face_id,
+            "name": face_name,
+            "image_url": image_url,
+        }
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
