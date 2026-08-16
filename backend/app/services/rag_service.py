@@ -34,23 +34,21 @@ def get_fastembed_model():
 class RagService:
     @staticmethod
     def get_embedding_info() -> Dict[str, Any]:
-        """Returns active embedding provider and dimensions."""
+        """Returns active embedding provider and LLM engine info."""
+        groq_key = os.getenv("GROQ_API_KEY", "")
         gemini_key = os.getenv("GEMINI_API_KEY", "")
         openrouter_key = os.getenv("OPENROUTER_API_KEY", "")
-        openai_key = os.getenv("OPENAI_API_KEY", "")
 
-        active_provider = "local_fastembed"
-        if gemini_key:
-            active_provider = "gemini_cloud"
-        elif openai_key:
-            active_provider = "openai"
+        active_llm = "Groq LPU (qwen/qwen3.6-27b)" if groq_key else "OpenRouter"
 
         return {
-            "default_provider": active_provider,
-            "local_model": "BAAI/bge-small-en-v1.5 (384 dimensions, ONNX offline)",
+            "default_provider": "local_fastembed",
+            "local_embedding_model": "BAAI/bge-small-en-v1.5 (384 dimensions, ONNX offline, 100% Free)",
+            "active_llm": active_llm,
+            "groq_configured": bool(groq_key),
+            "groq_model": os.getenv("GROQ_MODEL", "qwen/qwen3.6-27b"),
             "gemini_configured": bool(gemini_key),
             "openrouter_configured": bool(openrouter_key),
-            "openai_configured": bool(openai_key),
             "vector_dimensions": 384
         }
 
@@ -394,14 +392,51 @@ Jawaban:"""
 
     @staticmethod
     def _call_llm(system_prompt: str, user_prompt: str) -> str:
-        """Invokes configured LLM (OpenRouter / Google Gemini / OpenAI)."""
+        """
+        Invokes LLM for grounded RAG answer generation.
+        Priority:
+        1. Groq (Ultra-fast LPU, default model: qwen/qwen3.6-27b)
+        2. OpenRouter
+        3. Google Gemini API
+        """
         import requests
 
-        openrouter_key = os.getenv("OPENROUTER_API_KEY", "")
-        model_name = os.getenv("OPENROUTER_MODEL", "nvidia/nemotron-nano-12b-v2-vl:free")
-        gemini_key = os.getenv("GEMINI_API_KEY", "")
+        groq_key = os.getenv("GROQ_API_KEY", "")
+        groq_model = os.getenv("GROQ_MODEL", "qwen/qwen3.6-27b")
 
-        # 1. OpenRouter
+        # 1. Groq (Ultra-Fast LPU Engine)
+        if groq_key:
+            try:
+                resp = requests.post(
+                    "https://api.groq.com/openai/v1/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {groq_key}",
+                        "Content-Type": "application/json"
+                    },
+                    json={
+                        "model": groq_model,
+                        "messages": [
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": user_prompt}
+                        ],
+                        "temperature": 0.2,
+                        "max_tokens": 2048
+                    },
+                    timeout=25
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    content = data["choices"][0]["message"]["content"]
+                    clean_content = re.sub(r'<think>[\s\S]*?</think>', '', content).strip()
+                    return clean_content or content.strip()
+                else:
+                    logger.warning(f"[RagService] Groq API returned {resp.status_code}: {resp.text}")
+            except Exception as e:
+                logger.error(f"[RagService] Groq API call error: {e}")
+
+        # 2. OpenRouter Fallback
+        openrouter_key = os.getenv("OPENROUTER_API_KEY", "")
+        openrouter_model = os.getenv("OPENROUTER_MODEL", "nvidia/nemotron-nano-12b-v2-vl:free")
         if openrouter_key:
             try:
                 resp = requests.post(
@@ -413,7 +448,7 @@ Jawaban:"""
                         "X-Title": "Raray Vision RAG"
                     },
                     json={
-                        "model": model_name,
+                        "model": openrouter_model,
                         "messages": [
                             {"role": "system", "content": system_prompt},
                             {"role": "user", "content": user_prompt}
@@ -430,7 +465,8 @@ Jawaban:"""
             except Exception as e:
                 logger.error(f"[RagService] OpenRouter LLM call error: {e}")
 
-        # 2. Google Gemini API
+        # 3. Google Gemini Fallback
+        gemini_key = os.getenv("GEMINI_API_KEY", "")
         if gemini_key:
             try:
                 from google import genai
@@ -444,8 +480,7 @@ Jawaban:"""
             except Exception as e:
                 logger.error(f"[RagService] Gemini LLM call error: {e}")
 
-        # 3. Direct heuristic answer if no LLM key is configured
         return (
-            "⚠️ **Catatan Sistem:** API Key LLM (`OPENROUTER_API_KEY` atau `GEMINI_API_KEY`) belum dikonfigurasi di file `.env`.\n\n"
+            "⚠️ **Catatan Sistem:** API Key LLM (`GROQ_API_KEY`, `OPENROUTER_API_KEY`, atau `GEMINI_API_KEY`) belum dikonfigurasi di file `.env`.\n\n"
             "Namun, potongan dokumen yang relevan dari pgvector berhasil ditemukan dan tercantum pada panel sumber di bawah."
         )

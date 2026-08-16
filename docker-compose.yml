@@ -17,9 +17,11 @@ services:
       RARAY_VISION_EMAIL: mochamad.khadafi@chitraparatama.co.id
       RARAY_VISION_PASSWORD: Wusthochq2018-
       RARAY_VISION_BASE_URL: https://vision.chitrapratama.com
+      GROQ_API_KEY: ${GROQ_API_KEY}
+      GROQ_MODEL: ${GROQ_MODEL:-qwen/qwen3.6-27b}
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY}
       OPENROUTER_MODEL: nvidia/nemotron-nano-12b-v2-vl:free
-      LLM_PROVIDER: openrouter
+      LLM_PROVIDER: groq
       GEMINI_API_KEY: ${GEMINI_API_KEY}
       EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-local}
     volumes:
