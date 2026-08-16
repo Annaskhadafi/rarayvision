@@ -2,7 +2,10 @@ from sqlalchemy import Column, String, Integer, Text, ForeignKey, DateTime, JSON
 from sqlalchemy.orm import relationship
 from datetime import datetime
 
-from backend.app.database.database import Base
+try:
+    from app.database.database import Base
+except ImportError:
+    from backend.app.database.database import Base
 
 
 class RagDocument(Base):

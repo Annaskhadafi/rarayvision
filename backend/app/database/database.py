@@ -1,6 +1,9 @@
 from sqlalchemy import create_engine
 from sqlalchemy.orm import declarative_base, sessionmaker
-from backend.app.core.config import DATABASE_URL
+try:
+    from app.core.config import DATABASE_URL
+except ImportError:
+    from backend.app.core.config import DATABASE_URL
 
 if DATABASE_URL.startswith("sqlite"):
     engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})

@@ -8,9 +8,14 @@ from datetime import datetime
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 
-from backend.app.database.rag_models import RagDocument, RagDocumentChunk
-from backend.app.services.anydoc_service import AnyDocService
-from backend.app.services.redis_service import RedisService
+try:
+    from app.database.rag_models import RagDocument, RagDocumentChunk
+    from app.services.anydoc_service import AnyDocService
+    from app.services.redis_service import RedisService
+except ImportError:
+    from backend.app.database.rag_models import RagDocument, RagDocumentChunk
+    from backend.app.services.anydoc_service import AnyDocService
+    from backend.app.services.redis_service import RedisService
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +35,56 @@ def get_fastembed_model():
             logger.error(f"[RagService] Failed to load FastEmbed: {e}")
             _fastembed_instance = False
     return _fastembed_instance
+
+
+def tokenize_text(text: str) -> List[str]:
+    """Tokenize alphanumeric words, technical identifiers, SKU numbers, and size codes."""
+    if not text:
+        return []
+    clean = text.lower()
+    tokens = re.findall(r'[a-zA-Z0-9_\-\.\/]+', clean)
+    return [t.strip('.-_/') for t in tokens if len(t.strip('.-_/')) >= 2]
+
+
+def compute_bm25_scores(query: str, items: List[Dict[str, Any]], k1: float = 1.5, b: float = 0.75) -> List[float]:
+    """
+    Computes Okapi BM25 scores for document chunks against a search query.
+    High-performance pure-Python SIMD-friendly lexical matching.
+    """
+    import numpy as np
+    query_tokens = tokenize_text(query)
+    if not query_tokens or not items:
+        return [0.0] * len(items)
+
+    doc_token_lists = [tokenize_text(f"{it.get('heading', '')} {it.get('content', '')}") for it in items]
+    doc_lens = [len(tokens) for tokens in doc_token_lists]
+    avgdl = sum(doc_lens) / max(len(doc_lens), 1)
+    if avgdl == 0:
+        avgdl = 1.0
+
+    N = len(items)
+    df = {}
+    for q_tok in query_tokens:
+        df[q_tok] = sum(1 for tokens in doc_token_lists if q_tok in tokens)
+
+    scores = []
+    for idx, tokens in enumerate(doc_token_lists):
+        doc_len = doc_lens[idx]
+        tf_dict = {}
+        for t in tokens:
+            tf_dict[t] = tf_dict.get(t, 0) + 1
+
+        score = 0.0
+        for q_tok in query_tokens:
+            n_q = df.get(q_tok, 0)
+            idf = max(0.0, float(np.log((N - n_q + 0.5) / (n_q + 0.5) + 1.0)))
+            tf = tf_dict.get(q_tok, 0)
+            if tf > 0:
+                tf_norm = (tf * (k1 + 1.0)) / (tf + k1 * (1.0 - b + b * (doc_len / avgdl)))
+                score += idf * tf_norm
+        scores.append(float(score))
+
+    return scores
 
 
 class RagService:
@@ -96,26 +151,38 @@ class RagService:
         overlap_chars: int = 100
     ) -> List[Dict[str, Any]]:
         """
-        Semantically splits Markdown text into chunks while preserving headings,
-        tables, and paragraph boundaries.
+        Semantically splits Markdown text into chunks while preserving heading hierarchy,
+        table structure (including column headers), and paragraph boundaries.
         """
         if not markdown_text or not markdown_text.strip():
             return []
 
-        # Split by paragraphs or markdown headers
-        raw_sections = re.split(r'\n(?=#{1,3}\s)', markdown_text)
+        # Split by markdown headers
+        raw_sections = re.split(r'\n(?=#{1,4}\s)', markdown_text)
         chunks = []
-        current_heading = "General"
+        hierarchy_stack = {}
 
         for sec in raw_sections:
             sec_str = sec.strip()
             if not sec_str:
                 continue
 
-            # Check if section starts with a heading
-            header_match = re.match(r'^(#{1,3})\s+(.*)$', sec_str.splitlines()[0])
+            # Track heading level and hierarchy breadcrumb path
+            header_match = re.match(r'^(#{1,4})\s+(.*)$', sec_str.splitlines()[0])
             if header_match:
-                current_heading = header_match.group(2).strip()
+                level = len(header_match.group(1))
+                h_title = header_match.group(2).strip()
+                hierarchy_stack[level] = h_title
+                hierarchy_stack = {k: v for k, v in hierarchy_stack.items() if k <= level}
+
+            active_headings = [hierarchy_stack[k] for k in sorted(hierarchy_stack.keys())]
+            current_heading = " > ".join(active_headings) if active_headings else "General"
+
+            # Check if section contains a markdown table header
+            table_header_prefix = ""
+            lines = sec_str.splitlines()
+            if len(lines) >= 2 and "|" in lines[0] and ("---" in lines[1] or (len(lines) > 2 and "---" in lines[2])):
+                table_header_prefix = "\n".join(lines[:2]) + "\n"
 
             # If section is within max_chunk_chars, keep as one chunk
             if len(sec_str) <= max_chunk_chars:
@@ -126,7 +193,7 @@ class RagService:
                     "token_estimate": len(sec_str.split())
                 })
             else:
-                # Split large section by paragraphs or lines
+                # Split large section by paragraphs
                 paragraphs = sec_str.split("\n\n")
                 buf = []
                 buf_len = 0
@@ -138,6 +205,8 @@ class RagService:
 
                     if buf_len + len(p_clean) > max_chunk_chars and buf:
                         chunk_text = "\n\n".join(buf)
+                        if table_header_prefix and not chunk_text.startswith(table_header_prefix):
+                            chunk_text = f"{table_header_prefix}{chunk_text}"
                         chunks.append({
                             "content": chunk_text,
                             "heading": current_heading,
@@ -153,6 +222,8 @@ class RagService:
 
                 if buf:
                     chunk_text = "\n\n".join(buf)
+                    if table_header_prefix and not chunk_text.startswith(table_header_prefix):
+                        chunk_text = f"{table_header_prefix}{chunk_text}"
                     chunks.append({
                         "content": chunk_text,
                         "heading": current_heading,
@@ -176,7 +247,7 @@ class RagService:
         Complete RAG Ingestion Pipeline:
         1. AnyDoc converts file to structured GitHub-Flavored Markdown.
         2. Auto-persists to S3 Object Storage.
-        3. Splits Markdown into semantic chunk blocks.
+        3. Splits Markdown into semantic chunk blocks with preserved headers.
         4. Vectorizes chunks via FastEmbed.
         5. Saves to PostgreSQL pgvector tables.
         """
@@ -267,20 +338,24 @@ class RagService:
         document_id: Optional[str] = None
     ) -> List[Dict[str, Any]]:
         """
-        Executes semantic vector similarity search using cosine similarity across embeddings.
+        Executes high-accuracy Hybrid Search (Dense Vector Cosine Similarity + BM25 Sparse Lexical Scoring with RRF).
         """
         query_vec = cls.generate_single_embedding(query)
-        return cls._in_memory_similarity_search(db, query_vec, top_k, document_id)
+        return cls._hybrid_similarity_search(db, query, query_vec, top_k, document_id)
 
     @classmethod
-    def _in_memory_similarity_search(
+    def _hybrid_similarity_search(
         cls,
         db: Session,
+        query: str,
         query_vec: List[float],
         top_k: int,
         document_id: Optional[str] = None
     ) -> List[Dict[str, Any]]:
-        """Fallback Python cosine similarity search."""
+        """
+        Hybrid retrieval combining Dense Vector Cosine Similarity and BM25 Sparse Lexical Scoring
+        using Reciprocal Rank Fusion (RRF).
+        """
         import numpy as np
 
         q = db.query(RagDocumentChunk, RagDocument.filename, RagDocument.s3_url, RagDocument.format)\
@@ -297,32 +372,77 @@ class RagService:
         if norm_q == 0:
             norm_q = 1e-9
 
-        scored = []
+        # 1. Prepare raw items and calculate Dense Vector Cosine Similarity
+        items = []
+        vec_scores = []
         for chunk, fname, s3_link, fmt in rows:
             if chunk.embedding is not None:
                 c_arr = np.array(chunk.embedding, dtype=float)
                 norm_c = np.linalg.norm(c_arr)
-                if norm_c > 0:
-                    sim = float(np.dot(q_arr, c_arr) / (norm_q * norm_c))
-                else:
-                    sim = 0.0
+                sim = float(np.dot(q_arr, c_arr) / (norm_q * norm_c)) if norm_c > 0 else 0.0
             else:
                 sim = 0.0
 
-            scored.append({
+            item = {
                 "chunk_id": chunk.id,
                 "document_id": chunk.document_id,
                 "filename": fname,
                 "format": fmt,
                 "s3_url": s3_link,
                 "chunk_index": chunk.chunk_index,
-                "heading": chunk.heading,
-                "content": chunk.content,
-                "similarity_score": round(sim, 4),
-                "distance": round(1.0 - sim, 4)
+                "heading": chunk.heading or "",
+                "content": chunk.content or "",
+                "vector_sim": max(0.0, sim)
+            }
+            items.append(item)
+            vec_scores.append(sim)
+
+        # 2. Calculate BM25 Sparse Lexical Scores
+        bm25_scores = compute_bm25_scores(query, items)
+
+        # 3. Rank by Vector Similarity
+        vec_ranked_indices = sorted(range(len(items)), key=lambda i: vec_scores[i], reverse=True)
+        vec_rank_map = {idx: rank + 1 for rank, idx in enumerate(vec_ranked_indices)}
+
+        # 4. Rank by BM25 Score
+        bm25_ranked_indices = sorted(range(len(items)), key=lambda i: bm25_scores[i], reverse=True)
+        bm25_rank_map = {idx: rank + 1 for rank, idx in enumerate(bm25_ranked_indices)}
+
+        # 5. Reciprocal Rank Fusion (RRF with k=60 constant) + Exact Keyword Boost
+        q_lower = query.lower().strip()
+        scored = []
+        for idx, item in enumerate(items):
+            r_vec = vec_rank_map[idx]
+            r_bm25 = bm25_rank_map[idx]
+            rrf_score = (1.0 / (60.0 + r_vec)) + (1.0 / (60.0 + r_bm25))
+
+            # Exact phrase match boost
+            content_lower = item["content"].lower()
+            heading_lower = item["heading"].lower()
+            if q_lower in heading_lower:
+                rrf_score += 0.015
+            elif q_lower in content_lower:
+                rrf_score += 0.008
+
+            # Normalized score for UI presentation [0.0 - 1.0]
+            norm_sim = min(1.0, (item["vector_sim"] * 0.65) + (min(1.0, bm25_scores[idx] / 5.0) * 0.35))
+
+            scored.append({
+                "chunk_id": item["chunk_id"],
+                "document_id": item["document_id"],
+                "filename": item["filename"],
+                "format": item["format"],
+                "s3_url": item["s3_url"],
+                "chunk_index": item["chunk_index"],
+                "heading": item["heading"],
+                "content": item["content"],
+                "similarity_score": round(norm_sim, 4),
+                "distance": round(1.0 - norm_sim, 4),
+                "rrf_score": rrf_score
             })
 
-        scored.sort(key=lambda x: x["similarity_score"], reverse=True)
+        # 6. Sort by RRF score descending
+        scored.sort(key=lambda x: x["rrf_score"], reverse=True)
         return scored[:top_k]
 
     @classmethod
