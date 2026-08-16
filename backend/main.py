@@ -216,6 +216,17 @@ fastapi_app.include_router(camera_controller.router)
 fastapi_app.include_router(pdf_inspector_controller.router)
 fastapi_app.include_router(anti_spoof_controller.router)
 
+# Mount Tire Counter Sub-App directly onto /tire-api
+try:
+    _tire_dir = os.path.join(_PARENT_DIR, "warehouse-tire-counter")
+    if _tire_dir not in sys.path:
+        sys.path.insert(0, _tire_dir)
+    from app import app as tire_counter_app
+    fastapi_app.mount("/tire-api", tire_counter_app)
+    print("[MainAPI] Successfully mounted /tire-api onto Vision API container.")
+except Exception as e:
+    print(f"[MainAPI] Warning: Could not mount tire-counter sub-app: {e}")
+
 
 _FAVICON = "/api/v1/uploads/favicon.png"
 
