@@ -23,6 +23,7 @@ class SearchRequest(BaseModel):
 
 class ChatRequest(BaseModel):
     query: str
+    messages: Optional[List[Dict[str, Any]]] = None # Multi-turn conversation history
     top_k: int = 4
     document_id: Optional[str] = None
     system_prompt: Optional[str] = None
@@ -122,6 +123,7 @@ def rag_chat(
     chat_res = RagService.chat_completion(
         db=db,
         query=req.query,
+        messages=req.messages,
         top_k=req.top_k,
         document_id=req.document_id,
         custom_system_prompt=req.system_prompt

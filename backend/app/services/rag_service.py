@@ -321,23 +321,41 @@ class RagService:
         cls,
         db: Session,
         query: str,
+        messages: Optional[List[Dict[str, Any]]] = None,
         top_k: int = 4,
         document_id: Optional[str] = None,
         custom_system_prompt: Optional[str] = None
     ) -> Dict[str, Any]:
         """
-        RAG Chat Pipeline:
-        1. Retrieves top-k most relevant Markdown chunks via vector similarity search.
-        2. Constructs knowledge context.
-        3. Calls LLM (OpenRouter / Nemotron / OpenAI / Gemini).
-        4. Returns structured answer with source citations.
+        RAG Chat Completion with Multi-Turn Conversation Memory:
+        1. Analyzes conversation history to construct contextual search query.
+        2. Retrieves top-k most relevant Markdown chunks via vector similarity search.
+        3. Constructs knowledge context.
+        4. Passes full conversation thread + grounded context to LLM (Groq / OpenRouter / Gemini).
+        5. Returns structured answer with source citations.
         """
         start_time = time.perf_counter()
 
-        # 1. Retrieve relevant chunks
-        chunks = cls.search_similar_chunks(db, query, top_k=top_k, document_id=document_id)
+        # 1. Context-aware search query
+        search_query = query.strip()
+        history_for_search = []
+        if messages:
+            for m in messages:
+                if isinstance(m, dict) and m.get("content") and m.get("role") in ["user", "assistant"]:
+                    c_text = re.sub(r'📎 Sumber Rujukan[\s\S]*$', '', str(m["content"])).strip()
+                    if c_text:
+                        history_for_search.append(c_text)
 
-        # 2. Build Context Prompt
+        if len(history_for_search) >= 2 and len(query.split()) < 7:
+            # Short follow-up question -> combine with previous topic for better vector retrieval
+            search_query = f"{history_for_search[-2][:80]} {query.strip()}"
+
+        # 2. Retrieve relevant chunks
+        chunks = cls.search_similar_chunks(db, search_query, top_k=top_k, document_id=document_id)
+        if not chunks and search_query != query.strip():
+            chunks = cls.search_similar_chunks(db, query.strip(), top_k=top_k, document_id=document_id)
+
+        # 3. Build Context Prompt
         context_parts = []
         sources = []
 
@@ -358,27 +376,40 @@ class RagService:
 
         combined_context = "\n\n---\n\n".join(context_parts) if context_parts else "Tidak ada dokumen yang relevan ditemukan di basis pengetahuan."
 
-        # 3. Formulate Prompt
+        # 4. Formulate Prompt & Multi-Turn Message History
         system_instruction = custom_system_prompt or (
             "Anda adalah AI Assistant RAG cerdas untuk Raray Vision. "
             "Tugas Anda adalah menjawab pertanyaan pengguna secara akurat, jelas, dan profesional "
-            "berdasarkan KONTEKS DOKUMEN MARKDOWN yang disediakan di bawah ini.\n"
+            "berdasarkan KONTEKS DOKUMEN MARKDOWN yang disediakan serta riwayat percakapan sebelumnya.\n"
+            "Format jawaban menggunakan Markdown yang rapi (gunakan **bold**, bullet point, nomor rujukan sumber).\n"
             "Jika informasi tidak terdapat pada konteks, sampaikan dengan sopan bahwa informasi tidak ditemukan dalam basis pengetahuan.\n"
             "Sebutkan rujukan sumber dokumen jika relevan."
         )
 
-        llm_prompt = f"""Konteks Dokumen Pengetahuan (Markdown):
+        current_prompt = f"""Konteks Dokumen Pengetahuan (Markdown):
 ----------------------------------------
 {combined_context}
 ----------------------------------------
 
 Pertanyaan Pengguna:
-{query}
+{query}"""
 
-Jawaban:"""
+        llm_messages = [{"role": "system", "content": system_instruction}]
 
-        # 4. Invoke LLM
-        answer = cls._call_llm(system_instruction, llm_prompt)
+        # Inject previous conversation turns (up to last 6 messages)
+        if messages:
+            past_msgs = messages[:-1] if messages and messages[-1].get("content") == query else messages
+            for m in past_msgs[-6:]:
+                if isinstance(m, dict) and m.get("role") in ["user", "assistant"] and m.get("content"):
+                    llm_messages.append({
+                        "role": m["role"],
+                        "content": str(m["content"]).strip()
+                    })
+
+        llm_messages.append({"role": "user", "content": current_prompt})
+
+        # 5. Invoke LLM
+        answer = cls._call_llm_messages(llm_messages)
 
         elapsed_ms = round((time.perf_counter() - start_time) * 1000, 2)
 
@@ -392,8 +423,16 @@ Jawaban:"""
 
     @staticmethod
     def _call_llm(system_prompt: str, user_prompt: str) -> str:
+        """Legacy helper delegating to _call_llm_messages."""
+        return RagService._call_llm_messages([
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt}
+        ])
+
+    @staticmethod
+    def _call_llm_messages(messages: List[Dict[str, str]]) -> str:
         """
-        Invokes LLM for grounded RAG answer generation.
+        Invokes LLM with full conversation messages list.
         Priority:
         1. Groq (Ultra-fast LPU, default model: qwen/qwen3.6-27b)
         2. OpenRouter
@@ -415,10 +454,7 @@ Jawaban:"""
                     },
                     json={
                         "model": groq_model,
-                        "messages": [
-                            {"role": "system", "content": system_prompt},
-                            {"role": "user", "content": user_prompt}
-                        ],
+                        "messages": messages,
                         "temperature": 0.2,
                         "max_tokens": 2048
                     },
@@ -449,10 +485,7 @@ Jawaban:"""
                     },
                     json={
                         "model": openrouter_model,
-                        "messages": [
-                            {"role": "system", "content": system_prompt},
-                            {"role": "user", "content": user_prompt}
-                        ],
+                        "messages": messages,
                         "temperature": 0.3
                     },
                     timeout=30
@@ -471,9 +504,11 @@ Jawaban:"""
             try:
                 from google import genai
                 client = genai.Client(api_key=gemini_key)
+                # Combine messages into prompt for Gemini
+                gemini_text = "\n\n".join([f"[{m['role'].upper()}]: {m['content']}" for m in messages])
                 response = client.models.generate_content(
                     model="gemini-2.0-flash",
-                    contents=f"{system_prompt}\n\n{user_prompt}"
+                    contents=gemini_text
                 )
                 if response and response.text:
                     return response.text.strip()

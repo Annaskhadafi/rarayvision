@@ -527,12 +527,31 @@ const startNewDatabase = () => {
   dbViewMode.value = 'form'
 }
 
-// Chatbot Send
+// Chatbot Send with Multi-Turn Memory
+const clearChat = () => {
+  chatMessages.value = [
+    {
+      role: 'assistant',
+      content: 'Halo! Saya adalah AI Chatbot RAG terhubung ke basis pengetahuan Anda (didukung oleh **Groq Qwen 2.5/3.6**). Tanyakan apa saja mengenai dokumen dan data database yang telah Anda sinkronkan.',
+      sources: []
+    }
+  ]
+}
+
 const handleSendMessage = async () => {
   const q = userPrompt.value.trim()
   if (!q || isGenerating.value) return
 
   userPrompt.value = ''
+
+  // Collect previous conversation turns for LLM context
+  const previousTurns = chatMessages.value
+    .filter(m => m.role === 'user' || m.role === 'assistant')
+    .map(m => ({
+      role: m.role,
+      content: m.content
+    }))
+
   chatMessages.value.push({
     role: 'user',
     content: q,
@@ -544,6 +563,7 @@ const handleSendMessage = async () => {
   try {
     const res = await ragService.chat({
       query: q,
+      messages: previousTurns,
       topK: chatTopK.value,
       documentId: selectedDocFilter.value || null
     })
@@ -633,7 +653,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "Message is required" }, { status: 400 });
     }
 
-    // 1. Panggil RAG API Raray Vision untuk mengambil context + jawaban LLM
+    // 1. Panggil RAG API Raray Vision dengan multi-turn context memory
     const ragResponse = await fetch("${API_BASE_URL}/api/v1/rag/chat", {
       method: "POST",
       headers: {
@@ -642,6 +662,7 @@ export async function POST(req: NextRequest) {
       },
       body: JSON.stringify({
         query: lastUserMessage,
+        messages: messages, // Riwayat percakapan sebelumnya
         top_k: 4
       })
     });
@@ -1321,13 +1342,19 @@ print("Sumber:", [s["filename"] for s in chat_res["data"]["sources"]])`
           <div class="chat-header">
             <div class="chat-title-box">
               <span class="status-indicator"></span>
-              <h3>RAG Knowledge Chatbot (Groq Qwen 2.5/3.6)</h3>
+              <div>
+                <h3>RAG Knowledge Chatbot (Groq Qwen 2.5/3.6)</h3>
+                <span class="context-memory-sub">🧠 Multi-turn Memory Aktif (Mengingat percakapan sebelumnya)</span>
+              </div>
             </div>
             <div class="chat-controls">
               <select v-model="selectedDocFilter" class="filter-select">
                 <option value="">Semua Dokumen Basis Pengetahuan</option>
                 <option v-for="d in documents" :key="d.id" :value="d.id">{{ d.filename }}</option>
               </select>
+              <button class="btn-clear-chat" @click="clearChat" title="Reset konteks percakapan">
+                🧹 Percakapan Baru
+              </button>
             </div>
           </div>
 
@@ -2521,6 +2548,12 @@ print("Sumber:", [s["filename"] for s in chat_res["data"]["sources"]])`
   margin: 0;
 }
 
+.context-memory-sub {
+  font-size: 11px;
+  color: #16a34a;
+  font-weight: 600;
+}
+
 .status-indicator {
   width: 8px;
   height: 8px;
@@ -2528,11 +2561,35 @@ print("Sumber:", [s["filename"] for s in chat_res["data"]["sources"]])`
   border-radius: 50%;
 }
 
+.chat-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .filter-select {
   padding: 6px 12px;
   border: 1px solid #cbd5e1;
   border-radius: 6px;
   font-size: 12px;
+}
+
+.btn-clear-chat {
+  background: #f8fafc;
+  border: 1px solid #cbd5e1;
+  color: #475569;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 6px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.btn-clear-chat:hover {
+  background: #fee2e2;
+  border-color: #fca5a5;
+  color: #b91c1c;
 }
 
 .messages-area {
