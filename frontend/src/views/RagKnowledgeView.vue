@@ -620,10 +620,91 @@ const formatMarkdown = (text) => {
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
 
-  // Code blocks
+  // Code blocks (preserve placeholder)
+  const codeBlocks = []
   html = html.replace(/```([a-zA-Z0-9_-]*)\n([\s\S]*?)```/g, (_m, _lang, code) => {
-    return `<pre class="chat-code-block"><code>${code.trim()}</code></pre>`
+    const placeholder = `__CODE_BLOCK_${codeBlocks.length}__`
+    codeBlocks.push(`<pre class="chat-code-block"><code>${code.trim()}</code></pre>`)
+    return placeholder
   })
+
+  // Parse Markdown Tables and store in placeholders to protect from <br> injection
+  const tableBlocks = []
+  const lines = html.split('\n')
+  const newLines = []
+  let currentTable = []
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].trim()
+    if (line.startsWith('|') && line.endsWith('|')) {
+      currentTable.push(line)
+    } else {
+      if (currentTable.length >= 2) {
+        let tableHtml = '<div class="chat-table-wrapper"><table class="chat-table">'
+        let isFirstRow = true
+        let hasBody = false
+
+        for (let r = 0; r < currentTable.length; r++) {
+          const rowCells = currentTable[r].split('|').slice(1, -1).map(c => c.trim())
+          if (rowCells.every(c => /^:?-+:?$/.test(c))) {
+            continue
+          }
+          if (isFirstRow) {
+            tableHtml += '<thead><tr>' + rowCells.map(c => `<th>${c}</th>`).join('') + '</tr></thead><tbody>'
+            isFirstRow = false
+            hasBody = true
+          } else {
+            tableHtml += '<tr>' + rowCells.map(c => `<td>${c}</td>`).join('') + '</tr>'
+          }
+        }
+        if (hasBody) {
+          tableHtml += '</tbody>'
+        }
+        tableHtml += '</table></div>'
+
+        const placeholder = `__TABLE_BLOCK_${tableBlocks.length}__`
+        tableBlocks.push(tableHtml)
+        newLines.push(placeholder)
+        currentTable = []
+      } else if (currentTable.length === 1) {
+        newLines.push(currentTable[0])
+        currentTable = []
+      }
+      newLines.push(lines[i])
+    }
+  }
+
+  if (currentTable.length >= 2) {
+    let tableHtml = '<div class="chat-table-wrapper"><table class="chat-table">'
+    let isFirstRow = true
+    let hasBody = false
+
+    for (let r = 0; r < currentTable.length; r++) {
+      const rowCells = currentTable[r].split('|').slice(1, -1).map(c => c.trim())
+      if (rowCells.every(c => /^:?-+:?$/.test(c))) {
+        continue
+      }
+      if (isFirstRow) {
+        tableHtml += '<thead><tr>' + rowCells.map(c => `<th>${c}</th>`).join('') + '</tr></thead><tbody>'
+        isFirstRow = false
+        hasBody = true
+      } else {
+        tableHtml += '<tr>' + rowCells.map(c => `<td>${c}</td>`).join('') + '</tr>'
+      }
+    }
+    if (hasBody) {
+      tableHtml += '</tbody>'
+    }
+    tableHtml += '</table></div>'
+
+    const placeholder = `__TABLE_BLOCK_${tableBlocks.length}__`
+    tableBlocks.push(tableHtml)
+    newLines.push(placeholder)
+  } else if (currentTable.length === 1) {
+    newLines.push(currentTable[0])
+  }
+
+  html = newLines.join('\n')
 
   // Inline code
   html = html.replace(/`([^`]+)`/g, '<code class="chat-inline-code">$1</code>')
@@ -646,6 +727,16 @@ const formatMarkdown = (text) => {
   // Line breaks
   html = html.replace(/\n\n/g, '<div class="chat-spacer"></div>')
   html = html.replace(/\n/g, '<br>')
+
+  // Restore table blocks
+  tableBlocks.forEach((tb, idx) => {
+    html = html.replace(`__TABLE_BLOCK_${idx}__`, tb)
+  })
+
+  // Restore code blocks
+  codeBlocks.forEach((cb, idx) => {
+    html = html.replace(`__CODE_BLOCK_${idx}__`, cb)
+  })
 
   return html
 }
@@ -3056,5 +3147,59 @@ print("Sumber:", [s["filename"] for s in chat_res["data"]["sources"]])`
   display: flex;
   gap: 10px;
   margin-top: 8px;
+}
+
+/* Chat Markdown Table Styles */
+.chat-table-wrapper {
+  overflow-x: auto;
+  margin: 12px 0;
+  border-radius: 8px;
+  border: 1px solid #e2e8f0;
+  background: #ffffff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+}
+
+.chat-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+  text-align: left;
+}
+
+.chat-table th {
+  background: #f8fafc;
+  color: #334155;
+  font-weight: 600;
+  padding: 10px 14px;
+  border-bottom: 2px solid #cbd5e1;
+  border-right: 1px solid #f1f5f9;
+  white-space: nowrap;
+}
+
+.chat-table th:last-child {
+  border-right: none;
+}
+
+.chat-table td {
+  padding: 8px 14px;
+  border-bottom: 1px solid #f1f5f9;
+  border-right: 1px solid #f8fafc;
+  color: #475569;
+}
+
+.chat-table td:last-child {
+  border-right: none;
+}
+
+.chat-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.chat-table tbody tr:nth-child(even) {
+  background: #fafafa;
+}
+
+.chat-table tbody tr:hover {
+  background: #f1f5f9;
 }
 </style>
