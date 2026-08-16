@@ -30,3 +30,4 @@ pdf-inspector>=1.14.2
 rapidocr_onnxruntime>=1.4.4
 pypdfium2>=4.30.0
 uniface>=4.0.0
+yt-dlp

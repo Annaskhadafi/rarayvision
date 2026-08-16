@@ -19,12 +19,78 @@ from backend.app.services.inventory_service import (
 import os
 import urllib.parse
 
+import subprocess
+import shutil
+
+# Domains that require yt-dlp to extract real stream URLs
+_YTDLP_DOMAINS = (
+    "youtube.com", "youtu.be",
+    "twitch.tv",
+    "facebook.com", "fb.watch",
+    "instagram.com",
+    "tiktok.com",
+    "bilibili.com",
+    "dailymotion.com",
+    "vimeo.com",
+)
+
+def _extract_with_ytdlp(url: str) -> str:
+    """
+    Use yt-dlp to extract the best direct stream URL from a social media / video platform URL.
+    Returns the extracted URL, or the original URL if extraction fails.
+    Supports: YouTube Live, Twitch, Facebook Live, TikTok, etc.
+    """
+    if not shutil.which("yt-dlp"):
+        # yt-dlp not installed — try pip install silently
+        try:
+            subprocess.run(
+                ["pip", "install", "yt-dlp", "-q", "--disable-pip-version-check"],
+                check=True, capture_output=True, timeout=30
+            )
+        except Exception:
+            print("[CameraService] yt-dlp not available. Install with: pip install yt-dlp")
+            return url
+
+    try:
+        print(f"[CameraService] Extracting stream URL via yt-dlp: {url}")
+        result = subprocess.run(
+            [
+                "yt-dlp",
+                "--get-url",            # Output only the direct URL
+                "--format", "best[ext=mp4]/best",  # Prefer mp4, fallback to best
+                "--no-playlist",        # Only process single video/stream
+                "--no-warnings",
+                url
+            ],
+            capture_output=True, text=True, timeout=15
+        )
+        extracted = result.stdout.strip().splitlines()
+        if extracted and extracted[0].startswith("http"):
+            real_url = extracted[0]
+            print(f"[CameraService] yt-dlp extracted: {real_url[:80]}...")
+            return real_url
+        else:
+            print(f"[CameraService] yt-dlp extraction failed: {result.stderr[:200]}")
+    except subprocess.TimeoutExpired:
+        print("[CameraService] yt-dlp timed out (15s).")
+    except Exception as e:
+        print(f"[CameraService] yt-dlp error: {e}")
+
+    return url  # Fallback to original URL
+
+
 def _resolve_stream_source(stream_url: str):
-    """Converts numeric string e.g. '0' to integer for local webcam or keeps RTSP/HTTP string."""
+    """Converts numeric string e.g. '0' to integer for local webcam or keeps RTSP/HTTP string.
+    Automatically extracts real stream URLs from YouTube/social platform URLs via yt-dlp."""
     s_url = stream_url.strip()
     if s_url.isdigit():
         return int(s_url)
-    
+
+    # Detect social media platform URLs and extract real stream via yt-dlp
+    lowered = s_url.lower()
+    if any(domain in lowered for domain in _YTDLP_DOMAINS):
+        s_url = _extract_with_ytdlp(s_url)
+
     # Auto-fix unencoded '#' or special characters in RTSP password
     if s_url.lower().startswith("rtsp://") and "@" in s_url:
         try:
@@ -136,9 +202,16 @@ def generate_mjpeg_feed(
     Supports all HSE and Inventory AI modules.
     """
     source = _resolve_stream_source(stream_url)
-    if isinstance(source, str) and source.lower().startswith("rtsp"):
+    is_network = isinstance(source, str) and any(
+        source.lower().startswith(p) for p in ("rtsp://", "rtmp://", "http://", "https://")
+    )
+    if is_network and source.lower().startswith("rtsp"):
         os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp|stimeout;3000000|rw_timeout;3000000"
-    cap = cv2.VideoCapture(source)
+    if is_network:
+        cap = cv2.VideoCapture(source, cv2.CAP_FFMPEG)
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 2)
+    else:
+        cap = cv2.VideoCapture(source)
 
     frame_skip = 2  # Process AI every 2nd frame for smooth 25 FPS feed
     frame_counter = 0
