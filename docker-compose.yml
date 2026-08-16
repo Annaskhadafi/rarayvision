@@ -23,8 +23,14 @@ services:
     volumes:
       - uploads_data:/app/backend/uploads
       - models_data:/app/backend/ml_models
+      - tire_cache:/tmp/raray_media_cache
+      - tire_uploads:/app/warehouse-tire-counter/uploads
+      - tire_samples:/app/warehouse-tire-counter/samples
     expose:
       - "5000"
+      - "8001"
+    ports:
+      - "8001:8001"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
       interval: 30s
@@ -32,34 +38,12 @@ services:
       retries: 10
       start_period: 180s
 
-  tire-counter:
-    build:
-      context: .
-      dockerfile: ./warehouse-tire-counter/Dockerfile
-    container_name: rarayvision-tire-counter
-    restart: unless-stopped
-    volumes:
-      - tire_cache:/tmp/raray_media_cache
-      - tire_uploads:/app/warehouse-tire-counter/uploads
-      - tire_samples:/app/warehouse-tire-counter/samples
-    expose:
-      - "8001"
-    ports:
-      - "8001:8001"
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8001/api/telemetry"]
-      interval: 30s
-      timeout: 10s
-      retries: 5
-      start_period: 60s
-
   frontend:
     build: ./frontend
     container_name: rarayvision-frontend
     restart: unless-stopped
     depends_on:
       - backend
-      - tire-counter
     ports:
       - "3800:80"
 
@@ -69,3 +53,4 @@ volumes:
   tire_cache:
   tire_uploads:
   tire_samples:
+

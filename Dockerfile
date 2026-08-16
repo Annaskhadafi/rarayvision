@@ -2,10 +2,10 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-ENV PYTHONPATH="/app:/app/backend"
+ENV PYTHONPATH="/app:/app/backend:/app/warehouse-tire-counter"
 ENV PYTHONUNBUFFERED=1
 
-# Install system dependencies for OpenCV, Tesseract, PyTorch, PaddleOCR, and ONNX
+# Install system dependencies for OpenCV, Tesseract, PyTorch, FFMPEG, PaddleOCR, and ONNX
 RUN apt-get update && apt-get install -y --no-install-recommends \
     tesseract-ocr \
     tesseract-ocr-eng \
@@ -16,6 +16,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxext6 \
     libxrender-dev \
     libgomp1 \
+    ffmpeg \
     curl \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
@@ -33,6 +34,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy application code
 COPY . .
 
-EXPOSE 5000
+# Ensure entrypoint script is executable
+RUN chmod +x scripts/entrypoint.sh
 
-CMD ["uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "5000"]
+# Expose Main Vision API (5000) and Warehouse Tire Counter (8001)
+EXPOSE 5000 8001
+
+CMD ["/bin/bash", "scripts/entrypoint.sh"]
+
