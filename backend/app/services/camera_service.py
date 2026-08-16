@@ -22,6 +22,8 @@ import urllib.parse
 import subprocess
 import shutil
 
+import tempfile
+
 # Domains that require yt-dlp to extract real stream URLs
 _YTDLP_DOMAINS = (
     "youtube.com", "youtu.be",
@@ -36,63 +38,87 @@ _YTDLP_DOMAINS = (
 
 def _extract_with_ytdlp(url: str) -> str:
     """
-    Use yt-dlp to extract the best direct stream URL from a social media / video platform URL.
-    Returns the extracted URL, or the original URL if extraction fails.
-    Supports: YouTube Live, Twitch, Facebook Live, TikTok, etc.
+    Use yt-dlp Python API to resolve video/stream URLs:
+    - If Live Stream: returns direct HLS / m3u8 stream URL.
+    - If VOD / Video: downloads to local temp cache and returns file path for smooth continuous playback.
     """
-    if not shutil.which("yt-dlp"):
-        # yt-dlp not installed — try pip install silently
+    try:
+        import yt_dlp
+    except ImportError:
         try:
-            subprocess.run(
-                ["pip", "install", "yt-dlp", "-q", "--disable-pip-version-check"],
-                check=True, capture_output=True, timeout=30
-            )
-        except Exception:
-            print("[CameraService] yt-dlp not available. Install with: pip install yt-dlp")
+            import subprocess
+            subprocess.run(["pip", "install", "yt-dlp", "-q"], check=True, timeout=30)
+            import yt_dlp
+        except Exception as e:
+            print(f"[CameraService] yt-dlp install failed: {e}")
             return url
 
     try:
-        print(f"[CameraService] Extracting stream URL via yt-dlp: {url}")
-        result = subprocess.run(
-            [
-                "yt-dlp",
-                "--get-url",            # Output only the direct URL
-                "--format", "best[ext=mp4]/best",  # Prefer mp4, fallback to best
-                "--no-playlist",        # Only process single video/stream
-                "--no-warnings",
-                url
-            ],
-            capture_output=True, text=True, timeout=15
-        )
-        extracted = result.stdout.strip().splitlines()
-        if extracted and extracted[0].startswith("http"):
-            real_url = extracted[0]
-            print(f"[CameraService] yt-dlp extracted: {real_url[:80]}...")
-            return real_url
-        else:
-            print(f"[CameraService] yt-dlp extraction failed: {result.stderr[:200]}")
-    except subprocess.TimeoutExpired:
-        print("[CameraService] yt-dlp timed out (15s).")
-    except Exception as e:
-        print(f"[CameraService] yt-dlp error: {e}")
+        print(f"[CameraService] Resolving media URL via yt-dlp: {url}")
+        ydl_opts_info = {
+            'format': 'best[ext=mp4]/best',
+            'quiet': True,
+            'no_warnings': True,
+            'noplaylist': True,
+        }
+        with yt_dlp.YoutubeDL(ydl_opts_info) as ydl:
+            info = ydl.extract_info(url, download=False)
+            is_live = info.get('is_live', False) or info.get('was_live', False)
+            video_id = info.get('id', 'stream')
+            direct_url = info.get('url', '')
 
-    return url  # Fallback to original URL
+            # If it's a live HLS stream (.m3u8), return stream URL directly
+            if is_live and direct_url:
+                print(f"[CameraService] Detected Live Stream: {direct_url[:80]}...")
+                return direct_url
+
+            # If it's a video file / VOD, download to local cache for 100% reliable frame decoding
+            cache_dir = os.path.join(tempfile.gettempdir(), "raray_media_cache")
+            os.makedirs(cache_dir, exist_ok=True)
+            cached_path = os.path.join(cache_dir, f"media_{video_id}.mp4")
+
+            if os.path.exists(cached_path) and os.path.getsize(cached_path) > 1000:
+                print(f"[CameraService] Using existing cached media: {cached_path}")
+                return cached_path
+
+            print(f"[CameraService] Downloading video to cache: {cached_path}")
+            ydl_opts_download = {
+                'format': 'best[ext=mp4]/best',
+                'outtmpl': cached_path,
+                'quiet': True,
+                'no_warnings': True,
+                'noplaylist': True,
+            }
+            with yt_dlp.YoutubeDL(ydl_opts_download) as ydl_dl:
+                ydl_dl.download([url])
+
+            if os.path.exists(cached_path):
+                print(f"[CameraService] Video cached successfully ({os.path.getsize(cached_path)} bytes)")
+                return cached_path
+
+            if direct_url:
+                return direct_url
+
+    except Exception as e:
+        print(f"[CameraService] yt-dlp resolution error: {e}")
+
+    return url
 
 
 def _resolve_stream_source(stream_url: str):
     """Converts numeric string e.g. '0' to integer for local webcam or keeps RTSP/HTTP string.
-    Automatically extracts real stream URLs from YouTube/social platform URLs via yt-dlp."""
+    Automatically extracts real stream URLs or cached video files from YouTube/social platforms."""
     s_url = stream_url.strip()
     if s_url.isdigit():
         return int(s_url)
 
-    # Detect social media platform URLs and extract real stream via yt-dlp
+    # Detect social media platform URLs and resolve via yt-dlp
     lowered = s_url.lower()
     if any(domain in lowered for domain in _YTDLP_DOMAINS):
         s_url = _extract_with_ytdlp(s_url)
 
     # Auto-fix unencoded '#' or special characters in RTSP password
-    if s_url.lower().startswith("rtsp://") and "@" in s_url:
+    if isinstance(s_url, str) and s_url.lower().startswith("rtsp://") and "@" in s_url:
         try:
             proto_prefix, rest = s_url.split("://", 1)
             userpass, hostpath = rest.rsplit("@", 1)
@@ -105,6 +131,7 @@ def _resolve_stream_source(stream_url: str):
             print(f"[CameraService] URL auto-fix warning: {e}")
 
     return s_url
+
 
 import concurrent.futures
 
@@ -220,12 +247,18 @@ def generate_mjpeg_feed(
     while True:
         ret, frame = cap.read()
         if not ret or frame is None:
+            # If it is a video file (e.g. cached YouTube video or mp4), loop from beginning
+            if isinstance(source, str) and not is_network and os.path.exists(source):
+                cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                ret, frame = cap.read()
+
             # Try PyAV fallback for H.265 / HEVC stream
-            if isinstance(source, str) and HAS_PYAV:
+            if (not ret or frame is None) and isinstance(source, str) and HAS_PYAV:
                 ret_pyav, frame_pyav = _read_frame_pyav(source)
                 if ret_pyav and frame_pyav is not None:
                     ret = True
                     frame = frame_pyav
+
 
         if not ret or frame is None:
             offline_img = np.zeros((480, 640, 3), dtype=np.uint8)
