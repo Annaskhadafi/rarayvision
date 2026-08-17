@@ -16,7 +16,27 @@ const isLoading = ref(false)
 const errorMessage = ref('')
 const successMessage = ref('')
 const resultData = ref(null)
-const activeTab = ref('analytics') // 'analytics', 'table', 'api_integration', 'raw_json'
+const activeTab = ref('analytics') // 'analytics', 'simulation', 'chat_ai', 'table', 'api_integration'
+
+// Tournament Leaderboard Modal
+const showLeaderboardModal = ref(false)
+
+// What-If Simulation State
+const simGrowthBoost = ref(0)
+const simSpikeMultiplier = ref(1.0)
+const simSafetyBufferDays = ref(0)
+const isSimulating = ref(false)
+const isScenarioActive = ref(false)
+
+// Ask AI Chat State
+const aiQuestionsList = ref([
+  'Berapa safety stock ideal yang harus disiapkan untuk periode proyeksi?',
+  'Apa penjelasan dan potensi risiko di balik titik anomali yang terdeteksi?',
+  'Rekomendasikan 3 langkah strategis untuk memaksimalkan performa tren saat ini.'
+])
+const chatInput = ref('')
+const chatHistory = ref([])
+const isAiThinking = ref(false)
 
 // Integration snippet state
 const copiedSnippet = ref(false)
@@ -46,6 +66,8 @@ const loadPreset = (preset) => {
   selectedFile.value = null
   targetColumn.value = ''
   dateColumn.value = ''
+  resetSimulationState()
+  chatHistory.value = []
   runAnalysis()
 }
 
@@ -56,13 +78,22 @@ const onFileSelect = (event) => {
     datasetName.value = file.name.replace('.csv', '').replace(/_/g, ' ')
     selectedPresetId.value = 'custom_csv'
     errorMessage.value = ''
+    resetSimulationState()
   }
+}
+
+const resetSimulationState = () => {
+  simGrowthBoost.value = 0
+  simSpikeMultiplier.value = 1.0
+  simSafetyBufferDays.value = 0
+  isScenarioActive.value = false
 }
 
 const runAnalysis = async () => {
   isLoading.value = true
   errorMessage.value = ''
   successMessage.value = ''
+  resetSimulationState()
 
   try {
     let res
@@ -93,11 +124,66 @@ const runAnalysis = async () => {
     }
 
     resultData.value = res
-    successMessage.value = `Analisis Machine Learning berhasil diselesaikan dalam ${res.latency_ms} ms.`
+    successMessage.value = `Turnamen Model selesai! Model Juara: ${res.tournament_results?.winner?.name} (Akurasi: ${res.tournament_results?.accuracy_score}%) dalam ${res.latency_ms} ms.`
   } catch (err) {
     errorMessage.value = err.message || 'Gagal menjalankan pemrosesan AutoML.'
   } finally {
     isLoading.value = false
+  }
+}
+
+// ── Real-Time What-If Simulation Trigger ─────────────────────────────────
+const applyScenarioSimulation = async () => {
+  if (!resultData.value?.job_id) return
+  isSimulating.value = true
+  try {
+    const payload = {
+      job_id: resultData.value.job_id,
+      growth_boost_pct: Number(simGrowthBoost.value),
+      spike_multiplier: Number(simSpikeMultiplier.value),
+      safety_buffer_days: Number(simSafetyBufferDays.value)
+    }
+    const simRes = await automlService.simulateScenario(payload)
+    
+    // Update local table data and chart without full reload
+    resultData.value.table_data = simRes.table_data
+    resultData.value.chart_payload = simRes.chart_payload
+    resultData.value.summary_metrics = {
+      ...resultData.value.summary_metrics,
+      ...simRes.summary_metrics
+    }
+    isScenarioActive.value = (simGrowthBoost.value !== 0 || simSpikeMultiplier.value !== 1.0 || simSafetyBufferDays.value !== 0)
+  } catch (err) {
+    console.error('Simulation error:', err)
+  } finally {
+    isSimulating.value = false
+  }
+}
+
+// ── Ask AI Interactive Chat ──────────────────────────────────────────────
+const sendAiQuestion = async (presetQuestion = null) => {
+  const query = (presetQuestion || chatInput.value).trim()
+  if (!query || !resultData.value?.job_id || isAiThinking.value) return
+
+  chatHistory.value.push({ role: 'user', content: query })
+  chatInput.value = ''
+  isAiThinking.value = true
+
+  try {
+    const payload = {
+      job_id: resultData.value.job_id,
+      question: query,
+      chat_history: chatHistory.value
+    }
+    const aiRes = await automlService.askAiQuestion(payload)
+    chatHistory.value.push({ role: 'assistant', content: aiRes.answer })
+  } catch (err) {
+    chatHistory.value.push({
+      role: 'assistant',
+      content: `⚠️ Maaf, terjadi kendala saat meminta analisis AI: ${err.message}`
+    })
+  } finally {
+    isAiThinking.value = false
   }
 }
 
@@ -106,7 +192,6 @@ const chartData = computed(() => {
   if (!resultData.value || !resultData.value.table_data) return null
   const table = resultData.value.table_data
 
-  // Find min and max for scaling
   const allValues = []
   table.forEach(r => {
     if (r.actual_value !== null && r.actual_value !== undefined) allValues.push(r.actual_value)
@@ -136,7 +221,6 @@ const chartData = computed(() => {
   const getX = (index) => padLeft + (index / Math.max(1, table.length - 1)) * chartW
   const getY = (val) => padTop + chartH - ((val - yMin) / Math.max(1e-5, (yMax - yMin))) * chartH
 
-  // Points arrays
   const actualPoints = []
   const forecastPoints = []
   const upperPoints = []
@@ -158,7 +242,6 @@ const chartData = computed(() => {
     }
   })
 
-  // Start forecast line from the last actual point for continuity
   if (lastActualIndex >= 0 && actualPoints.length > 0) {
     const lastActual = actualPoints[actualPoints.length - 1]
     forecastPoints.push({ x: lastActual.x, y: lastActual.y, row: lastActual.row, index: lastActualIndex })
@@ -181,7 +264,6 @@ const chartData = computed(() => {
     }
   })
 
-  // Path Strings
   const makePath = (pts) => {
     if (pts.length === 0) return ''
     return pts.map((p, i) => `${i === 0 ? 'M' : 'L'} ${p.x.toFixed(1)} ${p.y.toFixed(1)}`).join(' ')
@@ -190,7 +272,6 @@ const chartData = computed(() => {
   const actualPath = makePath(actualPoints)
   const forecastPath = makePath(forecastPoints)
 
-  // Confidence Interval Polygon
   let confidenceAreaPath = ''
   if (upperPoints.length > 0 && lowerPoints.length > 0) {
     const upperStr = upperPoints.map((p, i) => `${i === 0 ? 'M' : 'L'} ${p.x.toFixed(1)} ${p.y.toFixed(1)}`).join(' ')
@@ -199,7 +280,6 @@ const chartData = computed(() => {
     confidenceAreaPath = `${upperStr} ${lowerStr} Z`
   }
 
-  // Y-axis ticks
   const yTicks = []
   const tickCount = 5
   for (let i = 0; i <= tickCount; i++) {
@@ -208,7 +288,6 @@ const chartData = computed(() => {
     yTicks.push({ val: Math.round(val), y })
   }
 
-  // X-axis ticks (sample 6 labels)
   const xTicks = []
   const step = Math.max(1, Math.floor(table.length / 6))
   for (let i = 0; i < table.length; i += step) {
@@ -290,21 +369,19 @@ payload = ${JSON.stringify(sampleJson, null, 4)}
 response = requests.post(url, json=payload)
 data = response.json()
 
-print("Status:", data["status"])
-print("Tren:", data["summary_metrics"]["trend_direction"])
-print("AI Insight:", data["ai_interpretation"])
-print("Tabel Prediksi:", len(data["table_data"]), "baris")`
+print("Model Juara:", data["tournament_results"]["winner"]["name"])
+print("Akurasi:", data["tournament_results"]["accuracy_score"], "%")
+print("AI Report:", data["ai_interpretation"])`
   } else if (selectedSnippetLang.value === 'javascript') {
-    return `// Call from your Node.js or Frontend
-const response = await fetch("${apiUrl}", {
+    return `const response = await fetch("${apiUrl}", {
   method: "POST",
   headers: { "Content-Type": "application/json" },
   body: JSON.stringify(${JSON.stringify(sampleJson, null, 2)})
 });
 
 const data = await response.json();
-console.log("AI Projections:", data.table_data);
-console.log("Chart Payload:", data.chart_payload);`
+console.log("Accuracy:", data.tournament_results.accuracy_score + "%");
+console.log("Forecasts:", data.table_data);`
   } else if (selectedSnippetLang.value === 'iframe') {
     return `<!-- Pasang di Website / Portal Klien Anda -->
 ${iframeCode}`
@@ -353,24 +430,27 @@ const downloadCsv = () => {
       <div class="title-group">
         <div class="badge-tag">
           <span class="pulse-dot"></span>
-          AutoML & AI Time-Series Forecaster
+          Ultra-Fast AutoML & Multi-Model Tournament Engine
         </div>
-        <h1 class="page-title">Predictive Data Analytics & AI Interpretation</h1>
+        <h1 class="page-title">Enterprise Forecasting, What-If & AI Analytics</h1>
         <p class="page-desc">
-          Otomatis mendeteksi pola data tabular, memproyeksikan tren masa depan (*Forecasting*), 
-          mengidentifikasi anomali, dan menginterpretasikan wawasan strategis menggunakan kolaborasi AI.
+          Menjalankan 4 model statistik in-memory secara paralel, memilih model terbaik dengan skor akurasi MAPE, 
+          mensimulasikan skenario bisnis *What-If* secara instan (&lt;15ms), dan berkonsultasi langsung dengan AI.
         </p>
       </div>
 
       <div class="header-actions">
+        <button v-if="resultData?.tournament_results" class="btn-tournament" @click="showLeaderboardModal = true">
+          🏆 Turnamen: {{ resultData.tournament_results.accuracy_score }}% Akurasi
+        </button>
         <button v-if="resultData?.embed_widget_url" class="btn-secondary" @click="openWidgetTab">
           <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path><polyline points="15 3 21 3 21 9"></polyline><line x1="10" y1="14" x2="21" y2="3"></line></svg>
-          Buka Embed Widget
+          Embed Widget
         </button>
         <button class="btn-primary" :disabled="isLoading" @click="runAnalysis">
           <svg v-if="isLoading" class="animate-spin" viewBox="0 0 24 24" width="16" height="16" fill="none"><circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" class="opacity-25"></circle><path fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" class="opacity-75"></path></svg>
           <svg v-else viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
-          {{ isLoading ? 'Memproses ML & AI...' : 'Analisis & Prediksi' }}
+          {{ isLoading ? 'Memproses Turnamen ML...' : 'Analisis & Prediksi' }}
         </button>
       </div>
     </div>
@@ -388,7 +468,6 @@ const downloadCsv = () => {
     <!-- Presets & Ingestion Control Bar -->
     <div class="control-panel">
       <div class="control-grid">
-        <!-- Preset Selector -->
         <div class="control-item">
           <label class="control-label">Pilih Dataset Contoh (Preset):</label>
           <div class="preset-pills">
@@ -409,7 +488,6 @@ const downloadCsv = () => {
           </div>
         </div>
 
-        <!-- Parameters Bar -->
         <div class="control-row">
           <div class="param-box">
             <label class="param-label">Horizon Prediksi (Hari ke Depan):</label>
@@ -434,23 +512,30 @@ const downloadCsv = () => {
 
     <!-- Main Analytics Content -->
     <div v-if="resultData" class="analytics-content">
-      <!-- Auto Detection Status Banner -->
+      <!-- Auto Detection & Tournament Winner Banner -->
       <div class="autodetect-banner">
         <div class="autodetect-info">
-          <span class="badge-tech">
-            <svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon></svg>
-            AutoML Engine Profiling
-          </span>
-          <div class="autodetect-title">{{ resultData.auto_detection.task_label }}</div>
-          <div class="autodetect-meta">
+          <div style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap;">
+            <span class="badge-tech">
+              <svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon></svg>
+              {{ resultData.auto_detection.task_label }}
+            </span>
+            <span class="badge-winner">
+              Model Juara: <b>{{ resultData.tournament_results.winner.name }}</b>
+            </span>
+          </div>
+          <div class="autodetect-meta" style="margin-top: 6px;">
             Target: <b>{{ resultData.dataset_info.target_column }}</b> • 
             Waktu: <b>{{ resultData.dataset_info.date_column || 'Otomatis' }}</b> • 
             Ukuran Data: <b>{{ resultData.dataset_info.sample_size }} Baris</b> •
-            Horizon: <b>{{ resultData.dataset_info.forecast_horizon }} Periode</b>
+            Horizon: <b>{{ resultData.dataset_info.forecast_horizon }} Hari</b>
           </div>
         </div>
         <div class="banner-right">
-          <div class="latency-tag">⚡ Latency: {{ resultData.latency_ms }}ms</div>
+          <div class="accuracy-highlight">
+            <div class="acc-score">{{ resultData.tournament_results.accuracy_score }}%</div>
+            <div class="acc-label">Akurasi Prediksi</div>
+          </div>
         </div>
       </div>
 
@@ -462,7 +547,10 @@ const downloadCsv = () => {
             <svg viewBox="0 0 24 24" width="18" height="18" stroke="#10b981" stroke-width="2" fill="none"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"></polyline><polyline points="17 6 23 6 23 12"></polyline></svg>
           </div>
           <div class="m-value trend-green">{{ resultData.summary_metrics.trend_direction }}</div>
-          <div class="m-sub">Proyeksi pertumbuhan: <b>{{ resultData.summary_metrics.projected_growth_pct }}%</b></div>
+          <div class="m-sub">
+            Pertumbuhan: <b>{{ resultData.summary_metrics.simulated_growth_pct ?? resultData.summary_metrics.projected_growth_pct }}%</b>
+            <span v-if="isScenarioActive" class="badge-sim-tag">(Simulasi Aktif)</span>
+          </div>
         </div>
 
         <div class="metric-card">
@@ -479,7 +567,7 @@ const downloadCsv = () => {
             <span class="m-label">Puncak Estimasi Masa Depan</span>
             <svg viewBox="0 0 24 24" width="18" height="18" stroke="#8b5cf6" stroke-width="2" fill="none"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"></polygon></svg>
           </div>
-          <div class="m-value purple">{{ Number(resultData.summary_metrics.peak_forecast_value).toLocaleString('id-ID') }}</div>
+          <div class="m-value purple">{{ Number(resultData.summary_metrics.simulated_peak_forecast_value ?? resultData.summary_metrics.peak_forecast_value).toLocaleString('id-ID') }}</div>
           <div class="m-sub">Titik tertinggi pada periode prediksi</div>
         </div>
 
@@ -493,11 +581,20 @@ const downloadCsv = () => {
         </div>
       </div>
 
-      <!-- Visual Tabs (Chart / Table / Integration) -->
+      <!-- Navigation Tabs -->
       <div class="nav-tabs">
         <button class="tab-btn" :class="{ active: activeTab === 'analytics' }" @click="activeTab = 'analytics'">
           <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none"><path d="M3 3v18h18"></path><path d="m19 9-5 5-4-4-3 3"></path></svg>
-          Grafik Proyeksi & Interpretasi AI
+          Grafik & Interpretasi AI
+        </button>
+        <button class="tab-btn" :class="{ active: activeTab === 'simulation' }" @click="activeTab = 'simulation'">
+          <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>
+          Simulasi "What-If" Interaktif
+          <span v-if="isScenarioActive" class="tab-dot-alert"></span>
+        </button>
+        <button class="tab-btn" :class="{ active: activeTab === 'chat_ai' }" @click="activeTab = 'chat_ai'">
+          <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path></svg>
+          Tanya AI tentang Data Ini
         </button>
         <button class="tab-btn" :class="{ active: activeTab === 'table' }" @click="activeTab = 'table'">
           <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none"><rect x="3" y="3" width="18" height="18" rx="2"></rect><line x1="3" y1="9" x2="21" y2="9"></line><line x1="3" y1="15" x2="21" y2="15"></line><line x1="9" y1="3" x2="9" y2="21"></line></svg>
@@ -511,26 +608,23 @@ const downloadCsv = () => {
 
       <!-- TAB 1: CHART & AI INTERPRETATION -->
       <div v-if="activeTab === 'analytics'" class="tab-content">
-        <!-- Interactive Chart Card -->
         <div class="chart-card">
           <div class="chart-card-header">
             <div>
               <h3 class="chart-title">Visualisasi Deret Waktu & Forecast Horizon</h3>
-              <p class="chart-subtitle">Garis biru: data aktual riil • Garis putus hijau: prediksi masa depan • Area hijau muda: 95% Confidence Interval</p>
+              <p class="chart-subtitle">Garis biru: data aktual riil • Garis putus hijau: prediksi model • Area hijau muda: 95% Confidence Interval</p>
             </div>
             <div class="legend-group">
               <span class="legend-item"><span class="legend-box blue"></span> Aktual</span>
-              <span class="legend-item"><span class="legend-box green dashed"></span> Prediksi AI</span>
+              <span class="legend-item"><span class="legend-box green dashed"></span> Prediksi ML</span>
               <span class="legend-item"><span class="legend-box green-area"></span> Interval 95%</span>
               <span class="legend-item"><span class="legend-box red-dot"></span> Anomali</span>
             </div>
           </div>
 
-          <!-- SVG Chart Area -->
           <div class="svg-chart-container" ref="chartSvgRef">
             <svg v-if="chartData" :viewBox="`0 0 ${chartData.width} ${chartData.height}`" class="main-svg-chart">
               <defs>
-                <!-- Area gradient -->
                 <linearGradient id="areaGradient" x1="0%" y1="0%" x2="0%" y2="100%">
                   <stop offset="0%" stop-color="#10B981" stop-opacity="0.25" />
                   <stop offset="100%" stop-color="#10B981" stop-opacity="0.05" />
@@ -541,7 +635,6 @@ const downloadCsv = () => {
                 </filter>
               </defs>
 
-              <!-- Grid Horizontal Lines -->
               <g class="grid-lines">
                 <line 
                   v-for="(tick, i) in chartData.yTicks" 
@@ -554,7 +647,6 @@ const downloadCsv = () => {
                   stroke-dasharray="3,3" 
                   stroke-width="1"
                 />
-                <!-- Y-Labels -->
                 <text 
                   v-for="(tick, i) in chartData.yTicks" 
                   :key="`lbl-${i}`" 
@@ -568,14 +660,12 @@ const downloadCsv = () => {
                 </text>
               </g>
 
-              <!-- Confidence Interval Area Shading -->
               <path 
                 v-if="chartData.confidenceAreaPath" 
                 :d="chartData.confidenceAreaPath" 
                 fill="url(#areaGradient)"
               />
 
-              <!-- Actual Data Line -->
               <path 
                 :d="chartData.actualPath" 
                 fill="none" 
@@ -585,7 +675,6 @@ const downloadCsv = () => {
                 stroke-linejoin="round"
               />
 
-              <!-- Forecast Data Line (Dashed) -->
               <path 
                 :d="chartData.forecastPath" 
                 fill="none" 
@@ -596,7 +685,6 @@ const downloadCsv = () => {
                 stroke-linejoin="round"
               />
 
-              <!-- Actual Points -->
               <circle 
                 v-for="p in chartData.actualPoints" 
                 :key="`act-${p.index}`" 
@@ -611,7 +699,6 @@ const downloadCsv = () => {
                 @mouseleave="hoveredPoint = null"
               />
 
-              <!-- Forecast Points -->
               <circle 
                 v-for="p in chartData.forecastPoints" 
                 :key="`fc-${p.index}`" 
@@ -626,13 +713,11 @@ const downloadCsv = () => {
                 @mouseleave="hoveredPoint = null"
               />
 
-              <!-- Anomaly Highlights (Red Pulsing Rings) -->
               <g v-for="anom in chartData.anomalyMarkers" :key="`anom-${anom.index}`">
                 <circle :cx="anom.x" :cy="anom.y" r="8" fill="none" stroke="#EF4444" stroke-width="2" opacity="0.8" filter="url(#glow)" />
                 <circle :cx="anom.x" :cy="anom.y" r="4.5" fill="#EF4444" stroke="#FFF" stroke-width="1.5" />
               </g>
 
-              <!-- X-Axis Labels -->
               <g class="x-axis-labels">
                 <text 
                   v-for="(tick, i) in chartData.xTicks" 
@@ -648,7 +733,7 @@ const downloadCsv = () => {
               </g>
             </svg>
 
-            <!-- Interactive Tooltip Overlay -->
+            <!-- Tooltip -->
             <div 
               v-if="hoveredPoint" 
               class="chart-tooltip"
@@ -666,13 +751,13 @@ const downloadCsv = () => {
                 <div class="tooltip-bounds">Interval 95%: {{ hoveredPoint.row.lower_bound?.toLocaleString('id-ID') }} – {{ hoveredPoint.row.upper_bound?.toLocaleString('id-ID') }}</div>
               </div>
               <div v-if="hoveredPoint.row.is_anomaly" class="tooltip-badge-anom">
-                ⚠️ Titik Anomali (Skor Keparahan: {{ Math.round(hoveredPoint.row.anomaly_score * 100) }}%)
+                ⚠️ Titik Anomali (Skor: {{ Math.round(hoveredPoint.row.anomaly_score * 100) }}%)
               </div>
             </div>
           </div>
         </div>
 
-        <!-- AI Executive Interpretation Card -->
+        <!-- AI Executive Report Card -->
         <div class="ai-card">
           <div class="ai-header">
             <div class="ai-title-wrap">
@@ -691,7 +776,146 @@ const downloadCsv = () => {
         </div>
       </div>
 
-      <!-- TAB 2: TABLE EXPLORER -->
+      <!-- TAB 2: WHAT-IF SCENARIO SIMULATOR -->
+      <div v-if="activeTab === 'simulation'" class="tab-content">
+        <div class="sim-card">
+          <div class="sim-header">
+            <div>
+              <h3 class="sim-title">🎛️ Real-Time "What-If" Scenario Simulator (&lt;15ms)</h3>
+              <p class="sim-desc">Geser slider di bawah untuk melihat simulasi dampak lonjakan promo, perubahan target pasar, atau penyesuaian buffer stock secara instan.</p>
+            </div>
+            <button class="btn-secondary" @click="resetSimulationState(); applyScenarioSimulation();">
+              Reset Skenario
+            </button>
+          </div>
+
+          <div class="sim-controls-grid">
+            <div class="sim-control-box">
+              <div class="sim-ctrl-label">
+                <span>Penyesuaian Pertumbuhan Permintaan (+/- %)</span>
+                <span class="sim-badge-val" :class="{ positive: simGrowthBoost > 0, negative: simGrowthBoost < 0 }">
+                  {{ simGrowthBoost > 0 ? '+' : '' }}{{ simGrowthBoost }}%
+                </span>
+              </div>
+              <input 
+                type="range" 
+                min="-40" 
+                max="60" 
+                step="5" 
+                v-model="simGrowthBoost" 
+                class="range-slider"
+                @input="applyScenarioSimulation"
+              >
+              <div class="sim-hint">Simulasi kenaikan atau penurunan pasar secara keseluruhan.</div>
+            </div>
+
+            <div class="sim-control-box">
+              <div class="sim-ctrl-label">
+                <span>Pengali Lonjakan Promo / Event (Multiplier)</span>
+                <span class="sim-badge-val">{{ simSpikeMultiplier }}x</span>
+              </div>
+              <input 
+                type="range" 
+                min="1.0" 
+                max="2.5" 
+                step="0.1" 
+                v-model="simSpikeMultiplier" 
+                class="range-slider"
+                @input="applyScenarioSimulation"
+              >
+              <div class="sim-hint">Simulasi kampanye diskon besar / pesanan grosir mendadak.</div>
+            </div>
+
+            <div class="sim-control-box">
+              <div class="sim-ctrl-label">
+                <span>Kebutuhan Safety Stock Buffer (Hari)</span>
+                <span class="sim-badge-val">{{ simSafetyBufferDays }} Hari</span>
+              </div>
+              <input 
+                type="range" 
+                min="0" 
+                max="14" 
+                step="1" 
+                v-model="simSafetyBufferDays" 
+                class="range-slider"
+                @input="applyScenarioSimulation"
+              >
+              <div class="sim-hint">Estimasi stok cadangan untuk mencegah kehabisan barang.</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- TAB 3: ASK AI CHAT -->
+      <div v-if="activeTab === 'chat_ai'" class="tab-content">
+        <div class="chat-card">
+          <div class="chat-header">
+            <div class="chat-title-wrap">
+              <span class="ai-sparkle">💬</span>
+              <div>
+                <h3 class="chat-title">Tanya AI tentang Analitik Dataset Ini</h3>
+                <p class="chat-subtitle">AI memahami matriks data, skor akurasi model, dan titik anomali yang baru saja diproses.</p>
+              </div>
+            </div>
+          </div>
+
+          <!-- Quick Prompts -->
+          <div class="quick-prompts">
+            <span class="quick-label">Pertanyaan Cepat:</span>
+            <button 
+              v-for="(q, idx) in aiQuestionsList" 
+              :key="idx" 
+              class="quick-btn"
+              :disabled="isAiThinking"
+              @click="sendAiQuestion(q)"
+            >
+              💡 {{ q }}
+            </button>
+          </div>
+
+          <!-- Chat Conversation Log -->
+          <div class="chat-messages-box">
+            <div v-if="chatHistory.length === 0" class="chat-empty">
+              <p>Pilih pertanyaan cepat di atas atau ketik pertanyaan spesifik seputar analisis data ini...</p>
+            </div>
+            <div 
+              v-for="(msg, i) in chatHistory" 
+              :key="i" 
+              class="chat-bubble-wrap"
+              :class="{ user: msg.role === 'user', assistant: msg.role === 'assistant' }"
+            >
+              <div class="chat-avatar">{{ msg.role === 'user' ? '👤' : '🤖' }}</div>
+              <div class="chat-bubble">
+                <div class="chat-sender">{{ msg.role === 'user' ? 'Anda' : 'Hero AI Analyst' }}</div>
+                <div class="chat-text" v-html="msg.content.replace(/\n/g, '<br>')"></div>
+              </div>
+            </div>
+
+            <div v-if="isAiThinking" class="chat-bubble-wrap assistant">
+              <div class="chat-avatar">🤖</div>
+              <div class="chat-bubble thinking">
+                <span class="animate-pulse">Sedang menganalisis data dan menyusun jawaban...</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Chat Input -->
+          <form class="chat-input-bar" @submit.prevent="sendAiQuestion()">
+            <input 
+              type="text" 
+              v-model="chatInput" 
+              placeholder="Ketik pertanyaan analitik data di sini..." 
+              class="chat-input"
+              :disabled="isAiThinking"
+            >
+            <button type="submit" class="btn-primary" :disabled="!chatInput.trim() || isAiThinking">
+              Kirim
+            </button>
+          </form>
+        </div>
+      </div>
+
+      <!-- TAB 4: TABLE EXPLORER -->
       <div v-if="activeTab === 'table'" class="tab-content">
         <div class="table-card">
           <div class="table-toolbar">
@@ -734,7 +958,6 @@ const downloadCsv = () => {
             </table>
           </div>
 
-          <!-- Pagination -->
           <div class="pagination-bar">
             <div class="page-info">Menampilkan {{ paginatedTable.length }} dari {{ filteredTable.length }} baris data</div>
             <div class="page-btns">
@@ -746,14 +969,12 @@ const downloadCsv = () => {
         </div>
       </div>
 
-      <!-- TAB 3: API & INTEGRATION -->
+      <!-- TAB 5: API & INTEGRATION -->
       <div v-if="activeTab === 'api_integration'" class="tab-content">
         <div class="integration-card">
           <div class="int-header">
             <h3 class="int-title">Integrasikan ke Website atau Portal Lain</h3>
-            <p class="int-desc">
-              Gunakan endpoint REST API untuk mengambil data prediksi mentah atau pasang tag Iframe untuk langsung menampilkan grafik interaktif di website klien Anda.
-            </p>
+            <p class="int-desc">Gunakan REST API untuk data mentah atau gunakan iframe untuk memasang widget grafik interaktif di website klien Anda.</p>
           </div>
 
           <div class="lang-pills">
@@ -773,6 +994,50 @@ const downloadCsv = () => {
             </div>
             <pre class="code-block"><code>{{ getIntegrationSnippet }}</code></pre>
           </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Tournament Leaderboard Modal -->
+    <div v-if="showLeaderboardModal" class="modal-backdrop" @click="showLeaderboardModal = false">
+      <div class="modal-card" @click.stop>
+        <div class="modal-header">
+          <h3 class="modal-title">🏆 Turnamen Model ML & Leaderboard Akurasi</h3>
+          <button class="modal-close" @click="showLeaderboardModal = false">✕</button>
+        </div>
+        <div class="modal-body">
+          <p class="modal-desc">
+            Sistem secara otomatis mengevaluasi 4 algoritma deret waktu in-memory menggunakan teknik *backtesting out-of-sample* untuk memilih model dengan nilai MAPE (Mean Absolute Percentage Error) terendah.
+          </p>
+          <table class="leaderboard-table">
+            <thead>
+              <tr>
+                <th>Peringkat & Algoritma</th>
+                <th>MAPE (Error %)</th>
+                <th>RMSE</th>
+                <th>MAE</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr 
+                v-for="(m, idx) in resultData?.tournament_results?.leaderboard" 
+                :key="m.model_id"
+                :class="{ 'row-winner': idx === 0 }"
+              >
+                <td>
+                  <div class="model-name">
+                    <span v-if="idx === 0">🥇</span>
+                    <span v-else>{{ idx + 1 }}.</span>
+                    <b>{{ m.name }}</b>
+                  </div>
+                  <div class="model-desc">{{ m.desc }}</div>
+                </td>
+                <td><b :class="{ 'text-green': idx === 0 }">{{ m.mape }}%</b></td>
+                <td>{{ m.rmse.toLocaleString('id-ID') }}</td>
+                <td>{{ m.mae.toLocaleString('id-ID') }}</td>
+              </tr>
+            </tbody>
+          </table>
         </div>
       </div>
     </div>
@@ -836,8 +1101,24 @@ const downloadCsv = () => {
 
 .header-actions {
   display: flex;
-  gap: 12px;
+  gap: 10px;
   align-items: center;
+  flex-wrap: wrap;
+}
+
+.btn-tournament {
+  background: rgba(16, 185, 129, 0.15);
+  border: 1px solid rgba(16, 185, 129, 0.4);
+  color: #34d399;
+  padding: 10px 14px;
+  border-radius: 8px;
+  font-size: 0.85rem;
+  font-weight: 700;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+.btn-tournament:hover {
+  background: rgba(16, 185, 129, 0.25);
 }
 
 .btn-primary {
@@ -855,7 +1136,6 @@ const downloadCsv = () => {
   box-shadow: 0 4px 12px rgba(37, 99, 235, 0.3);
   transition: all 0.2s;
 }
-
 .btn-primary:hover:not(:disabled) {
   opacity: 0.95;
   transform: translateY(-1px);
@@ -875,7 +1155,6 @@ const downloadCsv = () => {
   cursor: pointer;
   transition: all 0.2s;
 }
-
 .btn-secondary:hover {
   background: #334155;
   color: #fff;
@@ -930,7 +1209,6 @@ const downloadCsv = () => {
   cursor: pointer;
   transition: all 0.2s;
 }
-
 .preset-btn.active {
   background: rgba(59, 130, 246, 0.2);
   border-color: #3b82f6;
@@ -951,7 +1229,6 @@ const downloadCsv = () => {
   gap: 6px;
   transition: all 0.2s;
 }
-
 .upload-chip.active {
   border-color: #10b981;
   color: #34d399;
@@ -967,40 +1244,11 @@ const downloadCsv = () => {
   border-top: 1px solid rgba(255, 255, 255, 0.06);
 }
 
-.param-label {
-  font-size: 0.775rem;
-  color: #94a3b8;
-  margin-bottom: 6px;
-  display: block;
-}
-
-.range-wrapper {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-
-.range-slider {
-  flex: 1;
-  accent-color: #3b82f6;
-}
-
-.range-val {
-  font-size: 0.85rem;
-  font-weight: 700;
-  color: #60a5fa;
-  min-width: 60px;
-}
-
-.param-input {
-  width: 100%;
-  background: #0f172a;
-  border: 1px solid #334155;
-  color: #fff;
-  padding: 8px 12px;
-  border-radius: 6px;
-  font-size: 0.825rem;
-}
+.param-label { font-size: 0.775rem; color: #94a3b8; margin-bottom: 6px; display: block; }
+.range-wrapper { display: flex; align-items: center; gap: 10px; }
+.range-slider { flex: 1; accent-color: #3b82f6; }
+.range-val { font-size: 0.85rem; font-weight: 700; color: #60a5fa; min-width: 60px; }
+.param-input { width: 100%; background: #0f172a; border: 1px solid #334155; color: #fff; padding: 8px 12px; border-radius: 6px; font-size: 0.825rem; }
 
 /* Auto-detect Banner */
 .autodetect-banner {
@@ -1026,27 +1274,25 @@ const downloadCsv = () => {
   text-transform: uppercase;
 }
 
-.autodetect-title {
-  font-size: 1.15rem;
-  font-weight: 700;
-  color: #fff;
-  margin: 4px 0;
+.badge-winner {
+  background: rgba(16, 185, 129, 0.15);
+  border: 1px solid rgba(16, 185, 129, 0.3);
+  color: #34d399;
+  padding: 2px 8px;
+  border-radius: 6px;
+  font-size: 0.75rem;
 }
 
-.autodetect-meta {
-  font-size: 0.825rem;
-  color: #94a3b8;
-}
-
-.latency-tag {
+.autodetect-meta { font-size: 0.825rem; color: #94a3b8; }
+.accuracy-highlight {
+  text-align: right;
   background: #0f172a;
   border: 1px solid #334155;
-  padding: 6px 12px;
-  border-radius: 6px;
-  font-size: 0.8rem;
-  font-weight: 600;
-  color: #10b981;
+  padding: 8px 16px;
+  border-radius: 8px;
 }
+.acc-score { font-size: 1.4rem; font-weight: 800; color: #10b981; }
+.acc-label { font-size: 0.7rem; color: #94a3b8; text-transform: uppercase; }
 
 /* Metric Cards */
 .metrics-grid {
@@ -1056,42 +1302,15 @@ const downloadCsv = () => {
   margin-bottom: 24px;
 }
 
-.metric-card {
-  background: #1e293b;
-  border: 1px solid #334155;
-  border-radius: 10px;
-  padding: 16px;
-}
-
-.metric-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 8px;
-}
-
-.m-label {
-  font-size: 0.775rem;
-  color: #94a3b8;
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-}
-
-.m-value {
-  font-size: 1.45rem;
-  font-weight: 800;
-  color: #fff;
-}
-
+.metric-card { background: #1e293b; border: 1px solid #334155; border-radius: 10px; padding: 16px; }
+.metric-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+.m-label { font-size: 0.775rem; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.5px; }
+.m-value { font-size: 1.45rem; font-weight: 800; color: #fff; }
 .trend-green { color: #34d399; }
 .purple { color: #a78bfa; }
 .red { color: #f87171; }
-
-.m-sub {
-  font-size: 0.75rem;
-  color: #64748b;
-  margin-top: 4px;
-}
+.m-sub { font-size: 0.75rem; color: #64748b; margin-top: 4px; }
+.badge-sim-tag { color: #60a5fa; font-weight: 700; margin-left: 4px; }
 
 /* Navigation Tabs */
 .nav-tabs {
@@ -1099,6 +1318,7 @@ const downloadCsv = () => {
   gap: 8px;
   border-bottom: 1px solid #334155;
   margin-bottom: 20px;
+  overflow-x: auto;
 }
 
 .tab-btn {
@@ -1114,87 +1334,31 @@ const downloadCsv = () => {
   align-items: center;
   gap: 8px;
   transition: all 0.2s;
+  white-space: nowrap;
 }
 
-.tab-btn.active {
-  color: #60a5fa;
-  border-bottom-color: #3b82f6;
-}
+.tab-btn.active { color: #60a5fa; border-bottom-color: #3b82f6; }
+.tab-dot-alert { width: 6px; height: 6px; border-radius: 50%; background: #3b82f6; }
 
 /* Chart Card */
-.chart-card {
-  background: #1e293b;
-  border: 1px solid #334155;
-  border-radius: 12px;
-  padding: 20px;
-  margin-bottom: 24px;
-}
+.chart-card { background: #1e293b; border: 1px solid #334155; border-radius: 12px; padding: 20px; margin-bottom: 24px; }
+.chart-card-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 16px; flex-wrap: wrap; gap: 12px; }
+.chart-title { font-size: 1.05rem; font-weight: 700; color: #fff; }
+.chart-subtitle { font-size: 0.8rem; color: #94a3b8; margin-top: 2px; }
 
-.chart-card-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: flex-start;
-  margin-bottom: 16px;
-  flex-wrap: wrap;
-  gap: 12px;
-}
-
-.chart-title {
-  font-size: 1.05rem;
-  font-weight: 700;
-  color: #fff;
-}
-
-.chart-subtitle {
-  font-size: 0.8rem;
-  color: #94a3b8;
-  margin-top: 2px;
-}
-
-.legend-group {
-  display: flex;
-  gap: 14px;
-  align-items: center;
-  font-size: 0.8rem;
-  color: #cbd5e1;
-}
-
-.legend-item {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.legend-box {
-  width: 14px;
-  height: 4px;
-  border-radius: 2px;
-}
+.legend-group { display: flex; gap: 14px; align-items: center; font-size: 0.8rem; color: #cbd5e1; flex-wrap: wrap; }
+.legend-item { display: flex; align-items: center; gap: 6px; }
+.legend-box { width: 14px; height: 4px; border-radius: 2px; }
 .legend-box.blue { background: #3b82f6; }
 .legend-box.green { background: #10b981; }
 .legend-box.dashed { border-top: 2px dashed #10b981; height: 0; }
 .legend-box.green-area { background: rgba(16, 185, 129, 0.25); height: 10px; }
 .legend-box.red-dot { width: 8px; height: 8px; border-radius: 50%; background: #ef4444; }
 
-.svg-chart-container {
-  position: relative;
-  width: 100%;
-  overflow-x: auto;
-}
-
-.main-svg-chart {
-  width: 100%;
-  height: auto;
-  display: block;
-}
-
-.hover-circle {
-  cursor: pointer;
-  transition: r 0.15s ease;
-}
-.hover-circle:hover {
-  r: 6.5;
-}
+.svg-chart-container { position: relative; width: 100%; overflow-x: auto; }
+.main-svg-chart { width: 100%; height: auto; display: block; }
+.hover-circle { cursor: pointer; transition: r 0.15s ease; }
+.hover-circle:hover { r: 6.5; }
 
 .chart-tooltip {
   position: absolute;
@@ -1209,7 +1373,6 @@ const downloadCsv = () => {
   z-index: 10;
   min-width: 180px;
 }
-
 .tooltip-date { font-weight: 700; color: #fff; margin-bottom: 4px; }
 .tooltip-val.blue { color: #60a5fa; }
 .tooltip-val.green { color: #34d399; margin-top: 2px; }
@@ -1223,236 +1386,116 @@ const downloadCsv = () => {
   border-radius: 12px;
   padding: 22px;
 }
+.ai-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
+.ai-title-wrap { display: flex; align-items: center; gap: 12px; }
+.ai-sparkle { font-size: 1.5rem; }
+.ai-title { font-size: 1.1rem; font-weight: 700; color: #e2e8f0; }
+.ai-subtitle { font-size: 0.8rem; color: #94a3b8; }
+.ai-badge { background: rgba(139, 92, 246, 0.15); border: 1px solid rgba(139, 92, 246, 0.3); color: #c084fc; padding: 4px 10px; border-radius: 9999px; font-size: 0.75rem; font-weight: 700; }
+.formatted-ai-text { font-size: 0.9rem; line-height: 1.7; color: #cbd5e1; }
 
-.ai-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 16px;
-}
+/* Simulation Card */
+.sim-card { background: #1e293b; border: 1px solid #334155; border-radius: 12px; padding: 22px; margin-bottom: 24px; }
+.sim-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 20px; flex-wrap: wrap; gap: 12px; }
+.sim-title { font-size: 1.15rem; font-weight: 700; color: #fff; }
+.sim-desc { font-size: 0.85rem; color: #94a3b8; margin-top: 4px; }
+.sim-controls-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 18px; }
+.sim-control-box { background: #0f172a; border: 1px solid #334155; padding: 16px; border-radius: 8px; }
+.sim-ctrl-label { display: flex; justify-content: space-between; font-size: 0.825rem; font-weight: 600; color: #cbd5e1; margin-bottom: 10px; }
+.sim-badge-val { background: rgba(59, 130, 246, 0.15); color: #60a5fa; padding: 2px 8px; border-radius: 4px; font-weight: 700; }
+.sim-badge-val.positive { background: rgba(16, 185, 129, 0.15); color: #34d399; }
+.sim-badge-val.negative { background: rgba(239, 68, 68, 0.15); color: #f87171; }
+.sim-hint { font-size: 0.75rem; color: #64748b; margin-top: 8px; }
 
-.ai-title-wrap {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-}
+/* Chat Card */
+.chat-card { background: #1e293b; border: 1px solid #334155; border-radius: 12px; padding: 22px; }
+.chat-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
+.chat-title-wrap { display: flex; align-items: center; gap: 10px; }
+.chat-title { font-size: 1.1rem; font-weight: 700; color: #fff; }
+.chat-subtitle { font-size: 0.8rem; color: #94a3b8; }
 
-.ai-sparkle {
-  font-size: 1.5rem;
-}
+.quick-prompts { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 16px; }
+.quick-label { font-size: 0.75rem; font-weight: 700; color: #94a3b8; text-transform: uppercase; }
+.quick-btn { background: #0f172a; border: 1px solid #334155; color: #cbd5e1; padding: 6px 12px; border-radius: 6px; font-size: 0.775rem; cursor: pointer; text-align: left; transition: all 0.2s; }
+.quick-btn:hover:not(:disabled) { border-color: #3b82f6; color: #60a5fa; }
 
-.ai-title {
-  font-size: 1.1rem;
-  font-weight: 700;
-  color: #e2e8f0;
-}
-
-.ai-subtitle {
-  font-size: 0.8rem;
-  color: #94a3b8;
-}
-
-.ai-badge {
-  background: rgba(139, 92, 246, 0.15);
-  border: 1px solid rgba(139, 92, 246, 0.3);
-  color: #c084fc;
-  padding: 4px 10px;
-  border-radius: 9999px;
-  font-size: 0.75rem;
-  font-weight: 700;
-}
-
-.formatted-ai-text {
-  font-size: 0.9rem;
-  line-height: 1.7;
-  color: #cbd5e1;
-}
-
-/* Table Card */
-.table-card {
-  background: #1e293b;
-  border: 1px solid #334155;
-  border-radius: 12px;
-  padding: 20px;
-}
-
-.table-toolbar {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 16px;
-  flex-wrap: wrap;
-  gap: 12px;
-}
-
-.search-box {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  background: #0f172a;
-  border: 1px solid #334155;
-  border-radius: 6px;
-  padding: 6px 12px;
-  width: 280px;
-}
-
-.search-input {
-  background: transparent;
-  border: none;
-  color: #fff;
-  font-size: 0.825rem;
-  width: 100%;
-}
-.search-input:focus { outline: none; }
-
-.table-responsive {
-  overflow-x: auto;
-}
-
-.data-table {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: 0.85rem;
-  text-align: left;
-}
-
-.data-table th {
-  background: #0f172a;
-  color: #94a3b8;
-  padding: 10px 14px;
-  font-size: 0.775rem;
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-  border-bottom: 1px solid #334155;
-}
-
-.data-table td {
-  padding: 10px 14px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
-  color: #e2e8f0;
-}
-
-.data-table tr.row-forecast td {
-  background: rgba(16, 185, 129, 0.04);
-}
-
-.data-table tr.row-anomaly td {
-  background: rgba(239, 68, 68, 0.06);
-}
-
-.text-green { color: #34d399; }
-.text-muted { color: #64748b; }
-
-.tag-status {
-  padding: 3px 8px;
-  border-radius: 4px;
-  font-size: 0.725rem;
-  font-weight: 700;
-}
-.tag-actual { background: rgba(59, 130, 246, 0.15); color: #60a5fa; }
-.tag-forecast { background: rgba(16, 185, 129, 0.15); color: #34d399; }
-.tag-anomaly { background: rgba(239, 68, 68, 0.2); color: #f87171; }
-
-.pagination-bar {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-top: 16px;
-  padding-top: 12px;
-  border-top: 1px solid #334155;
-  font-size: 0.8rem;
-  color: #94a3b8;
-}
-
-.page-btns {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.btn-page {
-  background: #0f172a;
-  border: 1px solid #334155;
-  color: #cbd5e1;
-  padding: 5px 10px;
-  border-radius: 4px;
-  font-size: 0.775rem;
-  cursor: pointer;
-}
-.btn-page:disabled { opacity: 0.4; cursor: not-allowed; }
-
-/* Integration Card */
-.integration-card {
-  background: #1e293b;
-  border: 1px solid #334155;
-  border-radius: 12px;
-  padding: 22px;
-}
-
-.int-title { font-size: 1.1rem; font-weight: 700; color: #fff; margin-bottom: 4px; }
-.int-desc { font-size: 0.85rem; color: #94a3b8; margin-bottom: 18px; }
-
-.lang-pills {
-  display: flex;
-  gap: 8px;
-  margin-bottom: 16px;
-  flex-wrap: wrap;
-}
-
-.lang-btn {
-  background: #0f172a;
-  border: 1px solid #334155;
-  color: #94a3b8;
-  padding: 6px 14px;
-  border-radius: 6px;
-  font-size: 0.825rem;
-  font-weight: 600;
-  cursor: pointer;
-}
-.lang-btn.active {
-  background: rgba(59, 130, 246, 0.2);
-  border-color: #3b82f6;
-  color: #60a5fa;
-}
-
-.code-wrapper {
+.chat-messages-box {
   background: #090d16;
   border: 1px solid #334155;
   border-radius: 8px;
-  overflow: hidden;
-}
-
-.code-top {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding: 8px 14px;
-  background: #0f172a;
-  border-bottom: 1px solid #334155;
-}
-
-.code-lang { font-size: 0.75rem; font-weight: 700; color: #64748b; }
-
-.copy-btn {
-  background: transparent;
-  border: 1px solid #334155;
-  color: #cbd5e1;
-  padding: 4px 10px;
-  border-radius: 4px;
-  font-size: 0.75rem;
-  cursor: pointer;
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-}
-.copy-btn:hover { background: #334155; color: #fff; }
-
-.code-block {
   padding: 16px;
-  color: #e2e8f0;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-  font-size: 0.85rem;
-  line-height: 1.5;
-  overflow-x: auto;
+  min-height: 280px;
+  max-height: 440px;
+  overflow-y: auto;
+  margin-bottom: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
 }
+.chat-empty { display: flex; align-items: center; justify-content: center; height: 200px; color: #64748b; font-size: 0.875rem; }
+
+.chat-bubble-wrap { display: flex; gap: 10px; max-width: 85%; }
+.chat-bubble-wrap.user { align-self: flex-end; flex-direction: row-reverse; }
+.chat-avatar { width: 32px; height: 32px; border-radius: 50%; background: #1e293b; display: flex; align-items: center; justify-content: center; font-size: 1rem; border: 1px solid #334155; }
+.chat-bubble { background: #1e293b; border: 1px solid #334155; border-radius: 8px; padding: 12px 14px; font-size: 0.85rem; line-height: 1.6; }
+.chat-bubble-wrap.user .chat-bubble { background: #2563eb; border-color: #3b82f6; color: #fff; }
+.chat-sender { font-size: 0.7rem; font-weight: 700; color: #94a3b8; margin-bottom: 4px; }
+.chat-bubble-wrap.user .chat-sender { color: #dbeafe; }
+.chat-bubble.thinking { color: #94a3b8; font-style: italic; }
+
+.chat-input-bar { display: flex; gap: 10px; }
+.chat-input { flex: 1; background: #0f172a; border: 1px solid #334155; color: #fff; padding: 10px 14px; border-radius: 8px; font-size: 0.875rem; }
+.chat-input:focus { outline: none; border-color: #3b82f6; }
+
+/* Table Card */
+.table-card { background: #1e293b; border: 1px solid #334155; border-radius: 12px; padding: 20px; }
+.table-toolbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; flex-wrap: wrap; gap: 12px; }
+.search-box { display: flex; align-items: center; gap: 8px; background: #0f172a; border: 1px solid #334155; border-radius: 6px; padding: 6px 12px; width: 280px; }
+.search-input { background: transparent; border: none; color: #fff; font-size: 0.825rem; width: 100%; }
+.search-input:focus { outline: none; }
+.table-responsive { overflow-x: auto; }
+.data-table { width: 100%; border-collapse: collapse; font-size: 0.85rem; text-align: left; }
+.data-table th { background: #0f172a; color: #94a3b8; padding: 10px 14px; font-size: 0.775rem; text-transform: uppercase; letter-spacing: 0.5px; border-bottom: 1px solid #334155; }
+.data-table td { padding: 10px 14px; border-bottom: 1px solid rgba(255, 255, 255, 0.05); color: #e2e8f0; }
+.data-table tr.row-forecast td { background: rgba(16, 185, 129, 0.04); }
+.data-table tr.row-anomaly td { background: rgba(239, 68, 68, 0.06); }
+.text-green { color: #34d399; }
+.text-muted { color: #64748b; }
+.tag-status { padding: 3px 8px; border-radius: 4px; font-size: 0.725rem; font-weight: 700; }
+.tag-actual { background: rgba(59, 130, 246, 0.15); color: #60a5fa; }
+.tag-forecast { background: rgba(16, 185, 129, 0.15); color: #34d399; }
+.tag-anomaly { background: rgba(239, 68, 68, 0.2); color: #f87171; }
+.pagination-bar { display: flex; justify-content: space-between; align-items: center; margin-top: 16px; padding-top: 12px; border-top: 1px solid #334155; font-size: 0.8rem; color: #94a3b8; }
+.page-btns { display: flex; align-items: center; gap: 8px; }
+.btn-page { background: #0f172a; border: 1px solid #334155; color: #cbd5e1; padding: 5px 10px; border-radius: 4px; font-size: 0.775rem; cursor: pointer; }
+.btn-page:disabled { opacity: 0.4; cursor: not-allowed; }
+
+/* Integration Card */
+.integration-card { background: #1e293b; border: 1px solid #334155; border-radius: 12px; padding: 22px; }
+.int-title { font-size: 1.1rem; font-weight: 700; color: #fff; margin-bottom: 4px; }
+.int-desc { font-size: 0.85rem; color: #94a3b8; margin-bottom: 18px; }
+.lang-pills { display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; }
+.lang-btn { background: #0f172a; border: 1px solid #334155; color: #94a3b8; padding: 6px 14px; border-radius: 6px; font-size: 0.825rem; font-weight: 600; cursor: pointer; }
+.lang-btn.active { background: rgba(59, 130, 246, 0.2); border-color: #3b82f6; color: #60a5fa; }
+.code-wrapper { background: #090d16; border: 1px solid #334155; border-radius: 8px; overflow: hidden; }
+.code-top { display: flex; justify-content: space-between; align-items: center; padding: 8px 14px; background: #0f172a; border-bottom: 1px solid #334155; }
+.code-lang { font-size: 0.75rem; font-weight: 700; color: #64748b; }
+.copy-btn { background: transparent; border: 1px solid #334155; color: #cbd5e1; padding: 4px 10px; border-radius: 4px; font-size: 0.75rem; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; }
+.copy-btn:hover { background: #334155; color: #fff; }
+.code-block { padding: 16px; color: #e2e8f0; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 0.85rem; line-height: 1.5; overflow-x: auto; }
+
+/* Leaderboard Modal */
+.modal-backdrop { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.75); display: flex; align-items: center; justify-content: center; z-index: 999; padding: 20px; }
+.modal-card { background: #1e293b; border: 1px solid #334155; border-radius: 12px; width: 100%; max-width: 680px; box-shadow: 0 20px 40px rgba(0,0,0,0.6); overflow: hidden; }
+.modal-header { display: flex; justify-content: space-between; align-items: center; padding: 16px 20px; border-bottom: 1px solid #334155; background: #0f172a; }
+.modal-title { font-size: 1.1rem; font-weight: 700; color: #fff; }
+.modal-close { background: transparent; border: none; color: #94a3b8; font-size: 1.2rem; cursor: pointer; }
+.modal-body { padding: 20px; }
+.modal-desc { font-size: 0.85rem; color: #94a3b8; margin-bottom: 16px; line-height: 1.5; }
+.leaderboard-table { width: 100%; border-collapse: collapse; font-size: 0.85rem; text-align: left; }
+.leaderboard-table th { background: #0f172a; color: #94a3b8; padding: 8px 12px; font-size: 0.75rem; text-transform: uppercase; border-bottom: 1px solid #334155; }
+.leaderboard-table td { padding: 10px 12px; border-bottom: 1px solid rgba(255,255,255,0.05); }
+.leaderboard-table tr.row-winner { background: rgba(16, 185, 129, 0.1); }
+.model-name { font-size: 0.875rem; color: #fff; display: flex; align-items: center; gap: 6px; }
+.model-desc { font-size: 0.725rem; color: #64748b; margin-top: 2px; }
 </style>

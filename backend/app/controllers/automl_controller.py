@@ -21,6 +21,20 @@ class AnalyzeRequest(BaseModel):
     forecast_horizon: Optional[int] = Field(14, description="Jumlah periode ke depan yang ingin diproyeksikan")
 
 
+class SimulateScenarioRequest(BaseModel):
+    job_id: str = Field(..., description="Job ID dari sesi analisis sebelumnya")
+    growth_boost_pct: float = Field(0.0, description="Penyesuaian pertumbuhan permintaan dalam % (-50 hingga +100)")
+    spike_date: Optional[str] = Field(None, description="Tanggal spesifik event/promo spike (YYYY-MM-DD)")
+    spike_multiplier: float = Field(1.0, description="Pengali lonjakan pada tanggal event (contoh: 1.5 untuk +50%)")
+    safety_buffer_days: int = Field(0, description="Jumlah hari buffer persediaan/safety stock yang direkomendasikan")
+
+
+class AskAiRequest(BaseModel):
+    job_id: str = Field(..., description="Job ID dari sesi dataset analitik yang sedang dibuka")
+    question: str = Field(..., description="Pertanyaan analisis pengguna seputar data ini")
+    chat_history: Optional[List[Dict[str, str]]] = Field(None, description="Riwayat percakapan sebelumnya")
+
+
 @router.get("/presets", summary="Get Preset Datasets for Testing")
 def get_presets():
     """
@@ -33,13 +47,14 @@ def get_presets():
     }
 
 
-@router.post("/analyze-and-predict", summary="Auto-Profile, Forecast, Detect Anomalies & Interpret with AI")
+@router.post("/analyze-and-predict", summary="Auto-Profile, Multi-Model Tournament, Forecast & AI Interpretation")
 async def analyze_and_predict(payload: AnalyzeRequest, request: Request):
     """
     Universal AutoML Ingestion Endpoint:
     - Accepts raw tabular JSON array from any external website / API
     - Auto-profiles columns and infers task (Time-Series / Anomaly / Classification)
-    - Performs statistical modeling, future projections & anomaly detection
+    - Runs 4-Model Tournament (Fourier, Holt-Winters, Damped Trend, Hybrid Ensemble)
+    - Calculates MAPE/RMSE accuracy leaderboard & selects winning model
     - Generates executive business interpretation via AI LLM
     - Returns structured charts, tables, and embeddable iframe widgets
     """
@@ -59,6 +74,48 @@ async def analyze_and_predict(payload: AnalyzeRequest, request: Request):
     except Exception as e:
         logger.error(f"[AutoMLController] Processing error: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Terjadi kesalahan saat memproses data: {str(e)}")
+
+
+@router.post("/simulate-scenario", summary="Real-Time What-If Scenario Simulator (< 15ms)")
+def simulate_scenario(payload: SimulateScenarioRequest):
+    """
+    Real-Time What-If Scenario Simulation:
+    Recalculates forecast trajectories and safety stock curves instantly based on dynamic sliders.
+    """
+    try:
+        res = AutoMLService.simulate_scenario(
+            job_id=payload.job_id,
+            growth_boost_pct=payload.growth_boost_pct,
+            spike_date=payload.spike_date,
+            spike_multiplier=payload.spike_multiplier,
+            safety_buffer_days=payload.safety_buffer_days
+        )
+        return res
+    except ValueError as ve:
+        raise HTTPException(status_code=404, detail=str(ve))
+    except Exception as e:
+        logger.error(f"[AutoMLController] Simulation error: {e}")
+        raise HTTPException(status_code=500, detail=f"Gagal melakukan simulasi: {str(e)}")
+
+
+@router.post("/ask-ai", summary="Ask AI Interactive Questions About Current Analytics")
+def ask_ai(payload: AskAiRequest):
+    """
+    Interactive Q&A Engine:
+    Answers specific analytical or operational questions regarding the current dataset.
+    """
+    try:
+        res = AutoMLService.ask_ai_question(
+            job_id=payload.job_id,
+            question=payload.question,
+            chat_history=payload.chat_history
+        )
+        return res
+    except ValueError as ve:
+        raise HTTPException(status_code=404, detail=str(ve))
+    except Exception as e:
+        logger.error(f"[AutoMLController] Ask AI error: {e}")
+        raise HTTPException(status_code=500, detail=f"Gagal memproses pertanyaan AI: {str(e)}")
 
 
 @router.post("/upload-csv", summary="Upload CSV File & Run AutoML Pipeline")

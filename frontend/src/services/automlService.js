@@ -32,6 +32,42 @@ export const automlService = {
   },
 
   /**
+   * Real-Time What-If Scenario Simulation (< 15ms)
+   */
+  async simulateScenario(payload) {
+    const res = await fetch(`${API_BASE_URL}/api/v1/automl/simulate-scenario`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(payload)
+    })
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}))
+      throw new Error(err.detail || 'Gagal menjalankan simulasi skenario.')
+    }
+    return await res.json()
+  },
+
+  /**
+   * Interactive Ask AI About Current Data
+   */
+  async askAiQuestion(payload) {
+    const res = await fetch(`${API_BASE_URL}/api/v1/automl/ask-ai`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(payload)
+    })
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}))
+      throw new Error(err.detail || 'Gagal memproses pertanyaan AI.')
+    }
+    return await res.json()
+  },
+
+  /**
    * Uploads CSV file to AutoML pipeline
    */
   async uploadCsv(formData) {
