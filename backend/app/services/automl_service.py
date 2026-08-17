@@ -11,12 +11,15 @@ from typing import List, Dict, Any, Optional, Tuple
 import numpy as np
 
 try:
-    from app.services.rag_service import RagService
+    from backend.app.services.rag_service import RagService
 except ImportError:
     try:
-        from backend.app.services.rag_service import RagService
+        from .rag_service import RagService
     except ImportError:
-        RagService = None
+        try:
+            from app.services.rag_service import RagService
+        except ImportError:
+            RagService = None
 
 logger = logging.getLogger(__name__)
 

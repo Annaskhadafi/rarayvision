@@ -10,12 +10,12 @@ from sqlalchemy.orm import Session
 from sqlalchemy import func
 
 try:
-    from app.database.rag_models import (
+    from ..database.rag_models import (
         RagDocument, RagDocumentChunk,
         RagChatSession, RagChatMessage, RagMemoryFact
     )
-    from app.services.anydoc_service import AnyDocService
-    from app.services.redis_service import RedisService
+    from .anydoc_service import AnyDocService
+    from .redis_service import RedisService
 except ImportError:
     from backend.app.database.rag_models import (
         RagDocument, RagDocumentChunk,
@@ -90,47 +90,104 @@ def get_reranker_model():
     return _fastembed_reranker_instance
 
 
-# Domain Bilingual Query Expansion Dictionary (Indonesian -> Technical Engineering / Tire Standards)
+# Domain Bilingual Query Expansion Dictionary (Indonesian <-> Technical Engineering / Tire Standards)
 DOMAIN_SYNONYMS = {
-    "tekanan": ["pressure", "inflation", "operating pressure", "bar", "psi", "cold pressure"],
-    "angin": ["pressure", "inflation", "psi", "bar"],
-    "ban": ["tire", "tyre", "earthmover", "otr", "tubeless"],
-    "muatan": ["load", "payload", "capacity", "kg", "lbs", "load index"],
-    "beban": ["load", "payload", "capacity", "kg", "lbs", "load index"],
-    "kapasitas": ["capacity", "payload", "load"],
-    "kecepatan": ["speed", "km/h", "mph", "speed symbol"],
-    "ukuran": ["size", "dimension", "radial", "rim", "diameter"],
-    "dimensi": ["dimension", "size", "width", "diameter", "overall diameter"],
-    "tapak": ["tread", "tread depth", "otd", "pattern"],
-    "alur": ["tread", "tread depth", "otd", "groove"],
-    "kembangan": ["tread", "pattern", "otd"],
-    "kedalaman": ["depth", "tread depth", "otd", "mm", "32nds"],
-    "panas": ["tkph", "tmph", "temperature", "heat"],
-    "suhu": ["temperature", "tkph", "tmph", "heat"],
-    "berat": ["weight", "kg", "lbs", "mass"],
-    "velg": ["rim", "wheel", "flange"],
-    "pelek": ["rim", "wheel", "flange"],
-    "tipe": ["type", "pattern", "star rating", "code"],
-    "aturan": ["sop", "procedure", "rule", "instruction"],
-    "dongkrak": ["hydraulic jack", "jack", "lifting"],
-    "bongkar": ["demounting", "removal", "disassembly"],
-    "pasang": ["mounting", "assembly", "installation"]
+    # Pressure & Inflation
+    "tekanan": ["pressure", "inflation", "operating pressure", "bar", "psi", "kpa", "cold pressure", "inflation pressure", "nominal pressure"],
+    "angin": ["pressure", "inflation", "psi", "bar", "kpa", "cold pressure"],
+    "pressure": ["tekanan", "angin", "inflation", "bar", "psi", "kpa", "cold pressure"],
+    "inflation": ["tekanan", "angin", "pressure", "bar", "psi", "cold inflation"],
+    "bar": ["tekanan", "psi", "kpa", "pressure", "cold pressure"],
+    "psi": ["tekanan", "bar", "kpa", "pressure", "cold pressure"],
+    
+    # Tires & Types
+    "ban": ["tire", "tyre", "earthmover", "otr", "tubeless", "radial", "bias"],
+    "tire": ["ban", "tyre", "earthmover", "otr", "tubeless"],
+    "tyre": ["ban", "tire", "earthmover", "otr", "tubeless"],
+    "otr": ["off-the-road", "earthmover", "ban tambang", "haul truck", "loader", "grader"],
+    "radial": ["ban radial", "tubeless", "steel belted"],
+    
+    # Load & Capacity
+    "muatan": ["load", "payload", "capacity", "kg", "lbs", "load index", "maximum load"],
+    "beban": ["load", "payload", "capacity", "kg", "lbs", "load index", "maximum load"],
+    "kapasitas": ["capacity", "payload", "load", "volume", "ton"],
+    "load": ["beban", "muatan", "payload", "capacity", "kg", "lbs", "load index"],
+    "payload": ["muatan", "beban", "load", "tonase", "kapasitas"],
+    
+    # Speed & Distance
+    "kecepatan": ["speed", "km/h", "mph", "speed symbol", "speed limit", "maximum speed"],
+    "speed": ["kecepatan", "km/h", "mph", "speed symbol"],
+    
+    # Dimensions & Rim
+    "ukuran": ["size", "dimension", "radial", "rim", "diameter", "width"],
+    "dimensi": ["dimension", "size", "width", "diameter", "overall diameter", "section width"],
+    "velg": ["rim", "wheel", "flange", "rim width"],
+    "pelek": ["rim", "wheel", "flange", "rim width"],
+    "rim": ["velg", "pelek", "wheel", "flange", "rim width"],
+    "lebar": ["width", "section width", "overall width"],
+    "diameter": ["overall diameter", "outer diameter", "rim diameter"],
+    
+    # Tread & Groove
+    "tapak": ["tread", "tread depth", "otd", "pattern", "groove", "non-skid"],
+    "alur": ["tread", "tread depth", "otd", "groove", "pattern"],
+    "kembangan": ["tread", "pattern", "otd", "tread depth"],
+    "kedalaman": ["depth", "tread depth", "otd", "mm", "32nds", "remaining tread"],
+    "tread": ["tapak", "alur", "kembangan", "tread depth", "otd"],
+    "otd": ["original tread depth", "tread depth", "kedalaman tapak", "mm"],
+    
+    # Temperature & Heat
+    "panas": ["tkph", "tmph", "temperature", "heat", "heat generation"],
+    "suhu": ["temperature", "tkph", "tmph", "heat", "celsius"],
+    "tkph": ["tonne kilometer per hour", "tmph", "ton mile per hour", "heat rate", "suhu ban"],
+    
+    # Weight & Mass
+    "berat": ["weight", "kg", "lbs", "mass", "tire weight"],
+    "weight": ["berat", "massa", "kg", "lbs"],
+    
+    # Type, Code & Star Rating
+    "tipe": ["type", "pattern", "star rating", "ply rating", "code", "tra code"],
+    "bintang": ["star", "star rating", "ply rating", "pr", "load index"],
+    "rating": ["star rating", "ply rating", "pr", "load index", "speed symbol"],
+    "tra": ["tra code", "e-3", "e-4", "l-3", "l-4", "l-5", "g-2", "c-1"],
+    
+    # Operations, Mounting & Safety
+    "aturan": ["sop", "procedure", "rule", "instruction", "standard", "safety"],
+    "prosedur": ["sop", "procedure", "step", "instruction", "safety guideline"],
+    "dongkrak": ["hydraulic jack", "jack", "lifting", "stand"],
+    "bongkar": ["demounting", "removal", "disassembly", "deflation"],
+    "pasang": ["mounting", "assembly", "installation", "inflation"],
+    "baut": ["torque", "nut", "stud", "tightening", "ft-lbs", "nm"],
+    "torsi": ["torque", "tightening torque", "nm", "ft-lbs", "wrench"]
 }
 
 
 def expand_bilingual_query(query: str) -> str:
-    """Expands Indonesian technical query terms with English technical synonyms for enhanced RAG cross-lingual recall."""
+    """
+    Expands bilingual query terms (Indonesian <-> English) with domain engineering technical synonyms.
+    Also extracts and prioritizes exact tire sizes (e.g. 27.00R49, 33.00R51, 14.00-24) and pressure terms.
+    """
     if not query:
         return ""
-    q_clean = query.lower()
+    q_clean = query.lower().strip()
     words = re.findall(r'[a-zA-Z0-9_\-\.\/]+', q_clean)
     added_terms = []
+    
+    # 1. Expand technical synonyms
     for w in words:
         if w in DOMAIN_SYNONYMS:
             added_terms.extend(DOMAIN_SYNONYMS[w])
+            
+    # 2. Extract technical patterns like tire size (e.g. 27.00R49, 33.00R51, 29.5R25, 14.00-24)
+    tire_sizes = re.findall(r'\b\d{1,2}(?:\.\d{1,2})?(?:[rR\-xX\/])\d{1,2}(?:\.\d{1,2})?\b', query)
+    if tire_sizes:
+        for sz in tire_sizes:
+            added_terms.append(sz.upper())
+            added_terms.append(sz.lower())
+
     if added_terms:
+        # Keep unique terms in order
         unique_added = list(dict.fromkeys(added_terms))
-        return f"{query} {' '.join(unique_added[:8])}"
+        return f"{query} {' '.join(unique_added[:12])}"
     return query
 
 
@@ -140,12 +197,12 @@ def tokenize_text(text: str) -> List[str]:
         return []
     clean = text.lower()
     tokens = re.findall(r'[a-zA-Z0-9_\-\.\/]+', clean)
-    return [t.strip('.-_/') for t in tokens if len(t.strip('.-_/')) >= 2]
+    return [t.strip('.-_/') for t in tokens if len(t.strip('.-_/')) >= 1]
 
 
 def compute_bm25_scores(query: str, items: List[Dict[str, Any]], k1: float = 1.5, b: float = 0.75) -> List[float]:
     """
-    High-speed vectorized Okapi BM25 scores calculation without re-tokenizing whole documents.
+    High-speed vectorized Okapi BM25 scores calculation for exact keyword and numerical code matching.
     """
     import numpy as np
     query_tokens = tokenize_text(query)
@@ -176,7 +233,7 @@ def compute_bm25_scores(query: str, items: List[Dict[str, Any]], k1: float = 1.5
         avgdl = 1.0
 
     idf_dict = {
-        q_tok: max(0.0, float(np.log((N - df[q_tok] + 0.5) / (df[q_tok] + 0.5) + 1.0)))
+        q_tok: max(0.1, float(np.log((N - df[q_tok] + 0.5) / (df[q_tok] + 0.5) + 1.0)))
         for q_tok in query_tokens
     }
 
@@ -268,12 +325,13 @@ class RagService:
     @staticmethod
     def split_markdown_into_chunks(
         markdown_text: str,
-        max_chunk_chars: int = 750,
-        overlap_chars: int = 100
+        max_chunk_chars: int = 800,
+        overlap_chars: int = 120
     ) -> List[Dict[str, Any]]:
         """
         Semantically splits Markdown text into chunks while preserving heading hierarchy,
-        table structure (including column headers), and paragraph boundaries.
+        table structure (guaranteeing table headers and column labels on every table chunk),
+        and paragraph boundaries.
         """
         if not markdown_text or not markdown_text.strip():
             return []
@@ -289,7 +347,8 @@ class RagService:
                 continue
 
             # Track heading level and hierarchy breadcrumb path
-            header_match = re.match(r'^(#{1,4})\s+(.*)$', sec_str.splitlines()[0])
+            first_line = sec_str.splitlines()[0] if sec_str.splitlines() else ""
+            header_match = re.match(r'^(#{1,4})\s+(.*)$', first_line)
             if header_match:
                 level = len(header_match.group(1))
                 h_title = header_match.group(2).strip()
@@ -299,11 +358,19 @@ class RagService:
             active_headings = [hierarchy_stack[k] for k in sorted(hierarchy_stack.keys())]
             current_heading = " > ".join(active_headings) if active_headings else "General"
 
-            # Check if section contains a markdown table header
-            table_header_prefix = ""
             lines = sec_str.splitlines()
-            if len(lines) >= 2 and "|" in lines[0] and ("---" in lines[1] or (len(lines) > 2 and "---" in lines[2])):
-                table_header_prefix = "\n".join(lines[:2]) + "\n"
+
+            # Check if section contains a markdown table
+            has_table = False
+            table_header_prefix = ""
+            header_end_idx = 0
+
+            for idx in range(min(len(lines) - 1, 5)):
+                if "|" in lines[idx] and idx + 1 < len(lines) and ("---" in lines[idx + 1] or ":---" in lines[idx + 1]):
+                    has_table = True
+                    table_header_prefix = f"{lines[idx]}\n{lines[idx + 1]}\n"
+                    header_end_idx = idx + 2
+                    break
 
             # If section is within max_chunk_chars, keep as one chunk
             if len(sec_str) <= max_chunk_chars:
@@ -313,8 +380,49 @@ class RagService:
                     "char_count": len(sec_str),
                     "token_estimate": len(sec_str.split())
                 })
+            elif has_table and header_end_idx > 0:
+                # Specialized table chunking: keep header on every row chunk
+                table_rows = [l for l in lines[header_end_idx:] if "|" in l and l.strip()]
+                non_table_before = "\n".join(lines[:header_end_idx - 2]).strip()
+                if non_table_before:
+                    chunks.append({
+                        "content": non_table_before,
+                        "heading": current_heading,
+                        "char_count": len(non_table_before),
+                        "token_estimate": len(non_table_before.split())
+                    })
+
+                row_buf = []
+                cur_len = len(table_header_prefix)
+                effective_max = max(max_chunk_chars, 400)
+
+                for row in table_rows:
+                    row_len = len(row) + 1
+                    if cur_len + row_len > effective_max and row_buf:
+                        chunk_body = table_header_prefix + "\n".join(row_buf)
+                        chunks.append({
+                            "content": chunk_body,
+                            "heading": current_heading,
+                            "char_count": len(chunk_body),
+                            "token_estimate": len(chunk_body.split())
+                        })
+                        # 1 row overlap for table continuity
+                        row_buf = [row_buf[-1]] if len(row_buf) > 1 else []
+                        cur_len = len(table_header_prefix) + sum(len(r) + 1 for r in row_buf)
+
+                    row_buf.append(row)
+                    cur_len += row_len
+
+                if row_buf:
+                    chunk_body = table_header_prefix + "\n".join(row_buf)
+                    chunks.append({
+                        "content": chunk_body,
+                        "heading": current_heading,
+                        "char_count": len(chunk_body),
+                        "token_estimate": len(chunk_body.split())
+                    })
             else:
-                # Split large section by paragraphs
+                # Split large textual section by paragraphs
                 paragraphs = sec_str.split("\n\n")
                 buf = []
                 buf_len = 0
@@ -326,8 +434,6 @@ class RagService:
 
                     if buf_len + len(p_clean) > max_chunk_chars and buf:
                         chunk_text = "\n\n".join(buf)
-                        if table_header_prefix and not chunk_text.startswith(table_header_prefix):
-                            chunk_text = f"{table_header_prefix}{chunk_text}"
                         chunks.append({
                             "content": chunk_text,
                             "heading": current_heading,
@@ -343,8 +449,6 @@ class RagService:
 
                 if buf:
                     chunk_text = "\n\n".join(buf)
-                    if table_header_prefix and not chunk_text.startswith(table_header_prefix):
-                        chunk_text = f"{table_header_prefix}{chunk_text}"
                     chunks.append({
                         "content": chunk_text,
                         "heading": current_heading,
@@ -650,15 +754,27 @@ class RagService:
         enable_rerank: bool = True
     ) -> List[Dict[str, Any]]:
         """
-        Two-stage retrieval pipeline:
-        1. Recall Stage: Vector Cosine Similarity Search retrieves top candidate chunks (e.g. 12-16 candidates).
+        Two-stage Hybrid retrieval pipeline:
+        1. Recall Stage: Hybrid Search (Vector Cosine Similarity + BM25 Lexical Matching with RRF Fusion).
+           Automatically expands bilingual technical terms to ensure cross-lingual and exact spec recall.
         2. Precision Stage: ONNX Cross-Encoder Reranks candidates against the specific user query.
         """
-        query_vec = cls.generate_single_embedding(query)
+        if not query or not query.strip():
+            return []
+
+        expanded_query = expand_bilingual_query(query)
+        query_vec = cls.generate_single_embedding(expanded_query)
 
         # Retrieve wider candidate pool for cross-encoder reranking
-        candidate_k = max(top_k * 3, 12) if enable_rerank else top_k
-        candidates = cls._similarity_search(db, query, query_vec, candidate_k, document_id)
+        candidate_k = max(top_k * 3, 15) if enable_rerank else top_k
+        candidates = cls._similarity_search(
+            db=db,
+            query=query,
+            query_vec=query_vec,
+            top_k=candidate_k,
+            document_id=document_id,
+            expanded_query=expanded_query
+        )
 
         if not candidates or not enable_rerank:
             return candidates[:top_k]
@@ -672,10 +788,13 @@ class RagService:
         query: str,
         query_vec: List[float],
         top_k: int,
-        document_id: Optional[str] = None
+        document_id: Optional[str] = None,
+        expanded_query: Optional[str] = None
     ) -> List[Dict[str, Any]]:
         """
-        Pure In-Memory Vector Cosine Similarity Search without BM25 or keyword pollution.
+        In-Memory Hybrid Search:
+        Combines Vector Cosine Similarity (semantic understanding) and Okapi BM25 (exact keyword & number matching)
+        using Reciprocal Rank Fusion (RRF). Eliminates hard threshold drop-offs to prevent false negative retrieval.
         """
         import numpy as np
 
@@ -723,41 +842,75 @@ class RagService:
         if not items:
             return []
 
+        # 1. Vector Cosine Similarity
         q_arr = np.array(query_vec, dtype=np.float32)
         norm_q = float(np.linalg.norm(q_arr))
         if norm_q == 0:
             norm_q = 1e-9
 
-        # Vectorized SIMD BLAS Cosine Similarity calculation
         q_norm_arr = q_arr / norm_q
-        sim_array = (sub_matrix @ q_norm_arr) / sub_norms
+        dense_sims = (sub_matrix @ q_norm_arr) / sub_norms
+        dense_sims = np.clip(dense_sims, 0.0, 1.0)
+
+        # 2. Okapi BM25 Lexical Score
+        search_query = expanded_query or query
+        bm25_scores = compute_bm25_scores(search_query, items)
+        max_bm25 = max(bm25_scores) if bm25_scores and max(bm25_scores) > 0 else 1.0
+
+        # 3. Reciprocal Rank Fusion (RRF) & Hybrid Score Fusion
+        dense_ranks = np.argsort(-dense_sims)
+        dense_rank_map = {idx: r for r, idx in enumerate(dense_ranks)}
+
+        bm25_arr = np.array(bm25_scores, dtype=np.float32)
+        bm25_ranks = np.argsort(-bm25_arr)
+        bm25_rank_map = {idx: r for r, idx in enumerate(bm25_ranks)}
 
         scored = []
+        k_rrf = 40.0
+        w_dense = 0.55
+        w_bm25 = 0.45
+
         for idx, it in enumerate(items):
-            sim_val = max(0.0, float(sim_array[idx]))
-            
+            vec_sim = float(dense_sims[idx])
+            bm25_s = float(bm25_scores[idx])
+            norm_bm25 = bm25_s / max_bm25 if max_bm25 > 0 else 0.0
+
+            r_dense = dense_rank_map.get(idx, len(items))
+            r_bm25 = bm25_rank_map.get(idx, len(items))
+
+            # Reciprocal Rank Fusion
+            rrf_score = (w_dense / (k_rrf + r_dense)) + (w_bm25 / (k_rrf + r_bm25))
+
+            # Hybrid linear blend for calibration
+            hybrid_score = (vec_sim * 0.6) + (norm_bm25 * 0.4)
+
             # Prioritize memory/correction items slightly
             if it.get("is_memory"):
-                sim_val = min(1.0, sim_val + 0.05)
+                rrf_score += 0.015
+                hybrid_score = min(1.0, hybrid_score + 0.08)
+                vec_sim = min(1.0, vec_sim + 0.05)
 
-            if sim_val >= 0.30 or it.get("is_memory"):
-                scored.append({
-                    "chunk_id": it["chunk_id"],
-                    "document_id": it["document_id"],
-                    "filename": it["filename"],
-                    "format": it["format"],
-                    "s3_url": it["s3_url"],
-                    "chunk_index": it["chunk_index"],
-                    "heading": it["heading"],
-                    "content": it["content"],
-                    "similarity_score": round(sim_val, 4),
-                    "distance": round(1.0 - sim_val, 4),
-                    "source_type": it.get("source_type", "document"),
-                    "fact_type": it.get("fact_type")
-                })
+            # No hard drop-off threshold: keep all positive or top-ranked matches
+            scored.append({
+                "chunk_id": it["chunk_id"],
+                "document_id": it["document_id"],
+                "filename": it["filename"],
+                "format": it["format"],
+                "s3_url": it["s3_url"],
+                "chunk_index": it["chunk_index"],
+                "heading": it["heading"],
+                "content": it["content"],
+                "similarity_score": round(float(hybrid_score), 4),
+                "vector_score": round(float(vec_sim), 4),
+                "bm25_score": round(float(bm25_s), 4),
+                "rrf_score": float(rrf_score),
+                "distance": round(1.0 - vec_sim, 4),
+                "source_type": it.get("source_type", "document"),
+                "fact_type": it.get("fact_type")
+            })
 
-        # Rank strictly by pure Vector Cosine Similarity
-        scored.sort(key=lambda x: x["similarity_score"], reverse=True)
+        # Rank by RRF Score descending
+        scored.sort(key=lambda x: (x["rrf_score"], x["similarity_score"]), reverse=True)
         return scored[:top_k]
 
     @classmethod
@@ -1221,22 +1374,30 @@ class RagService:
 
         # 7. Formulate System Prompt & Multi-Turn Message History
         system_instruction = custom_system_prompt or (
-            "Anda adalah Hero Assistant, asisten AI resmi yang cerdas, komprehensif, dan profesional.\n\n"
-            "ATURAN WAJIB FORMAT JAWABAN (STRICT RULES):\n"
-            "1. BAHASA: Wajib 100% menggunakan Bahasa Indonesia yang baku, jelas, komprehensif, dan profesional. Jangan pernah menjawab dalam Bahasa Inggris kecuali nama model/merek, istilah teknis, satuan, atau kode part/ukuran yang tidak dapat diterjemahkan.\n"
-            "2. PENJELASAN LENGKAP & BERBOBOT: Berikan jawaban yang informatif, terstruktur dengan baik, dan mudah dipahami. Jelaskan konsep/alasan di balik aturan teknis, standar keselamatan, atau rekomendasi operasional secara jelas dan terperinci.\n"
-            "3. PRIORITAS MEMORI KOREKSI PENGGUNA (TERTINGGI): Jika terdapat bagian '[Memori & Aturan Khusus yang Dipelajari dari Pengguna]' dalam konteks, Anda WAJIB menjawab berdasarkan informasi tersebut terlebih dahulu. Koreksi dari pengguna selalu lebih akurat daripada dokumen. Jangan pernah mengabaikan memori ini.\n"
-            "4. HANYA JAWABAN AKHIR (NO META-THOUGHTS / NO CONSTRAINT CHECKS): Langsung berikan jawaban akhir yang siap dibaca oleh pengguna tanpa catatan meta evaluasi aturan/checklist internal.\n"
-            "5. WAJIB TABEL MARKDOWN UNTUK DATA SPESIFIKASI/TABULAR:\n"
-            "   - Jika jawaban memuat data spesifikasi ban, ukuran, tekanan angin (pressure/bar/psi), beban/muatan (load index/kg/lbs), kecepatan, dimensi, kode part, atau perbandingan tipe ban, ANDA WAJIB MENYAJIKANNYA DALAM TABEL MARKDOWN LENGKAP:\n"
-            "     | Model / Tipe | Ukuran Ban | Tekanan Angin (Bar / PSI) | Beban / Load (kg) | Kecepatan (km/h) |\n"
-            "     | :--- | :--- | :--- | :--- | :--- |\n"
-            "     | ... | ... | ... | ... | ... |\n"
-            "   - Untuk penjelasan prosedur atau langkah operasional, gunakan poin-poin bertahap (numbered/bullet points) yang rapi, berurutan, dan jelas.\n"
-            "6. BERBASIS KONTEKS DOKUMEN & MEMORI: Analisis dan terjemahkan informasi teknis dari Konteks Dokumen Pengetahuan (termasuk istilah bahasa Inggris seperti 'inflation pressure', 'load capacity', 'tread depth', 'operating pressure') ke jawaban Bahasa Indonesia yang akurat dan berbobot.\n"
-            "7. JIKA TIDAK DITEMUKAN DI DOKUMEN TAPI ADA DI MEMORI: Jawab berdasarkan memori/koreksi pengguna, jangan katakan 'tidak ditemukan'.\n"
-            "8. JIKA PERTANYAAN TERKAIT DATA DOKUMEN/OPERASIONAL TAPI TIDAK DITEMUKAN: Sampaikan secara sopan dan singkat bahwa informasi spesifik tersebut belum tercatat dalam basis pengetahuan dokumen maupun memori.\n"
-            "9. JIKA PERTANYAAN UMUM, KREATIF, ATAU SAPAAN: Jawablah dengan ramah, cerdas, kreatif, dan membantu sesuai konteks percakapan secara profesional."
+            "Anda adalah Hero Assistant, asisten AI resmi yang cerdas, komprehensif, dan profesional dalam bidang rekayasa teknis, spesifikasi ban (OTR / Earthmover / Radial / Bias), dan standar operasional keselamatan.\n\n"
+            "ATURAN WAJIB FORMAT & AKURASI JAWABAN (STRICT RULES):\n"
+            "1. BAHASA & PEMAHAMAN DWIBAHASA (CODE-MIXING):\n"
+            "   - Pengguna sering bertanya menggunakan campuran Bahasa Indonesia dan istilah teknis Bahasa Inggris (misal: 'cold pressure', 'payload', 'inflation', 'rim width', 'load capacity', 'tread depth').\n"
+            "   - Anda WAJIB memahami kueri campuran tersebut dan mencocokkannya dengan data pada Konteks Dokumen Pengetahuan (yang mungkin berbahasa Inggris).\n"
+            "   - Sampaikan seluruh jawaban akhir dalam Bahasa Indonesia yang baku, terstruktur, komprehensif, dan profesional. Nama merek/model, kode ukuran (contoh: 27.00R49), kode TRA (contoh: E-4, L-5), dan simbol satuan tetap ditulis dalam format standar aslinya.\n"
+            "2. AKURASI TINGGI PADA DATA SPESIFIKASI & TEKANAN ANGIN (PRESSURE):\n"
+            "   - Teliti setiap kolom pada tabel Markdown dalam konteks secara presisi.\n"
+            "   - Bedakan dengan tegas antara satuan Tekanan (Bar vs PSI vs kPa), Ukuran Rim (inch), Kapasitas Beban (kg vs lbs), dan Kecepatan (km/h).\n"
+            "   - Jangan pernah tertukar antara nilai Tekanan dalam Bar (misal: 7.00 bar) dengan nilai dalam PSI (misal: 102 psi) atau ukuran velg/rim.\n"
+            "   - Jika terdapat rekomendasi 'Cold Inflation Pressure' (tekanan dingin) atau variasi tekanan berdasarkan beban (payload) / aplikasi kerja (haulage vs loading), sebutkan secara terperinci.\n"
+            "3. WAJIB TABEL MARKDOWN UNTUK DATA SPESIFIKASI/TABULAR:\n"
+            "   - Jika jawaban memuat data spesifikasi ban, ukuran, tekanan angin, beban muatan, kecepatan, dimensi, atau perbandingan tipe ban, ANDA WAJIB MENYAJIKANNYA DALAM TABEL MARKDOWN LENGKAP & RAPI:\n"
+            "     | Model / Tipe | Ukuran Ban | Star / PR | Rim Width | Cold Pressure (Bar) | Cold Pressure (PSI) | Max Load (kg) |\n"
+            "     | :--- | :--- | :--- | :--- | :--- | :--- | :--- |\n"
+            "     | ... | ... | ... | ... | ... | ... | ... |\n"
+            "   - Untuk prosedur teknis, langkah keselamatan (SOP), atau pembongkaran/pemasangan, gunakan poin-poin bertahap (numbered/bullet points) yang rapi, berurutan, dan jelas.\n"
+            "4. PRIORITAS MEMORI & KOREKSI PENGGUNA (TERTINGGI):\n"
+            "   - Jika terdapat bagian '[Memori & Aturan Khusus yang Dipelajari dari Pengguna]' dalam konteks, Anda WAJIB memprioritaskan informasi tersebut di atas dokumen standar. Jangan pernah mengabaikan memori atau koreksi ini.\n"
+            "5. JANGAN PREMATUR MENYATAKAN 'TIDAK TAHU':\n"
+            "   - Jika tabel atau cuplikan teks di dalam Konteks memuat data model/ukuran/spesifikasi yang ditanyakan, Anda WAJIB menganalisis dan menjawabnya secara lengkap dari data tersebut.\n"
+            "   - Hanya nyatakan informasi belum tercatat jika memang tidak ada data relevan sama sekali di dalam dokumen maupun memori.\n"
+            "6. HANYA JAWABAN AKHIR (NO META-THOUGHTS / NO INTERNAL CHECKLIST):\n"
+            "   - Langsung berikan penjelasan dan jawaban akhir yang bersih, informatif, dan mudah dipahami tanpa menyertakan catatan evaluasi aturan internal atau proses berpikir mentah."
         )
 
         current_prompt = f"""Konteks Dokumen & Memori Pengetahuan (Markdown):

@@ -2,15 +2,11 @@ from sqlalchemy import Column, String, Integer, Float, Boolean, Text, ForeignKey
 from sqlalchemy.orm import relationship
 from datetime import datetime
 
+from .database import Base
 try:
-    from app.database.database import Base
-    from app.database.models import User
+    from .models import User
 except ImportError:
-    from backend.app.database.database import Base
-    try:
-        from backend.app.database.models import User
-    except ImportError:
-        pass
+    pass
 
 
 class RagDocument(Base):
