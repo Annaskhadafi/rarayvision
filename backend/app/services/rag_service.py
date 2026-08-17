@@ -1083,53 +1083,63 @@ Pertanyaan Pengguna:
         """
         Invokes LLM with full conversation messages list.
         Priority:
-        1. Groq (Ultra-fast LPU, default model: qwen/qwen3.6-27b)
+        1. Groq (Ultra-fast LPU)
         2. OpenRouter
         3. Google Gemini API
         """
         import requests
 
-        groq_key = os.getenv("GROQ_API_KEY", "")
-        groq_model = os.getenv("GROQ_MODEL", "qwen/qwen3.6-27b")
+        groq_key = os.getenv("GROQ_API_KEY", "").strip()
+        groq_model = os.getenv("GROQ_MODEL", "qwen/qwen3.6-27b").strip()
 
         # 1. Groq (Ultra-Fast LPU Engine)
         if groq_key:
             try:
+                logger.info(f"[RagService] Calling Groq with model={groq_model}, msgs={len(messages)}")
+                payload = {
+                    "model": groq_model,
+                    "messages": messages,
+                    "temperature": 0.2,
+                    "max_tokens": 2048,
+                }
+                # reasoning_format:hidden only works on specific Groq reasoning models
+                groq_reasoning_models = ["deepseek", "qwq", "r1"]
+                if any(rm in groq_model.lower() for rm in groq_reasoning_models):
+                    payload["reasoning_format"] = "hidden"
+
                 resp = requests.post(
                     "https://api.groq.com/openai/v1/chat/completions",
                     headers={
                         "Authorization": f"Bearer {groq_key}",
                         "Content-Type": "application/json"
                     },
-                    json={
-                        "model": groq_model,
-                        "messages": messages,
-                        "temperature": 0.2,
-                        "max_tokens": 2048,
-                        "reasoning_format": "hidden"
-                    },
-                    timeout=25
+                    json=payload,
+                    timeout=30
                 )
                 if resp.status_code == 200:
                     data = resp.json()
                     content = data["choices"][0]["message"]["content"]
+                    logger.info(f"[RagService] Groq response OK, len={len(content)}")
                     return RagService._clean_llm_response(content)
                 else:
-                    logger.warning(f"[RagService] Groq API returned {resp.status_code}: {resp.text}")
+                    logger.warning(f"[RagService] Groq API error {resp.status_code}: {resp.text[:500]}")
             except Exception as e:
-                logger.error(f"[RagService] Groq API call error: {e}")
+                logger.error(f"[RagService] Groq API call exception: {e}", exc_info=True)
+        else:
+            logger.warning("[RagService] GROQ_API_KEY is empty or not set")
 
         # 2. OpenRouter Fallback
-        openrouter_key = os.getenv("OPENROUTER_API_KEY", "")
-        openrouter_model = os.getenv("OPENROUTER_MODEL", "nvidia/nemotron-nano-12b-v2-vl:free")
+        openrouter_key = os.getenv("OPENROUTER_API_KEY", "").strip()
+        openrouter_model = os.getenv("OPENROUTER_MODEL", "google/gemma-4-26b-a4b-it:free").strip()
         if openrouter_key:
             try:
+                logger.info(f"[RagService] Calling OpenRouter with model={openrouter_model}")
                 resp = requests.post(
                     "https://openrouter.ai/api/v1/chat/completions",
                     headers={
                         "Authorization": f"Bearer {openrouter_key}",
                         "Content-Type": "application/json",
-                        "HTTP-Referer": "https://rarayvision.dfs.co.id",
+                        "HTTP-Referer": "https://vision.chitrapratama.com",
                         "X-Title": "Hero Assistant RAG"
                     },
                     json={
@@ -1137,24 +1147,27 @@ Pertanyaan Pengguna:
                         "messages": messages,
                         "temperature": 0.3
                     },
-                    timeout=30
+                    timeout=45
                 )
                 if resp.status_code == 200:
                     data = resp.json()
                     content = data["choices"][0]["message"]["content"]
+                    logger.info(f"[RagService] OpenRouter response OK, len={len(content)}")
                     return RagService._clean_llm_response(content)
                 else:
-                    logger.warning(f"[RagService] OpenRouter returned {resp.status_code}: {resp.text}")
+                    logger.warning(f"[RagService] OpenRouter error {resp.status_code}: {resp.text[:500]}")
             except Exception as e:
-                logger.error(f"[RagService] OpenRouter LLM call error: {e}")
+                logger.error(f"[RagService] OpenRouter call exception: {e}", exc_info=True)
+        else:
+            logger.warning("[RagService] OPENROUTER_API_KEY is empty or not set")
 
         # 3. Google Gemini Fallback
-        gemini_key = os.getenv("GEMINI_API_KEY", "")
+        gemini_key = os.getenv("GEMINI_API_KEY", "").strip()
         if gemini_key:
             try:
+                logger.info("[RagService] Calling Google Gemini")
                 from google import genai
                 client = genai.Client(api_key=gemini_key)
-                # Combine messages into prompt for Gemini
                 gemini_text = "\n\n".join([f"[{m['role'].upper()}]: {m['content']}" for m in messages])
                 response = client.models.generate_content(
                     model="gemini-2.0-flash",
@@ -1163,9 +1176,13 @@ Pertanyaan Pengguna:
                 if response and response.text:
                     return RagService._clean_llm_response(response.text)
             except Exception as e:
-                logger.error(f"[RagService] Gemini LLM call error: {e}")
+                logger.error(f"[RagService] Gemini call exception: {e}", exc_info=True)
+        else:
+            logger.warning("[RagService] GEMINI_API_KEY is empty or not set")
 
+        logger.error("[RagService] All LLM providers failed. Returning fallback message.")
         return (
-            "⚠️ **Catatan Sistem:** API Key LLM (`GROQ_API_KEY`, `OPENROUTER_API_KEY`, atau `GEMINI_API_KEY`) belum dikonfigurasi di file `.env`.\n\n"
-            "Namun, potongan dokumen yang relevan dari pgvector berhasil ditemukan dan tercantum pada panel sumber di bawah."
+            "⚠️ **Catatan Sistem:** Semua LLM provider (Groq, OpenRouter, Gemini) gagal merespons. "
+            "Periksa log backend untuk detail error.\n\n"
+            "Potongan dokumen yang relevan dari pgvector tetap tersedia di panel sumber di bawah."
         )
