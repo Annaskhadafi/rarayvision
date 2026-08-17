@@ -91,17 +91,14 @@ const isSubmittingFeedback = ref(false)
 const feedbackSuccessToast = ref('')
 
 // Memory History Manager State
-const memoryTab = ref('all')         // 'all', 'auto', 'correction', 'manual'
+const memoryTab = ref('all')         // 'all', 'correction', 'manual'
 const memorySearchQuery = ref('')
 const selectedFactIds = ref(new Set())
 const isBulkDeleting = ref(false)
-const isAutoSaveEnabled = ref(true)
-const showAutoSaveToast = ref(false)
 
 const filteredMemoryFacts = computed(() => {
   let base = learnedFacts.value
-  if (memoryTab.value === 'auto') base = base.filter(f => f.learned_from === 'auto_chat')
-  else if (memoryTab.value === 'correction') base = base.filter(f => f.fact_type === 'user_correction')
+  if (memoryTab.value === 'correction') base = base.filter(f => f.fact_type === 'user_correction')
   else if (memoryTab.value === 'manual') base = base.filter(f => f.learned_from === 'direct_input')
   if (memorySearchQuery.value.trim()) {
     const q = memorySearchQuery.value.toLowerCase()
@@ -717,12 +714,6 @@ const handleBulkDelete = async () => {
   }
 }
 
-const toggleAutoSave = () => {
-  isAutoSaveEnabled.value = !isAutoSaveEnabled.value
-  showAutoSaveToast.value = true
-  setTimeout(() => { showAutoSaveToast.value = false }, 2500)
-}
-
 // Chatbot Send with Multi-Turn Memory & Persistent DB Session
 const getUniqueSources = (sources) => {
   if (!sources || !Array.isArray(sources)) return []
@@ -794,8 +785,6 @@ const handleSendMessage = async () => {
         rating: null
       })
       fetchSessions()
-      // Auto-refresh memory panel after each chat turn
-      fetchLearnedFacts()
     }
   } catch (err) {
     chatMessages.value.push({
@@ -1023,7 +1012,8 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "Message is required" }, { status: 400 });
     }
 
-    // 1. Panggil RAG API Raray Vision dengan multi-turn context memory
+    // 1. Panggil RAG API Raray Vision dengan multi-turn context memory & self-growth
+    // Jawaban otomatis mengutamakan data koreksi / SOP terbaru dari Memory History Manager
     const ragResponse = await fetch("${API_BASE_URL}/api/v1/rag/chat", {
       method: "POST",
       headers: {
@@ -1042,7 +1032,8 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({
       role: "assistant",
       content: data.data.answer,
-      sources: data.data.sources,
+      sources: data.data.sources, // Memuat chunk dokumen & memori koreksi
+      learned_facts: data.data.learned_facts,
       latency_ms: data.data.latency_ms
     });
   } catch (error: any) {
@@ -1056,7 +1047,7 @@ const nextjsUploadCode = computed(() => {
 "use server";
 
 export async function uploadToKnowledgeBase(formData: FormData) {
-  // formData berisi file dari input form <input type="file" name="file" />
+  // Upload dokumen file ke pgvector
   const res = await fetch("${API_BASE_URL}/api/v1/rag/ingest", {
     method: "POST",
     headers: {
@@ -1067,6 +1058,19 @@ export async function uploadToKnowledgeBase(formData: FormData) {
 
   const result = await res.json();
   return result; // mengembalikan document_id, total_chunks, s3_url, dll.
+}
+
+export async function teachMemoryFact(content: string, subject?: string, factType: string = "learned_knowledge") {
+  // Tambahkan aturan / koreksi / SOP langsung ke memori jangka panjang RAG
+  const res = await fetch("${API_BASE_URL}/api/v1/rag/memory/learn", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": "Bearer \${process.env.RARAY_VISION_API_KEY}"
+    },
+    body: JSON.stringify({ content, subject, fact_type: factType })
+  });
+  return await res.json();
 }`
 })
 
@@ -1077,17 +1081,23 @@ curl -X POST "${API_BASE_URL}/api/v1/rag/ingest" \\
   -F "file=@panduan.docx" \\
   -F "auto_ocr=true"
 
-# 2. Semantic Search (Pencarian Vektor)
+# 2. Semantic Search (Pencarian Vektor Gabungan: Dokumen + Memori Koreksi)
 curl -X POST "${API_BASE_URL}/api/v1/rag/search" \\
   -H "Authorization: Bearer ${apiToken.value}" \\
   -H "Content-Type: application/json" \\
-  -d '{"query": "Berapa biaya produk X?", "top_k": 4}'
+  -d '{"query": "Berapa tekanan ban WA500?", "top_k": 4}'
 
-# 3. Chatbot Generation (Didukung Groq Qwen)
+# 3. Chatbot Generation (Didukung Groq Qwen & Memori Prioritas)
 curl -X POST "${API_BASE_URL}/api/v1/rag/chat" \\
   -H "Authorization: Bearer ${apiToken.value}" \\
   -H "Content-Type: application/json" \\
-  -d '{"query": "Jelaskan isi Bab 2 secara ringkas", "top_k": 4}'`
+  -d '{"query": "Jelaskan prosedur pergantian ban", "top_k": 4}'
+
+# 4. Tambahkan Aturan / Koreksi Baru ke Memory History Manager
+curl -X POST "${API_BASE_URL}/api/v1/rag/memory/learn" \\
+  -H "Authorization: Bearer ${apiToken.value}" \\
+  -H "Content-Type: application/json" \\
+  -d '{"content": "Form izin kerja panas wajib disetujui Dept Head.", "subject": "SOP Izin Panas", "fact_type": "rule"}'`
 })
 
 const pythonCode = computed(() => {
@@ -1096,19 +1106,29 @@ const pythonCode = computed(() => {
 API_URL = "${API_BASE_URL}/api/v1/rag"
 HEADERS = {"Authorization": "Bearer ${apiToken.value}"}
 
-# 1. Ingest Dokumen
-with open("laporan.pdf", "rb") as f:
-    res = requests.post(f"{API_URL}/ingest", headers=HEADERS, files={"file": f}, data={"auto_ocr": "true"}).json()
-print("Ingested Doc:", res["filename"], "Total Chunks:", res["total_chunks"], "S3:", res["s3_url"])
+# 1. Semantic Search (Mencakup Dokumen & Memori Terkoreksi)
+search_res = requests.post(f"{API_URL}/search", headers=HEADERS, json={
+    "query": "Tekanan angin Komatsu WA500",
+    "top_k": 4
+}).json()
+print("Hasil Chunks:", search_res["results"])
 
 # 2. Chatbot Query
 chat_res = requests.post(f"{API_URL}/chat", headers=HEADERS, json={
-    "query": "Apa kesimpulan utama dokumen ini?",
+    "query": "Berapa tekanan ban loader di Pit A?",
     "top_k": 4
 }).json()
 
 print("Jawaban:", chat_res["data"]["answer"])
-print("Sumber:", [s["filename"] for s in chat_res["data"]["sources"]])`
+print("Sumber Terkait:", chat_res["data"]["sources"])
+
+# 3. Tambahkan SOP / Koreksi Langsung ke Memori
+mem_res = requests.post(f"{API_URL}/memory/learn", headers=HEADERS, json={
+    "content": "Ban ukuran 29.5R25 merk Bridgestone digunakan khusus untuk Loader di Pit A.",
+    "subject": "Spesifikasi Ban Pit A",
+    "fact_type": "rule"
+}).json()
+print("Memory Ingested:", mem_res)`
 })
 </script>
 
@@ -1758,8 +1778,9 @@ print("Sumber:", [s["filename"] for s in chat_res["data"]["sources"]])`
                 <div v-if="msg.sources && msg.sources.length > 0" class="sources-box">
                   <div class="sources-title">📎 Sumber Rujukan Dokumen / Database:</div>
                   <div class="sources-tags">
-                    <span v-for="(s, sIdx) in getUniqueSources(msg.sources)" :key="sIdx" class="source-tag">
-                      <span v-if="s.filename.startsWith('db_')">🗄️</span>
+                    <span v-for="(s, sIdx) in getUniqueSources(msg.sources)" :key="sIdx" :class="['source-tag', { 'memory-source': s.source_type === 'memory' }]">
+                      <span v-if="s.source_type === 'memory' || s.filename.includes('🧠')">🧠</span>
+                      <span v-else-if="s.filename.startsWith('db_')">🗄️</span>
                       <span v-else>📄</span>
                       {{ s.filename }} <span v-if="s.heading">({{ s.heading }})</span> - Skor: {{ (s.similarity_score * 100).toFixed(0) }}%
                     </span>
@@ -1836,20 +1857,13 @@ print("Sumber:", [s["filename"] for s in chat_res["data"]["sources"]])`
 
     <!-- Tab 5: Memori & Self-Growth -->
     <div v-else-if="mainTab === 'memory'" class="tab-content">
-      <!-- Auto-save toast notification -->
-      <Transition name="toast-fade">
-        <div v-if="showAutoSaveToast" class="auto-save-toast">
-          {{ isAutoSaveEnabled ? '🟢 Auto-Save Diaktifkan' : '🔴 Auto-Save Dinonaktifkan' }}
-        </div>
-      </Transition>
-
       <div class="memory-container">
         <!-- Header Card -->
         <div class="card memory-header-card">
           <div class="memory-header-info">
             <h2 class="section-title">🧠 Memory History Manager</h2>
             <p class="section-desc">
-              Semua pengetahuan yang dipelajari AI tersimpan di sini — otomatis dari percakapan chat maupun input manual. Pilih dan hapus sesuka Anda.
+              Semua pengetahuan yang dipelajari AI tersimpan di sini — otomatis dari koreksi pengguna maupun input manual. AI memprioritaskan memori ini di atas dokumen.
             </p>
           </div>
           <div class="memory-stats-grid">
@@ -1858,24 +1872,19 @@ print("Sumber:", [s["filename"] for s in chat_res["data"]["sources"]])`
               <span class="mem-stat-lbl">Total Memori</span>
             </div>
             <div class="mem-stat-box">
-              <span class="mem-stat-val auto-val">{{ learnedFacts.filter(f => f.learned_from === 'auto_chat').length }}</span>
-              <span class="mem-stat-lbl">Auto-Chat</span>
-            </div>
-            <div class="mem-stat-box">
               <span class="mem-stat-val corr-val">{{ learnedFacts.filter(f => f.fact_type === 'user_correction').length }}</span>
-              <span class="mem-stat-lbl">Koreksi</span>
+              <span class="mem-stat-lbl">Koreksi (Auto-Save)</span>
             </div>
             <div class="mem-stat-box">
               <span class="mem-stat-val manual-val">{{ learnedFacts.filter(f => f.learned_from === 'direct_input').length }}</span>
               <span class="mem-stat-lbl">Manual</span>
             </div>
-            <!-- Auto-Save Toggle -->
-            <div class="mem-stat-box autosave-toggle-box" @click="toggleAutoSave" :title="isAutoSaveEnabled ? 'Klik untuk nonaktifkan auto-save' : 'Klik untuk aktifkan auto-save'">
-              <span class="autosave-pill" :class="{ active: isAutoSaveEnabled }">
+            <div class="mem-stat-box autosave-info-box" title="Koreksi otomatis dipelajari AI saat Anda memberikan feedback koreksi">
+              <span class="autosave-pill active">
                 <span class="autosave-dot"></span>
-                {{ isAutoSaveEnabled ? 'ON' : 'OFF' }}
+                ACTIVE
               </span>
-              <span class="mem-stat-lbl">Auto-Save Q&A</span>
+              <span class="mem-stat-lbl">Auto-Save Koreksi</span>
             </div>
           </div>
         </div>
@@ -1942,8 +1951,7 @@ print("Sumber:", [s["filename"] for s in chat_res["data"]["sources"]])`
             <!-- Tab Filter -->
             <div class="mem-tab-bar">
               <button :class="['mem-tab-btn', { active: memoryTab === 'all' }]" @click="memoryTab = 'all'; selectedFactIds = new Set()">Semua</button>
-              <button :class="['mem-tab-btn auto', { active: memoryTab === 'auto' }]" @click="memoryTab = 'auto'; selectedFactIds = new Set()">🤖 Auto-Chat</button>
-              <button :class="['mem-tab-btn corr', { active: memoryTab === 'correction' }]" @click="memoryTab = 'correction'; selectedFactIds = new Set()">✏️ Koreksi</button>
+              <button :class="['mem-tab-btn corr', { active: memoryTab === 'correction' }]" @click="memoryTab = 'correction'; selectedFactIds = new Set()">✏️ Koreksi (Auto-Save)</button>
               <button :class="['mem-tab-btn manual', { active: memoryTab === 'manual' }]" @click="memoryTab = 'manual'; selectedFactIds = new Set()">💡 Manual</button>
             </div>
 
@@ -1976,8 +1984,7 @@ print("Sumber:", [s["filename"] for s in chat_res["data"]["sources"]])`
             <!-- Empty -->
             <div v-else-if="filteredMemoryFacts.length === 0" class="empty-memory">
               <div class="empty-mem-icon">🧠</div>
-              <p v-if="memoryTab === 'auto'">Belum ada Q&A yang tersimpan otomatis. Mulai percakapan di tab Chat!</p>
-              <p v-else-if="memoryTab === 'correction'">Belum ada koreksi tersimpan. Gunakan tombol ✏️ Koreksi pada jawaban chat.</p>
+              <p v-if="memoryTab === 'correction'">Belum ada koreksi tersimpan. Gunakan tombol ✏️ Koreksi pada jawaban chat untuk otomatis menyimpan.</p>
               <p v-else-if="memoryTab === 'manual'">Belum ada fakta manual. Gunakan form di samping kiri.</p>
               <p v-else>Belum ada memori yang dipelajari.</p>
             </div>
@@ -1999,15 +2006,15 @@ print("Sumber:", [s["filename"] for s in chat_res["data"]["sources"]])`
                       @change="toggleFactSelection(fact.id)"
                     />
                   </label>
-                  <span :class="['fact-type-badge', fact.learned_from === 'auto_chat' ? 'auto_chat' : fact.fact_type]">
-                    {{ fact.learned_from === 'auto_chat' ? '🤖 Auto-Chat' : fact.fact_type === 'user_correction' ? '✏️ Koreksi' : fact.fact_type === 'rule' ? '⚖️ Aturan' : '💡 Manual' }}
+                  <span :class="['fact-type-badge', fact.fact_type]">
+                    {{ fact.fact_type === 'user_correction' ? '✏️ Koreksi' : fact.fact_type === 'rule' ? '⚖️ Aturan' : '💡 Manual' }}
                   </span>
                   <button class="btn-delete-fact" @click.stop="handleDeleteFact(fact.id)" title="Hapus dari memori">🗑️</button>
                 </div>
                 <h4 class="fact-subject">{{ fact.subject || 'Memori RAG' }}</h4>
                 <p class="fact-content">{{ fact.content.length > 180 ? fact.content.slice(0, 180) + '…' : fact.content }}</p>
                 <div class="fact-meta">
-                  <span>{{ fact.learned_from === 'auto_chat' ? 'Auto dari chat' : fact.learned_from === 'direct_input' ? 'Input manual' : 'Koreksi pengguna' }}</span>
+                  <span>{{ fact.learned_from === 'direct_input' ? 'Input manual' : 'Koreksi pengguna (Auto-Save)' }}</span>
                   <span v-if="fact.created_at">{{ new Date(fact.created_at).toLocaleString('id-ID', { dateStyle: 'short', timeStyle: 'short' }) }}</span>
                 </div>
               </div>

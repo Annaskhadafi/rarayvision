@@ -350,6 +350,29 @@ def _run_daily_chat_cleanup():
 _cleanup_thread = threading.Thread(target=_run_daily_chat_cleanup, daemon=True, name="DailyRAGCleanup")
 _cleanup_thread.start()
 print("[AutoCleanup] Daily chat history cleanup scheduler started (retention: 7 days).")
+
+# ── RAG Cache Pre-Warming Thread ─────────────────────────────────────────────
+def _prewarm_rag_cache():
+    import time
+    time.sleep(2) # Give DB engine 2s to complete connection pool setup
+    try:
+        from backend.app.database.database import SessionLocal
+        from backend.app.services.rag_service import RagService, get_fastembed_model
+        # 1. Preload FastEmbed ONNX model in RAM
+        get_fastembed_model()
+        # 2. Preload chunk embeddings & memory facts into RAM
+        db = SessionLocal()
+        try:
+            RagService._get_cached_chunks(db)
+            RagService._get_cached_memory_facts(db)
+            print("[RagWarmup] RAG in-memory chunk cache and FastEmbed engine pre-warmed successfully.")
+        finally:
+            db.close()
+    except Exception as e:
+        print(f"[RagWarmup] Warning: RAG prewarm error: {e}")
+
+_warmup_thread = threading.Thread(target=_prewarm_rag_cache, daemon=True, name="RagWarmup")
+_warmup_thread.start()
 # ─────────────────────────────────────────────────────────────────────────────
 
 # Setup Socket.IO App

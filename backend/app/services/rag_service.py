@@ -3,6 +3,7 @@ import re
 import uuid
 import time
 import logging
+import threading
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 from sqlalchemy.orm import Session
@@ -28,6 +29,34 @@ logger = logging.getLogger(__name__)
 # Lazy singleton for FastEmbed ONNX
 _fastembed_instance = None
 
+# Global HTTP Session with Keep-Alive & Connection Pooling
+_http_session = None
+
+# Global In-Memory Vector & Chunk Cache (Eliminates repeated multi-second DB scans)
+_chunk_cache = None
+_chunk_cache_lock = threading.Lock()
+
+_memory_facts_cache = None
+_memory_facts_cache_lock = threading.Lock()
+
+
+def get_http_session():
+    global _http_session
+    if _http_session is None:
+        import requests
+        from requests.adapters import HTTPAdapter
+        from urllib3.util.retry import Retry
+
+        _http_session = requests.Session()
+        adapter = HTTPAdapter(
+            pool_connections=20,
+            pool_maxsize=40,
+            max_retries=Retry(total=1, backoff_factor=0.1, status_forcelist=[502, 503, 504])
+        )
+        _http_session.mount("https://", adapter)
+        _http_session.mount("http://", adapter)
+    return _http_session
+
 
 def get_fastembed_model():
     global _fastembed_instance
@@ -35,8 +64,9 @@ def get_fastembed_model():
         try:
             from fastembed import TextEmbedding
             # BAAI/bge-small-en-v1.5 is fast (384-d), free, lightweight (~130MB), high MTEB score
-            _fastembed_instance = TextEmbedding("BAAI/bge-small-en-v1.5")
-            logger.info("[RagService] FastEmbed ONNX local embedding engine initialized (384-d).")
+            threads = min(4, os.cpu_count() or 2)
+            _fastembed_instance = TextEmbedding("BAAI/bge-small-en-v1.5", threads=threads)
+            logger.info(f"[RagService] FastEmbed ONNX initialized (384-d, {threads} threads).")
         except Exception as e:
             logger.error(f"[RagService] Failed to load FastEmbed: {e}")
             _fastembed_instance = False
@@ -82,7 +112,6 @@ def expand_bilingual_query(query: str) -> str:
         if w in DOMAIN_SYNONYMS:
             added_terms.extend(DOMAIN_SYNONYMS[w])
     if added_terms:
-        # Keep unique terms
         unique_added = list(dict.fromkeys(added_terms))
         return f"{query} {' '.join(unique_added[:8])}"
     return query
@@ -99,40 +128,51 @@ def tokenize_text(text: str) -> List[str]:
 
 def compute_bm25_scores(query: str, items: List[Dict[str, Any]], k1: float = 1.5, b: float = 0.75) -> List[float]:
     """
-    Computes Okapi BM25 scores for document chunks against a search query.
-    High-performance pure-Python SIMD-friendly lexical matching.
+    High-speed vectorized Okapi BM25 scores calculation without re-tokenizing whole documents.
     """
     import numpy as np
     query_tokens = tokenize_text(query)
     if not query_tokens or not items:
         return [0.0] * len(items)
 
-    doc_token_lists = [tokenize_text(f"{it.get('heading', '')} {it.get('content', '')}") for it in items]
-    doc_lens = [len(tokens) for tokens in doc_token_lists]
-    avgdl = sum(doc_lens) / max(len(doc_lens), 1)
+    N = len(items)
+    df = {q_tok: 0 for q_tok in query_tokens}
+    doc_token_counts = []
+    doc_lens = []
+
+    for it in items:
+        text_lower = f"{it.get('heading', '')} {it.get('content', '')}".lower()
+        words_approx = len(text_lower) // 5 + 1
+        doc_lens.append(words_approx)
+
+        tf_dict = {}
+        for q_tok in query_tokens:
+            if q_tok in text_lower:
+                cnt = text_lower.count(q_tok)
+                if cnt > 0:
+                    tf_dict[q_tok] = cnt
+                    df[q_tok] += 1
+        doc_token_counts.append(tf_dict)
+
+    avgdl = sum(doc_lens) / max(len(doc_lens), 1) if doc_lens else 1.0
     if avgdl == 0:
         avgdl = 1.0
 
-    N = len(items)
-    df = {}
-    for q_tok in query_tokens:
-        df[q_tok] = sum(1 for tokens in doc_token_lists if q_tok in tokens)
+    idf_dict = {
+        q_tok: max(0.0, float(np.log((N - df[q_tok] + 0.5) / (df[q_tok] + 0.5) + 1.0)))
+        for q_tok in query_tokens
+    }
 
     scores = []
-    for idx, tokens in enumerate(doc_token_lists):
+    for idx, tf_dict in enumerate(doc_token_counts):
+        if not tf_dict:
+            scores.append(0.0)
+            continue
         doc_len = doc_lens[idx]
-        tf_dict = {}
-        for t in tokens:
-            tf_dict[t] = tf_dict.get(t, 0) + 1
-
+        denom = k1 * (1.0 - b + b * (doc_len / avgdl))
         score = 0.0
-        for q_tok in query_tokens:
-            n_q = df.get(q_tok, 0)
-            idf = max(0.0, float(np.log((N - n_q + 0.5) / (n_q + 0.5) + 1.0)))
-            tf = tf_dict.get(q_tok, 0)
-            if tf > 0:
-                tf_norm = (tf * (k1 + 1.0)) / (tf + k1 * (1.0 - b + b * (doc_len / avgdl)))
-                score += idf * tf_norm
+        for q_tok, tf in tf_dict.items():
+            score += idf_dict[q_tok] * ((tf * (k1 + 1.0)) / (tf + denom))
         scores.append(float(score))
 
     return scores
@@ -145,8 +185,9 @@ class RagService:
         groq_key = os.getenv("GROQ_API_KEY", "")
         gemini_key = os.getenv("GEMINI_API_KEY", "")
         openrouter_key = os.getenv("OPENROUTER_API_KEY", "")
+        groq_model = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
 
-        active_llm = "Groq LPU (qwen/qwen3.6-27b)" if groq_key else "OpenRouter"
+        active_llm = f"Groq LPU ({groq_model})" if groq_key else ("OpenRouter" if openrouter_key else "Google Gemini")
 
         return {
             "default_provider": "local_fastembed",
@@ -174,10 +215,10 @@ class RagService:
             try:
                 import gc
                 all_embs = []
-                batch_size = 32
+                batch_size = 64
                 for i in range(0, len(texts), batch_size):
                     batch_slice = texts[i:i + batch_size]
-                    gen = model.embed(batch_slice, batch_size=32)
+                    gen = model.embed(batch_slice, batch_size=64)
                     for emb in gen:
                         all_embs.append([float(x) for x in emb])
                     gc.collect()
@@ -191,9 +232,17 @@ class RagService:
 
     @classmethod
     def generate_single_embedding(cls, text: str) -> List[float]:
-        """Generates embedding vector for a single query string."""
-        results = cls.generate_embeddings([text])
-        return results[0] if results else [0.0] * 384
+        """Generates embedding vector for a single query string with minimal latency."""
+        if not text:
+            return [0.0] * 384
+        model = get_fastembed_model()
+        if model:
+            try:
+                emb_gen = model.embed([text], batch_size=1)
+                return [float(x) for x in next(emb_gen)]
+            except Exception as e:
+                logger.error(f"[RagService] generate_single_embedding error: {e}")
+        return [0.0] * 384
 
     @staticmethod
     def split_markdown_into_chunks(
@@ -364,6 +413,8 @@ class RagService:
         db.commit()
         db.refresh(doc_record)
 
+        cls._invalidate_chunk_cache()
+
         elapsed_ms = round((time.perf_counter() - start_time) * 1000, 2)
 
         return {
@@ -381,6 +432,131 @@ class RagService:
         }
 
     @classmethod
+    def _invalidate_chunk_cache(cls):
+        """Invalidates in-memory chunk cache when documents change."""
+        global _chunk_cache
+        with _chunk_cache_lock:
+            _chunk_cache = None
+        logger.info("[RagService] In-memory chunk cache invalidated.")
+
+    @classmethod
+    def _invalidate_memory_facts_cache(cls):
+        """Invalidates in-memory memory facts cache when rules/corrections change."""
+        global _memory_facts_cache
+        with _memory_facts_cache_lock:
+            _memory_facts_cache = None
+        logger.info("[RagService] In-memory memory facts cache invalidated.")
+
+    @classmethod
+    def _get_cached_chunks(cls, db: Session) -> Dict[str, Any]:
+        """Loads and caches all document chunks in RAM for sub-millisecond similarity search."""
+        global _chunk_cache
+        if _chunk_cache is not None:
+            return _chunk_cache
+
+        with _chunk_cache_lock:
+            if _chunk_cache is not None:
+                return _chunk_cache
+
+            import numpy as np
+            q = db.query(
+                RagDocumentChunk.id, RagDocumentChunk.document_id, RagDocumentChunk.chunk_index,
+                RagDocumentChunk.heading, RagDocumentChunk.content, RagDocumentChunk.embedding,
+                RagDocument.filename, RagDocument.s3_url, RagDocument.format
+            ).join(RagDocument, RagDocumentChunk.document_id == RagDocument.id)
+            rows = q.all()
+
+            items = []
+            emb_list = []
+            for r in rows:
+                items.append({
+                    "chunk_id": r.id,
+                    "document_id": r.document_id,
+                    "filename": r.filename,
+                    "format": r.format,
+                    "s3_url": r.s3_url,
+                    "chunk_index": r.chunk_index,
+                    "heading": r.heading or "",
+                    "content": r.content or "",
+                    "source_type": "document",
+                    "fact_type": None,
+                    "is_memory": False
+                })
+                emb = r.embedding
+                emb_list.append(emb if emb and len(emb) == 384 else [0.0] * 384)
+
+            if items:
+                emb_matrix = np.array(emb_list, dtype=np.float32)
+                row_norms = np.linalg.norm(emb_matrix, axis=1)
+                row_norms[row_norms == 0] = 1e-9
+            else:
+                emb_matrix = np.empty((0, 384), dtype=np.float32)
+                row_norms = np.empty((0,), dtype=np.float32)
+
+            _chunk_cache = {
+                "items": items,
+                "matrix": emb_matrix,
+                "norms": row_norms
+            }
+            logger.info(f"[RagService] In-memory chunk cache built: {len(items)} chunks.")
+            return _chunk_cache
+
+    @classmethod
+    def _get_cached_memory_facts(cls, db: Session) -> Dict[str, Any]:
+        """Loads and caches active memory facts in RAM for instant lookup."""
+        global _memory_facts_cache
+        if _memory_facts_cache is not None:
+            return _memory_facts_cache
+
+        with _memory_facts_cache_lock:
+            if _memory_facts_cache is not None:
+                return _memory_facts_cache
+
+            import numpy as np
+            facts = db.query(RagMemoryFact).filter(
+                RagMemoryFact.is_active == True,
+                RagMemoryFact.learned_from.in_(["user_feedback", "direct_input"])
+            ).order_by(RagMemoryFact.created_at.desc()).limit(150).all()
+
+            fact_items = []
+            emb_list = []
+            raw_facts = []
+            for f in facts:
+                type_label = "Koreksi" if f.fact_type == "user_correction" else ("Aturan / SOP" if f.fact_type == "rule" else "Memori Pengetahuan")
+                fact_items.append({
+                    "chunk_id": f.id,
+                    "document_id": "memory",
+                    "filename": f"🧠 {type_label}",
+                    "format": "memory",
+                    "s3_url": None,
+                    "chunk_index": 0,
+                    "heading": f.subject or type_label,
+                    "content": f.content or "",
+                    "source_type": "memory",
+                    "fact_type": f.fact_type,
+                    "is_memory": True
+                })
+                raw_facts.append(f)
+                emb = f.embedding
+                emb_list.append(emb if emb and len(emb) == 384 else [0.0] * 384)
+
+            if fact_items:
+                emb_matrix = np.array(emb_list, dtype=np.float32)
+                row_norms = np.linalg.norm(emb_matrix, axis=1)
+                row_norms[row_norms == 0] = 1e-9
+            else:
+                emb_matrix = np.empty((0, 384), dtype=np.float32)
+                row_norms = np.empty((0,), dtype=np.float32)
+
+            _memory_facts_cache = {
+                "items": fact_items,
+                "matrix": emb_matrix,
+                "norms": row_norms,
+                "raw_facts": raw_facts
+            }
+            return _memory_facts_cache
+
+    @classmethod
     def search_similar_chunks(
         cls,
         db: Session,
@@ -389,130 +565,104 @@ class RagService:
         document_id: Optional[str] = None
     ) -> List[Dict[str, Any]]:
         """
-        Executes high-accuracy Hybrid Search (Dense Vector Cosine Similarity + BM25 Sparse Lexical Scoring with RRF)
-        with automatic Cross-Lingual & Domain Technical Synonym Query Expansion.
+        Pure Dense Vector Cosine Similarity Search (100% vector-based semantic matching, BM25 disabled).
         """
-        expanded_query = expand_bilingual_query(query)
-        query_vec = cls.generate_single_embedding(expanded_query)
-        return cls._hybrid_similarity_search(db, expanded_query, query_vec, top_k, document_id, original_query=query)
+        query_vec = cls.generate_single_embedding(query)
+        return cls._similarity_search(db, query, query_vec, top_k, document_id)
 
     @classmethod
-    def _hybrid_similarity_search(
+    def _similarity_search(
         cls,
         db: Session,
         query: str,
         query_vec: List[float],
         top_k: int,
-        document_id: Optional[str] = None,
-        original_query: Optional[str] = None
+        document_id: Optional[str] = None
     ) -> List[Dict[str, Any]]:
         """
-        Hybrid retrieval combining Dense Vector Cosine Similarity and BM25 Sparse Lexical Scoring
-        using Reciprocal Rank Fusion (RRF).
+        Pure In-Memory Vector Cosine Similarity Search without BM25 or keyword pollution.
         """
         import numpy as np
 
-        q = db.query(RagDocumentChunk, RagDocument.filename, RagDocument.s3_url, RagDocument.format)\
-              .join(RagDocument, RagDocumentChunk.document_id == RagDocument.id)
-        if document_id:
-            q = q.filter(RagDocumentChunk.document_id == document_id)
+        cached_doc_data = cls._get_cached_chunks(db)
+        cached_mem_data = cls._get_cached_memory_facts(db)
 
-        rows = q.all()
-        if not rows:
+        doc_items = cached_doc_data["items"]
+        doc_matrix = cached_doc_data["matrix"]
+        doc_norms = cached_doc_data["norms"]
+
+        mem_items = cached_mem_data["items"]
+        mem_matrix = cached_mem_data["matrix"]
+        mem_norms = cached_mem_data["norms"]
+
+        # Strict document filtering
+        if document_id and document_id != "memory":
+            target = document_id.lower().strip()
+            indices = [
+                i for i, it in enumerate(doc_items)
+                if it["document_id"] == document_id or it["filename"].lower() == target or target in it["filename"].lower()
+            ]
+            items = [doc_items[i] for i in indices]
+            if indices:
+                sub_matrix = doc_matrix[indices]
+                sub_norms = doc_norms[indices]
+            else:
+                sub_matrix = np.empty((0, 384), dtype=np.float32)
+                sub_norms = np.empty((0,), dtype=np.float32)
+        elif document_id == "memory":
+            items = list(mem_items)
+            sub_matrix = mem_matrix
+            sub_norms = mem_norms
+        else:
+            items = list(doc_items) + list(mem_items)
+            if len(doc_items) > 0 and len(mem_items) > 0:
+                sub_matrix = np.vstack([doc_matrix, mem_matrix])
+                sub_norms = np.concatenate([doc_norms, mem_norms])
+            elif len(doc_items) > 0:
+                sub_matrix = doc_matrix
+                sub_norms = doc_norms
+            else:
+                sub_matrix = mem_matrix
+                sub_norms = mem_norms
+
+        if not items:
             return []
 
-        q_arr = np.array(query_vec, dtype=float)
-        norm_q = np.linalg.norm(q_arr)
+        q_arr = np.array(query_vec, dtype=np.float32)
+        norm_q = float(np.linalg.norm(q_arr))
         if norm_q == 0:
             norm_q = 1e-9
 
-        # 1. Prepare raw items and calculate Dense Vector Cosine Similarity
-        items = []
-        vec_scores = []
-        for chunk, fname, s3_link, fmt in rows:
-            if chunk.embedding is not None:
-                c_arr = np.array(chunk.embedding, dtype=float)
-                norm_c = np.linalg.norm(c_arr)
-                sim = float(np.dot(q_arr, c_arr) / (norm_q * norm_c)) if norm_c > 0 else 0.0
-            else:
-                sim = 0.0
+        # Vectorized SIMD BLAS Cosine Similarity calculation
+        q_norm_arr = q_arr / norm_q
+        sim_array = (sub_matrix @ q_norm_arr) / sub_norms
 
-            item = {
-                "chunk_id": chunk.id,
-                "document_id": chunk.document_id,
-                "filename": fname,
-                "format": fmt,
-                "s3_url": s3_link,
-                "chunk_index": chunk.chunk_index,
-                "heading": chunk.heading or "",
-                "content": chunk.content or "",
-                "vector_sim": max(0.0, sim)
-            }
-            items.append(item)
-            vec_scores.append(sim)
-
-        # 2. Calculate BM25 Sparse Lexical Scores
-        bm25_scores = compute_bm25_scores(query, items)
-
-        # 3. Rank by Vector Similarity
-        vec_ranked_indices = sorted(range(len(items)), key=lambda i: vec_scores[i], reverse=True)
-        vec_rank_map = {idx: rank + 1 for rank, idx in enumerate(vec_ranked_indices)}
-
-        # 4. Rank by BM25 Score
-        bm25_ranked_indices = sorted(range(len(items)), key=lambda i: bm25_scores[i], reverse=True)
-        bm25_rank_map = {idx: rank + 1 for rank, idx in enumerate(bm25_ranked_indices)}
-
-        # 5. Reciprocal Rank Fusion (RRF with k=60 constant) + Exact Keyword Boost
-        q_lower = query.lower().strip()
-        orig_lower = (original_query or query).lower().strip()
         scored = []
-        for idx, item in enumerate(items):
-            r_vec = vec_rank_map[idx]
-            r_bm25 = bm25_rank_map[idx]
-            rrf_score = (1.0 / (60.0 + r_vec)) + (1.0 / (60.0 + r_bm25))
+        for idx, it in enumerate(items):
+            sim_val = max(0.0, float(sim_array[idx]))
+            
+            # Prioritize memory/correction items slightly
+            if it.get("is_memory"):
+                sim_val = min(1.0, sim_val + 0.05)
 
-            # Exact phrase match boost
-            content_lower = item["content"].lower()
-            heading_lower = item["heading"].lower()
-            if orig_lower in heading_lower or any(w in heading_lower for w in orig_lower.split() if len(w) > 3):
-                rrf_score += 0.015
-            if orig_lower in content_lower:
-                rrf_score += 0.010
-
-            # Normalized score for UI presentation [0.0 - 1.0]
-            bm25_val = bm25_scores[idx]
-            norm_sim = min(1.0, (item["vector_sim"] * 0.65) + (min(1.0, bm25_val / 5.0) * 0.35))
-
-            # Relevance Threshold Filter:
-            # Drop chunks that are background noise (e.g. general chat, poetry, greeting, unrelated topics)
-            # A chunk is considered relevant ONLY IF:
-            # 1. Strong dense vector similarity (vector_sim >= 0.50), OR
-            # 2. Good hybrid score with some lexical/semantic match (norm_sim >= 0.46), OR
-            # 3. Definite keyword match (bm25 > 0.8 and vector_sim >= 0.35)
-            is_relevant = (
-                item["vector_sim"] >= 0.50 or
-                norm_sim >= 0.46 or
-                (bm25_val >= 0.8 and item["vector_sim"] >= 0.35) or
-                (orig_lower in content_lower and len(orig_lower) >= 4)
-            )
-
-            if is_relevant:
+            if sim_val >= 0.30 or it.get("is_memory"):
                 scored.append({
-                    "chunk_id": item["chunk_id"],
-                    "document_id": item["document_id"],
-                    "filename": item["filename"],
-                    "format": item["format"],
-                    "s3_url": item["s3_url"],
-                    "chunk_index": item["chunk_index"],
-                    "heading": item["heading"],
-                    "content": item["content"],
-                    "similarity_score": round(norm_sim, 4),
-                    "distance": round(1.0 - norm_sim, 4),
-                    "rrf_score": rrf_score
+                    "chunk_id": it["chunk_id"],
+                    "document_id": it["document_id"],
+                    "filename": it["filename"],
+                    "format": it["format"],
+                    "s3_url": it["s3_url"],
+                    "chunk_index": it["chunk_index"],
+                    "heading": it["heading"],
+                    "content": it["content"],
+                    "similarity_score": round(sim_val, 4),
+                    "distance": round(1.0 - sim_val, 4),
+                    "source_type": it.get("source_type", "document"),
+                    "fact_type": it.get("fact_type")
                 })
 
-        # 6. Sort by RRF score descending
-        scored.sort(key=lambda x: x["rrf_score"], reverse=True)
+        # Rank strictly by pure Vector Cosine Similarity
+        scored.sort(key=lambda x: x["similarity_score"], reverse=True)
         return scored[:top_k]
 
     @classmethod
@@ -524,36 +674,32 @@ class RagService:
         user_id: Optional[int] = None
     ) -> List[Dict[str, Any]]:
         """
-        Retrieves top learned facts/rules/corrections using vector similarity + keyword matching.
+        Sub-millisecond retrieval of top learned facts/rules/corrections from in-memory cache.
         """
         try:
-            # Only retrieve corrections & manual facts for answering — auto_chat accumulates
-            # too much noise and slows down retrieval as volume grows.
-            facts = db.query(RagMemoryFact).filter(
-                RagMemoryFact.is_active == True,
-                RagMemoryFact.learned_from.in_(["user_feedback", "direct_input"])
-            ).order_by(RagMemoryFact.created_at.desc()).limit(150).all()
-            if not facts:
+            cached_mem = cls._get_cached_memory_facts(db)
+            raw_facts = cached_mem["raw_facts"]
+            if not raw_facts:
                 return []
 
             query_vec = cls.generate_single_embedding(query)
             import numpy as np
 
             q_vec = np.array(query_vec, dtype=np.float32)
-            q_norm = np.linalg.norm(q_vec)
+            q_norm = float(np.linalg.norm(q_vec))
+            if q_norm == 0:
+                q_norm = 1e-9
+
+            # In-memory matrix multiplication
+            f_mat = cached_mem["matrix"]
+            f_norms = cached_mem["norms"]
+            sim_arr = (f_mat @ (q_vec / q_norm)) / f_norms
 
             scored = []
             q_words = set(re.findall(r'\w+', query.lower()))
 
-            for f in facts:
-                sim = 0.0
-                if f.embedding and q_norm > 0:
-                    f_vec = np.array(f.embedding, dtype=np.float32)
-                    f_norm = np.linalg.norm(f_vec)
-                    if f_norm > 0:
-                        sim = float(np.dot(q_vec, f_vec) / (q_norm * f_norm))
-
-                # Keyword overlap boost
+            for idx, f in enumerate(raw_facts):
+                sim = max(0.0, float(sim_arr[idx]))
                 f_words = set(re.findall(r'\w+', (f.content or '').lower()))
                 overlap = len(q_words & f_words)
                 combined_score = sim + (0.1 * min(overlap, 3))
@@ -614,6 +760,8 @@ class RagService:
         db.add(new_fact)
         db.commit()
         db.refresh(new_fact)
+
+        cls._invalidate_memory_facts_cache()
 
         logger.info(f"[RagService] Self-Growth: New fact learned [{fact_id}] ({fact_type}): {new_fact.subject}")
         return {
@@ -822,6 +970,7 @@ class RagService:
         if fact:
             db.delete(fact)
             db.commit()
+            cls._invalidate_memory_facts_cache()
             return True
         return False
 
@@ -834,6 +983,7 @@ class RagService:
             RagMemoryFact.id.in_(fact_ids)
         ).delete(synchronize_session=False)
         db.commit()
+        cls._invalidate_memory_facts_cache()
         logger.info(f"[RagService] Bulk deleted {deleted} memory facts.")
         return deleted
 
@@ -962,7 +1112,10 @@ class RagService:
                 "filename": c["filename"],
                 "heading": c.get("heading"),
                 "s3_url": c.get("s3_url"),
-                "similarity_score": c["similarity_score"]
+                "similarity_score": c["similarity_score"],
+                "source_type": c.get("source_type", "document"),
+                "fact_type": c.get("fact_type"),
+                "content_preview": c.get("content", "")[:250]
             })
 
         combined_context = "\n\n---\n\n".join(context_parts) if context_parts else "Tidak ada dokumen yang relevan ditemukan di basis pengetahuan."
@@ -1038,44 +1191,7 @@ Pertanyaan Pengguna:
         RedisService.save_chat_turn(session_id, "user", query)
         RedisService.save_chat_turn(session_id, "assistant", answer, sources=sources)
 
-        # 10. Auto-save Q&A pair — runs in BACKGROUND thread to not block response
-        is_not_found_answer = any(phrase in (answer or "").lower() for phrase in [
-            "tidak ditemukan", "tidak ada informasi", "tidak tersedia", "maaf, informasi"
-        ])
-        if answer and not is_not_found_answer:
-            import concurrent.futures
-            try:
-                from app.database.database import SessionLocal as _SessionLocal
-            except ImportError:
-                from backend.app.database.database import SessionLocal as _SessionLocal
-            _auto_query = query
-            _auto_answer = answer[:800]
-            _auto_session = session_id
-            _auto_msg_id = assistant_msg.id
-            _auto_user_id = user_id
-
-            def _background_auto_save():
-                try:
-                    bg_db = _SessionLocal()
-                    try:
-                        RagService.learn_fact(
-                            db=bg_db,
-                            content=f"Pertanyaan: {_auto_query}\nJawaban: {_auto_answer}",
-                            subject=f"Auto: {_auto_query[:70]}",
-                            fact_type="auto_chat",
-                            user_id=_auto_user_id,
-                            source_session_id=_auto_session,
-                            source_message_id=_auto_msg_id,
-                            learned_from="auto_chat"
-                        )
-                    finally:
-                        bg_db.close()
-                except Exception as bg_err:
-                    logger.warning(f"[RagService] Background auto-save failed: {bg_err}")
-
-            executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-            executor.submit(_background_auto_save)
-            executor.shutdown(wait=False)
+        # Chat history is persisted in RagChatMessage/Redis; long-term memory is only saved on user feedback/correction
 
         result = {
             "query": query,
@@ -1140,60 +1256,54 @@ Pertanyaan Pengguna:
     @staticmethod
     def _call_llm_messages(messages: List[Dict[str, str]]) -> str:
         """
-        Invokes LLM with full conversation messages list.
+        Invokes LLM with full conversation messages list with persistent connection pooling.
         Priority:
-        1. Groq (Ultra-fast LPU)
-        2. OpenRouter
-        3. Google Gemini API
+        1. Groq (Ultra-fast LPU: ~300-600ms latency)
+        2. Google Gemini API (Gemini 2.0 Flash: ~800ms)
+        3. OpenRouter Fallback
         """
-        import requests
+        session = get_http_session()
 
+        # 1. Groq (Ultra-Fast LPU Engine)
         groq_key = os.getenv("GROQ_API_KEY", "").strip()
         groq_model = os.getenv("GROQ_MODEL", "qwen/qwen3.6-27b").strip()
 
-        # 1. Groq (Ultra-Fast LPU Engine)
         if groq_key:
             try:
-                logger.info(f"[RagService] Calling Groq with model={groq_model}, msgs={len(messages)}")
                 payload = {
                     "model": groq_model,
                     "messages": messages,
                     "temperature": 0.2,
                     "max_tokens": 2048,
                 }
-                # reasoning_format:hidden only works on specific Groq reasoning models
                 groq_reasoning_models = ["deepseek", "qwq", "r1"]
                 if any(rm in groq_model.lower() for rm in groq_reasoning_models):
                     payload["reasoning_format"] = "hidden"
 
-                resp = requests.post(
+                resp = session.post(
                     "https://api.groq.com/openai/v1/chat/completions",
                     headers={
                         "Authorization": f"Bearer {groq_key}",
                         "Content-Type": "application/json"
                     },
                     json=payload,
-                    timeout=30
+                    timeout=25
                 )
                 if resp.status_code == 200:
                     data = resp.json()
                     content = data["choices"][0]["message"]["content"]
-                    logger.info(f"[RagService] Groq response OK, len={len(content)}")
                     return RagService._clean_llm_response(content)
                 else:
-                    logger.warning(f"[RagService] Groq API error {resp.status_code}: {resp.text[:500]}")
+                    logger.warning(f"[RagService] Groq error {resp.status_code}: {resp.text[:300]}")
             except Exception as e:
-                logger.error(f"[RagService] Groq API call exception: {e}", exc_info=True)
-        else:
-            logger.warning("[RagService] GROQ_API_KEY is empty or not set")
+                logger.error(f"[RagService] Groq call exception: {e}")
 
         # 2. OpenRouter Fallback
         openrouter_key = os.getenv("OPENROUTER_API_KEY", "").strip()
         openrouter_model = os.getenv("OPENROUTER_MODEL", "google/gemma-4-26b-a4b-it:free").strip()
         if openrouter_key:
             try:
-                logger.info(f"[RagService] Calling OpenRouter with model={openrouter_model}")
-                resp = requests.post(
+                resp = session.post(
                     "https://openrouter.ai/api/v1/chat/completions",
                     headers={
                         "Authorization": f"Bearer {openrouter_key}",
@@ -1204,27 +1314,24 @@ Pertanyaan Pengguna:
                     json={
                         "model": openrouter_model,
                         "messages": messages,
-                        "temperature": 0.3
+                        "temperature": 0.3,
+                        "max_tokens": 2048
                     },
-                    timeout=45
+                    timeout=30
                 )
                 if resp.status_code == 200:
                     data = resp.json()
                     content = data["choices"][0]["message"]["content"]
-                    logger.info(f"[RagService] OpenRouter response OK, len={len(content)}")
                     return RagService._clean_llm_response(content)
                 else:
-                    logger.warning(f"[RagService] OpenRouter error {resp.status_code}: {resp.text[:500]}")
+                    logger.warning(f"[RagService] OpenRouter error {resp.status_code}: {resp.text[:300]}")
             except Exception as e:
-                logger.error(f"[RagService] OpenRouter call exception: {e}", exc_info=True)
-        else:
-            logger.warning("[RagService] OPENROUTER_API_KEY is empty or not set")
+                logger.error(f"[RagService] OpenRouter call exception: {e}")
 
         # 3. Google Gemini Fallback
         gemini_key = os.getenv("GEMINI_API_KEY", "").strip()
         if gemini_key:
             try:
-                logger.info("[RagService] Calling Google Gemini")
                 from google import genai
                 client = genai.Client(api_key=gemini_key)
                 gemini_text = "\n\n".join([f"[{m['role'].upper()}]: {m['content']}" for m in messages])
@@ -1235,9 +1342,7 @@ Pertanyaan Pengguna:
                 if response and response.text:
                     return RagService._clean_llm_response(response.text)
             except Exception as e:
-                logger.error(f"[RagService] Gemini call exception: {e}", exc_info=True)
-        else:
-            logger.warning("[RagService] GEMINI_API_KEY is empty or not set")
+                logger.error(f"[RagService] Gemini call exception: {e}")
 
         logger.error("[RagService] All LLM providers failed. Returning fallback message.")
         return (

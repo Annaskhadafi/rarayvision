@@ -453,6 +453,7 @@ def delete_document(
 
     db.delete(doc)
     db.commit()
+    RagService._invalidate_chunk_cache()
 
     return {
         "status": "success",
