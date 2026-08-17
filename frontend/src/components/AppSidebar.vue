@@ -97,6 +97,17 @@ const menuGroups = [
     ]
   },
   {
+    key: 'analytics',
+    title: 'Data & Forecasting AI',
+    items: [
+      {
+        name: 'AutoML Forecaster',
+        path: '/automl',
+        icon: `<svg viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"></path><path d="m19 9-5 5-4-4-3 3"></path></svg>`
+      }
+    ]
+  },
+  {
     key: 'rag',
     title: 'Knowledge & RAG',
     items: [

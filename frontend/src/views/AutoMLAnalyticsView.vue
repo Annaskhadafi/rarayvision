@@ -1,0 +1,1458 @@
+<script setup>
+import { ref, computed, onMounted } from 'vue'
+import { automlService } from '../services/automlService'
+import { API_BASE_URL } from '../utils'
+
+const presets = ref([])
+const selectedPresetId = ref('sales_revenue')
+const customJsonInput = ref('')
+const selectedFile = ref(null)
+const datasetName = ref('Data Penjualan Harian')
+const forecastHorizon = ref(14)
+const targetColumn = ref('')
+const dateColumn = ref('')
+
+const isLoading = ref(false)
+const errorMessage = ref('')
+const successMessage = ref('')
+const resultData = ref(null)
+const activeTab = ref('analytics') // 'analytics', 'table', 'api_integration', 'raw_json'
+
+// Integration snippet state
+const copiedSnippet = ref(false)
+const selectedSnippetLang = ref('curl') // 'curl', 'python', 'javascript', 'iframe'
+
+// Interactive Chart Tooltip State
+const hoveredPoint = ref(null)
+const chartSvgRef = ref(null)
+
+onMounted(async () => {
+  try {
+    const res = await automlService.getPresets()
+    presets.value = res.presets || []
+    if (presets.value.length > 0) {
+      loadPreset(presets.value[0])
+    }
+  } catch (err) {
+    console.error('Failed to load presets:', err)
+  }
+})
+
+const loadPreset = (preset) => {
+  selectedPresetId.value = preset.id
+  datasetName.value = preset.title
+  forecastHorizon.value = preset.horizon || 14
+  customJsonInput.value = JSON.stringify(preset.data, null, 2)
+  selectedFile.value = null
+  targetColumn.value = ''
+  dateColumn.value = ''
+  runAnalysis()
+}
+
+const onFileSelect = (event) => {
+  const file = event.target.files?.[0]
+  if (file) {
+    selectedFile.value = file
+    datasetName.value = file.name.replace('.csv', '').replace(/_/g, ' ')
+    selectedPresetId.value = 'custom_csv'
+    errorMessage.value = ''
+  }
+}
+
+const runAnalysis = async () => {
+  isLoading.value = true
+  errorMessage.value = ''
+  successMessage.value = ''
+
+  try {
+    let res
+    if (selectedFile.value) {
+      const formData = new FormData()
+      formData.append('file', selectedFile.value)
+      formData.append('dataset_name', datasetName.value)
+      formData.append('forecast_horizon', forecastHorizon.value)
+      if (targetColumn.value) formData.append('target_column', targetColumn.value)
+      if (dateColumn.value) formData.append('date_column', dateColumn.value)
+      res = await automlService.uploadCsv(formData)
+    } else {
+      let parsedData = []
+      try {
+        parsedData = JSON.parse(customJsonInput.value)
+      } catch (e) {
+        throw new Error('Format JSON data tidak valid. Pastikan berupa array of objects [ { ... } ].')
+      }
+      
+      const payload = {
+        dataset_name: datasetName.value,
+        data: parsedData,
+        forecast_horizon: Number(forecastHorizon.value),
+        target_column: targetColumn.value || null,
+        date_column: dateColumn.value || null
+      }
+      res = await automlService.analyzeData(payload)
+    }
+
+    resultData.value = res
+    successMessage.value = `Analisis Machine Learning berhasil diselesaikan dalam ${res.latency_ms} ms.`
+  } catch (err) {
+    errorMessage.value = err.message || 'Gagal menjalankan pemrosesan AutoML.'
+  } finally {
+    isLoading.value = false
+  }
+}
+
+// ── SVG Chart Computed Geometry ──────────────────────────────────────────
+const chartData = computed(() => {
+  if (!resultData.value || !resultData.value.table_data) return null
+  const table = resultData.value.table_data
+
+  // Find min and max for scaling
+  const allValues = []
+  table.forEach(r => {
+    if (r.actual_value !== null && r.actual_value !== undefined) allValues.push(r.actual_value)
+    if (r.predicted_value !== null && r.predicted_value !== undefined) allValues.push(r.predicted_value)
+    if (r.upper_bound !== null && r.upper_bound !== undefined) allValues.push(r.upper_bound)
+    if (r.lower_bound !== null && r.lower_bound !== undefined) allValues.push(r.lower_bound)
+  })
+
+  if (allValues.length === 0) return null
+
+  const rawMin = Math.min(...allValues)
+  const rawMax = Math.max(...allValues)
+  const padding = (rawMax - rawMin) * 0.12 || 10
+  const yMin = Math.max(0, rawMin - padding)
+  const yMax = rawMax + padding
+
+  const width = 850
+  const height = 340
+  const padLeft = 70
+  const padRight = 30
+  const padTop = 25
+  const padBottom = 45
+
+  const chartW = width - padLeft - padRight
+  const chartH = height - padTop - padBottom
+
+  const getX = (index) => padLeft + (index / Math.max(1, table.length - 1)) * chartW
+  const getY = (val) => padTop + chartH - ((val - yMin) / Math.max(1e-5, (yMax - yMin))) * chartH
+
+  // Points arrays
+  const actualPoints = []
+  const forecastPoints = []
+  const upperPoints = []
+  const lowerPoints = []
+  const anomalyMarkers = []
+
+  let lastActualIndex = -1
+  table.forEach((row, idx) => {
+    const x = getX(idx)
+    
+    if (row.actual_value !== null && row.actual_value !== undefined) {
+      const y = getY(row.actual_value)
+      actualPoints.push({ x, y, row, index: idx })
+      lastActualIndex = idx
+
+      if (row.is_anomaly) {
+        anomalyMarkers.push({ x, y, row, index: idx })
+      }
+    }
+  })
+
+  // Start forecast line from the last actual point for continuity
+  if (lastActualIndex >= 0 && actualPoints.length > 0) {
+    const lastActual = actualPoints[actualPoints.length - 1]
+    forecastPoints.push({ x: lastActual.x, y: lastActual.y, row: lastActual.row, index: lastActualIndex })
+    upperPoints.push({ x: lastActual.x, y: lastActual.y, row: lastActual.row, index: lastActualIndex })
+    lowerPoints.push({ x: lastActual.x, y: lastActual.y, row: lastActual.row, index: lastActualIndex })
+  }
+
+  table.forEach((row, idx) => {
+    const x = getX(idx)
+    if (row.is_future_forecast) {
+      if (row.predicted_value !== null) {
+        forecastPoints.push({ x, y: getY(row.predicted_value), row, index: idx })
+      }
+      if (row.upper_bound !== null) {
+        upperPoints.push({ x, y: getY(row.upper_bound), row, index: idx })
+      }
+      if (row.lower_bound !== null) {
+        lowerPoints.push({ x, y: getY(row.lower_bound), row, index: idx })
+      }
+    }
+  })
+
+  // Path Strings
+  const makePath = (pts) => {
+    if (pts.length === 0) return ''
+    return pts.map((p, i) => `${i === 0 ? 'M' : 'L'} ${p.x.toFixed(1)} ${p.y.toFixed(1)}`).join(' ')
+  }
+
+  const actualPath = makePath(actualPoints)
+  const forecastPath = makePath(forecastPoints)
+
+  // Confidence Interval Polygon
+  let confidenceAreaPath = ''
+  if (upperPoints.length > 0 && lowerPoints.length > 0) {
+    const upperStr = upperPoints.map((p, i) => `${i === 0 ? 'M' : 'L'} ${p.x.toFixed(1)} ${p.y.toFixed(1)}`).join(' ')
+    const lowerReversed = [...lowerPoints].reverse()
+    const lowerStr = lowerReversed.map(p => `L ${p.x.toFixed(1)} ${p.y.toFixed(1)}`).join(' ')
+    confidenceAreaPath = `${upperStr} ${lowerStr} Z`
+  }
+
+  // Y-axis ticks
+  const yTicks = []
+  const tickCount = 5
+  for (let i = 0; i <= tickCount; i++) {
+    const val = yMin + (i / tickCount) * (yMax - yMin)
+    const y = getY(val)
+    yTicks.push({ val: Math.round(val), y })
+  }
+
+  // X-axis ticks (sample 6 labels)
+  const xTicks = []
+  const step = Math.max(1, Math.floor(table.length / 6))
+  for (let i = 0; i < table.length; i += step) {
+    xTicks.push({ label: table[i].date, x: getX(i) })
+  }
+  if (table.length > 0 && xTicks[xTicks.length - 1].x < getX(table.length - 1) - 40) {
+    xTicks.push({ label: table[table.length - 1].date, x: getX(table.length - 1) })
+  }
+
+  return {
+    width,
+    height,
+    padLeft,
+    padRight,
+    padTop,
+    padBottom,
+    actualPath,
+    forecastPath,
+    confidenceAreaPath,
+    actualPoints,
+    forecastPoints,
+    anomalyMarkers,
+    yTicks,
+    xTicks,
+    table
+  }
+})
+
+// Search & Pagination in Table Explorer
+const tableSearch = ref('')
+const tablePage = ref(1)
+const pageSize = 10
+
+const filteredTable = computed(() => {
+  if (!resultData.value || !resultData.value.table_data) return []
+  const list = resultData.value.table_data
+  if (!tableSearch.value.trim()) return list
+  const q = tableSearch.value.toLowerCase()
+  return list.filter(r => 
+    String(r.date).toLowerCase().includes(q) ||
+    String(r.actual_value).includes(q) ||
+    String(r.predicted_value).includes(q)
+  )
+})
+
+const paginatedTable = computed(() => {
+  const start = (tablePage.value - 1) * pageSize
+  return filteredTable.value.slice(start, start + pageSize)
+})
+
+const totalTablePages = computed(() => Math.ceil(filteredTable.value.length / pageSize) || 1)
+
+// Snippets
+const getIntegrationSnippet = computed(() => {
+  const apiUrl = `${API_BASE_URL}/api/v1/automl/analyze-and-predict`
+  const widgetUrl = resultData.value ? resultData.value.embed_widget_url : `${API_BASE_URL}/api/v1/automl/widget/job_sample`
+  const iframeCode = resultData.value ? resultData.value.embed_iframe_code : `<iframe src="${widgetUrl}" width="100%" height="600" frameborder="0"></iframe>`
+
+  const sampleJson = {
+    dataset_name: datasetName.value,
+    forecast_horizon: forecastHorizon.value,
+    data: presets.value.find(p => p.id === selectedPresetId.value)?.data?.slice(0, 3) || [
+      { date: "2026-01-01", total_sales: 15000000 },
+      { date: "2026-01-02", total_sales: 18500000 },
+      { date: "2026-01-03", total_sales: 12000000 }
+    ]
+  }
+
+  if (selectedSnippetLang.value === 'curl') {
+    return `curl -X POST "${apiUrl}" \\
+  -H "Content-Type: application/json" \\
+  -d '${JSON.stringify(sampleJson, null, 2)}'`
+  } else if (selectedSnippetLang.value === 'python') {
+    return `import requests
+
+url = "${apiUrl}"
+payload = ${JSON.stringify(sampleJson, null, 4)}
+
+response = requests.post(url, json=payload)
+data = response.json()
+
+print("Status:", data["status"])
+print("Tren:", data["summary_metrics"]["trend_direction"])
+print("AI Insight:", data["ai_interpretation"])
+print("Tabel Prediksi:", len(data["table_data"]), "baris")`
+  } else if (selectedSnippetLang.value === 'javascript') {
+    return `// Call from your Node.js or Frontend
+const response = await fetch("${apiUrl}", {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify(${JSON.stringify(sampleJson, null, 2)})
+});
+
+const data = await response.json();
+console.log("AI Projections:", data.table_data);
+console.log("Chart Payload:", data.chart_payload);`
+  } else if (selectedSnippetLang.value === 'iframe') {
+    return `<!-- Pasang di Website / Portal Klien Anda -->
+${iframeCode}`
+  }
+  return ''
+})
+
+const copySnippet = () => {
+  navigator.clipboard.writeText(getIntegrationSnippet.value)
+  copiedSnippet.value = true
+  setTimeout(() => { copiedSnippet.value = false }, 2000)
+}
+
+const openWidgetTab = () => {
+  if (resultData.value && resultData.value.embed_widget_url) {
+    window.open(resultData.value.embed_widget_url, '_blank')
+  }
+}
+
+const downloadCsv = () => {
+  if (!resultData.value || !resultData.value.table_data) return
+  const headers = ['Date', 'Actual_Value', 'Predicted_Value', 'Lower_95', 'Upper_95', 'Is_Anomaly', 'Is_Forecast']
+  const rows = resultData.value.table_data.map(r => [
+    r.date,
+    r.actual_value !== null ? r.actual_value : '',
+    r.predicted_value !== null ? r.predicted_value : '',
+    r.lower_bound !== null ? r.lower_bound : '',
+    r.upper_bound !== null ? r.upper_bound : '',
+    r.is_anomaly ? 'TRUE' : 'FALSE',
+    r.is_future_forecast ? 'TRUE' : 'FALSE'
+  ])
+  const csvContent = [headers.join(','), ...rows.map(e => e.join(','))].join('\n')
+  const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' })
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.setAttribute('href', url)
+  link.setAttribute('download', `${datasetName.value.replace(/\s+/g, '_')}_forecast.csv`)
+  link.click()
+}
+</script>
+
+<template>
+  <div class="automl-container">
+    <!-- Header -->
+    <div class="header-section">
+      <div class="title-group">
+        <div class="badge-tag">
+          <span class="pulse-dot"></span>
+          AutoML & AI Time-Series Forecaster
+        </div>
+        <h1 class="page-title">Predictive Data Analytics & AI Interpretation</h1>
+        <p class="page-desc">
+          Otomatis mendeteksi pola data tabular, memproyeksikan tren masa depan (*Forecasting*), 
+          mengidentifikasi anomali, dan menginterpretasikan wawasan strategis menggunakan kolaborasi AI.
+        </p>
+      </div>
+
+      <div class="header-actions">
+        <button v-if="resultData?.embed_widget_url" class="btn-secondary" @click="openWidgetTab">
+          <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path><polyline points="15 3 21 3 21 9"></polyline><line x1="10" y1="14" x2="21" y2="3"></line></svg>
+          Buka Embed Widget
+        </button>
+        <button class="btn-primary" :disabled="isLoading" @click="runAnalysis">
+          <svg v-if="isLoading" class="animate-spin" viewBox="0 0 24 24" width="16" height="16" fill="none"><circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" class="opacity-25"></circle><path fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" class="opacity-75"></path></svg>
+          <svg v-else viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
+          {{ isLoading ? 'Memproses ML & AI...' : 'Analisis & Prediksi' }}
+        </button>
+      </div>
+    </div>
+
+    <!-- Feedback Alerts -->
+    <div v-if="errorMessage" class="alert alert-error">
+      <svg viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" stroke-width="2" fill="none"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="8" x2="12" y2="12"></line><line x1="12" y1="16" x2="12.01" y2="16"></line></svg>
+      <span>{{ errorMessage }}</span>
+    </div>
+    <div v-if="successMessage" class="alert alert-success">
+      <svg viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" stroke-width="2" fill="none"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path><polyline points="22 4 12 14.01 9 11.01"></polyline></svg>
+      <span>{{ successMessage }}</span>
+    </div>
+
+    <!-- Presets & Ingestion Control Bar -->
+    <div class="control-panel">
+      <div class="control-grid">
+        <!-- Preset Selector -->
+        <div class="control-item">
+          <label class="control-label">Pilih Dataset Contoh (Preset):</label>
+          <div class="preset-pills">
+            <button 
+              v-for="p in presets" 
+              :key="p.id" 
+              class="preset-btn" 
+              :class="{ active: selectedPresetId === p.id }"
+              @click="loadPreset(p)"
+            >
+              {{ p.title }}
+            </button>
+            <label class="upload-chip" :class="{ active: selectedPresetId === 'custom_csv' }">
+              <svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="17 8 12 3 7 8"></polyline><line x1="12" y1="3" x2="12" y2="15"></line></svg>
+              {{ selectedFile ? selectedFile.name : 'Upload CSV Sendiri' }}
+              <input type="file" accept=".csv" class="hidden" @change="onFileSelect">
+            </label>
+          </div>
+        </div>
+
+        <!-- Parameters Bar -->
+        <div class="control-row">
+          <div class="param-box">
+            <label class="param-label">Horizon Prediksi (Hari ke Depan):</label>
+            <div class="range-wrapper">
+              <input type="range" min="7" max="45" step="1" v-model="forecastHorizon" class="range-slider">
+              <span class="range-val">{{ forecastHorizon }} Hari</span>
+            </div>
+          </div>
+
+          <div class="param-box">
+            <label class="param-label">Target Kolom (Auto/Manual):</label>
+            <input type="text" v-model="targetColumn" placeholder="Auto-detect (e.g. total_sales)" class="param-input">
+          </div>
+
+          <div class="param-box">
+            <label class="param-label">Kolom Tanggal (Auto/Manual):</label>
+            <input type="text" v-model="dateColumn" placeholder="Auto-detect (e.g. date)" class="param-input">
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Main Analytics Content -->
+    <div v-if="resultData" class="analytics-content">
+      <!-- Auto Detection Status Banner -->
+      <div class="autodetect-banner">
+        <div class="autodetect-info">
+          <span class="badge-tech">
+            <svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon></svg>
+            AutoML Engine Profiling
+          </span>
+          <div class="autodetect-title">{{ resultData.auto_detection.task_label }}</div>
+          <div class="autodetect-meta">
+            Target: <b>{{ resultData.dataset_info.target_column }}</b> • 
+            Waktu: <b>{{ resultData.dataset_info.date_column || 'Otomatis' }}</b> • 
+            Ukuran Data: <b>{{ resultData.dataset_info.sample_size }} Baris</b> •
+            Horizon: <b>{{ resultData.dataset_info.forecast_horizon }} Periode</b>
+          </div>
+        </div>
+        <div class="banner-right">
+          <div class="latency-tag">⚡ Latency: {{ resultData.latency_ms }}ms</div>
+        </div>
+      </div>
+
+      <!-- Key Metric Cards -->
+      <div class="metrics-grid">
+        <div class="metric-card">
+          <div class="metric-header">
+            <span class="m-label">Arah Tren Proyeksi</span>
+            <svg viewBox="0 0 24 24" width="18" height="18" stroke="#10b981" stroke-width="2" fill="none"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"></polyline><polyline points="17 6 23 6 23 12"></polyline></svg>
+          </div>
+          <div class="m-value trend-green">{{ resultData.summary_metrics.trend_direction }}</div>
+          <div class="m-sub">Proyeksi pertumbuhan: <b>{{ resultData.summary_metrics.projected_growth_pct }}%</b></div>
+        </div>
+
+        <div class="metric-card">
+          <div class="metric-header">
+            <span class="m-label">Rata-Rata Historis</span>
+            <svg viewBox="0 0 24 24" width="18" height="18" stroke="#3b82f6" stroke-width="2" fill="none"><line x1="18" y1="20" x2="18" y2="10"></line><line x1="12" y1="20" x2="12" y2="4"></line><line x1="6" y1="20" x2="6" y2="14"></line></svg>
+          </div>
+          <div class="m-value">{{ Number(resultData.summary_metrics.historical_mean).toLocaleString('id-ID') }}</div>
+          <div class="m-sub">Baseline performa riil</div>
+        </div>
+
+        <div class="metric-card">
+          <div class="metric-header">
+            <span class="m-label">Puncak Estimasi Masa Depan</span>
+            <svg viewBox="0 0 24 24" width="18" height="18" stroke="#8b5cf6" stroke-width="2" fill="none"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"></polygon></svg>
+          </div>
+          <div class="m-value purple">{{ Number(resultData.summary_metrics.peak_forecast_value).toLocaleString('id-ID') }}</div>
+          <div class="m-sub">Titik tertinggi pada periode prediksi</div>
+        </div>
+
+        <div class="metric-card">
+          <div class="metric-header">
+            <span class="m-label">Anomali Terdeteksi</span>
+            <svg viewBox="0 0 24 24" width="18" height="18" stroke="#ef4444" stroke-width="2" fill="none"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="8" x2="12" y2="12"></line><line x1="12" y1="16" x2="12.01" y2="16"></line></svg>
+          </div>
+          <div class="m-value red">{{ resultData.summary_metrics.anomalies_detected_count }} Titik</div>
+          <div class="m-sub">Penyimpangan data signifikan</div>
+        </div>
+      </div>
+
+      <!-- Visual Tabs (Chart / Table / Integration) -->
+      <div class="nav-tabs">
+        <button class="tab-btn" :class="{ active: activeTab === 'analytics' }" @click="activeTab = 'analytics'">
+          <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none"><path d="M3 3v18h18"></path><path d="m19 9-5 5-4-4-3 3"></path></svg>
+          Grafik Proyeksi & Interpretasi AI
+        </button>
+        <button class="tab-btn" :class="{ active: activeTab === 'table' }" @click="activeTab = 'table'">
+          <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none"><rect x="3" y="3" width="18" height="18" rx="2"></rect><line x1="3" y1="9" x2="21" y2="9"></line><line x1="3" y1="15" x2="21" y2="15"></line><line x1="9" y1="3" x2="9" y2="21"></line></svg>
+          Tabel Prediksi Lengkap ({{ resultData.table_data.length }})
+        </button>
+        <button class="tab-btn" :class="{ active: activeTab === 'api_integration' }" @click="activeTab = 'api_integration'">
+          <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none"><polyline points="16 18 22 12 16 6"></polyline><polyline points="8 6 2 12 8 18"></polyline></svg>
+          Integrasi API & Embed Iframe
+        </button>
+      </div>
+
+      <!-- TAB 1: CHART & AI INTERPRETATION -->
+      <div v-if="activeTab === 'analytics'" class="tab-content">
+        <!-- Interactive Chart Card -->
+        <div class="chart-card">
+          <div class="chart-card-header">
+            <div>
+              <h3 class="chart-title">Visualisasi Deret Waktu & Forecast Horizon</h3>
+              <p class="chart-subtitle">Garis biru: data aktual riil • Garis putus hijau: prediksi masa depan • Area hijau muda: 95% Confidence Interval</p>
+            </div>
+            <div class="legend-group">
+              <span class="legend-item"><span class="legend-box blue"></span> Aktual</span>
+              <span class="legend-item"><span class="legend-box green dashed"></span> Prediksi AI</span>
+              <span class="legend-item"><span class="legend-box green-area"></span> Interval 95%</span>
+              <span class="legend-item"><span class="legend-box red-dot"></span> Anomali</span>
+            </div>
+          </div>
+
+          <!-- SVG Chart Area -->
+          <div class="svg-chart-container" ref="chartSvgRef">
+            <svg v-if="chartData" :viewBox="`0 0 ${chartData.width} ${chartData.height}`" class="main-svg-chart">
+              <defs>
+                <!-- Area gradient -->
+                <linearGradient id="areaGradient" x1="0%" y1="0%" x2="0%" y2="100%">
+                  <stop offset="0%" stop-color="#10B981" stop-opacity="0.25" />
+                  <stop offset="100%" stop-color="#10B981" stop-opacity="0.05" />
+                </linearGradient>
+                <filter id="glow" x="-20%" y="-20%" width="140%" height="140%">
+                  <feGaussianBlur stdDeviation="3" result="glow" />
+                  <feComposite in="SourceGraphic" in2="glow" operator="over" />
+                </filter>
+              </defs>
+
+              <!-- Grid Horizontal Lines -->
+              <g class="grid-lines">
+                <line 
+                  v-for="(tick, i) in chartData.yTicks" 
+                  :key="i" 
+                  :x1="chartData.padLeft" 
+                  :y1="tick.y" 
+                  :x2="chartData.width - chartData.padRight" 
+                  :y2="tick.y" 
+                  stroke="#334155" 
+                  stroke-dasharray="3,3" 
+                  stroke-width="1"
+                />
+                <!-- Y-Labels -->
+                <text 
+                  v-for="(tick, i) in chartData.yTicks" 
+                  :key="`lbl-${i}`" 
+                  :x="chartData.padLeft - 10" 
+                  :y="tick.y + 4" 
+                  fill="#94a3b8" 
+                  font-size="11" 
+                  text-anchor="end"
+                >
+                  {{ tick.val.toLocaleString('id-ID') }}
+                </text>
+              </g>
+
+              <!-- Confidence Interval Area Shading -->
+              <path 
+                v-if="chartData.confidenceAreaPath" 
+                :d="chartData.confidenceAreaPath" 
+                fill="url(#areaGradient)"
+              />
+
+              <!-- Actual Data Line -->
+              <path 
+                :d="chartData.actualPath" 
+                fill="none" 
+                stroke="#3B82F6" 
+                stroke-width="3" 
+                stroke-linecap="round" 
+                stroke-linejoin="round"
+              />
+
+              <!-- Forecast Data Line (Dashed) -->
+              <path 
+                :d="chartData.forecastPath" 
+                fill="none" 
+                stroke="#10B981" 
+                stroke-width="3" 
+                stroke-dasharray="6,5" 
+                stroke-linecap="round" 
+                stroke-linejoin="round"
+              />
+
+              <!-- Actual Points -->
+              <circle 
+                v-for="p in chartData.actualPoints" 
+                :key="`act-${p.index}`" 
+                :cx="p.x" 
+                :cy="p.y" 
+                r="3.5" 
+                fill="#1E293B" 
+                stroke="#3B82F6" 
+                stroke-width="2" 
+                class="hover-circle"
+                @mouseenter="hoveredPoint = p"
+                @mouseleave="hoveredPoint = null"
+              />
+
+              <!-- Forecast Points -->
+              <circle 
+                v-for="p in chartData.forecastPoints" 
+                :key="`fc-${p.index}`" 
+                :cx="p.x" 
+                :cy="p.y" 
+                r="3.5" 
+                fill="#1E293B" 
+                stroke="#10B981" 
+                stroke-width="2" 
+                class="hover-circle"
+                @mouseenter="hoveredPoint = p"
+                @mouseleave="hoveredPoint = null"
+              />
+
+              <!-- Anomaly Highlights (Red Pulsing Rings) -->
+              <g v-for="anom in chartData.anomalyMarkers" :key="`anom-${anom.index}`">
+                <circle :cx="anom.x" :cy="anom.y" r="8" fill="none" stroke="#EF4444" stroke-width="2" opacity="0.8" filter="url(#glow)" />
+                <circle :cx="anom.x" :cy="anom.y" r="4.5" fill="#EF4444" stroke="#FFF" stroke-width="1.5" />
+              </g>
+
+              <!-- X-Axis Labels -->
+              <g class="x-axis-labels">
+                <text 
+                  v-for="(tick, i) in chartData.xTicks" 
+                  :key="`xtick-${i}`" 
+                  :x="tick.x" 
+                  :y="chartData.height - 10" 
+                  fill="#94a3b8" 
+                  font-size="10.5" 
+                  text-anchor="middle"
+                >
+                  {{ tick.label }}
+                </text>
+              </g>
+            </svg>
+
+            <!-- Interactive Tooltip Overlay -->
+            <div 
+              v-if="hoveredPoint" 
+              class="chart-tooltip"
+              :style="{
+                left: `${(hoveredPoint.x / (chartData?.width || 1)) * 100}%`,
+                top: `${(hoveredPoint.y / (chartData?.height || 1)) * 100}%`
+              }"
+            >
+              <div class="tooltip-date">📅 {{ hoveredPoint.row.date }}</div>
+              <div v-if="hoveredPoint.row.actual_value !== null" class="tooltip-val blue">
+                Nilai Aktual: <b>{{ hoveredPoint.row.actual_value.toLocaleString('id-ID') }}</b>
+              </div>
+              <div v-if="hoveredPoint.row.predicted_value !== null" class="tooltip-val green">
+                Prediksi ML: <b>{{ hoveredPoint.row.predicted_value.toLocaleString('id-ID') }}</b>
+                <div class="tooltip-bounds">Interval 95%: {{ hoveredPoint.row.lower_bound?.toLocaleString('id-ID') }} – {{ hoveredPoint.row.upper_bound?.toLocaleString('id-ID') }}</div>
+              </div>
+              <div v-if="hoveredPoint.row.is_anomaly" class="tooltip-badge-anom">
+                ⚠️ Titik Anomali (Skor Keparahan: {{ Math.round(hoveredPoint.row.anomaly_score * 100) }}%)
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- AI Executive Interpretation Card -->
+        <div class="ai-card">
+          <div class="ai-header">
+            <div class="ai-title-wrap">
+              <span class="ai-sparkle">✨</span>
+              <div>
+                <h3 class="ai-title">Laporan Eksekutif & Interpretasi Bisnis AI</h3>
+                <p class="ai-subtitle">Dianalisis secara otomatis berdasarkan perpaduan model statistika & LLM</p>
+              </div>
+            </div>
+            <span class="ai-badge">{{ resultData.ai_source }}</span>
+          </div>
+
+          <div class="ai-body markdown-content">
+            <div class="formatted-ai-text" v-html="resultData.ai_interpretation.replace(/\n/g, '<br>')"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- TAB 2: TABLE EXPLORER -->
+      <div v-if="activeTab === 'table'" class="tab-content">
+        <div class="table-card">
+          <div class="table-toolbar">
+            <div class="search-box">
+              <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+              <input type="text" v-model="tableSearch" placeholder="Cari tanggal atau nominal..." class="search-input">
+            </div>
+            <button class="btn-secondary" @click="downloadCsv">
+              <svg viewBox="0 0 24 24" width="15" height="15" stroke="currentColor" stroke-width="2" fill="none"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
+              Download CSV Hasil
+            </button>
+          </div>
+
+          <div class="table-responsive">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>Periode / Tanggal</th>
+                  <th>Nilai Aktual</th>
+                  <th>Prediksi ML</th>
+                  <th>Batas Bawah (95%)</th>
+                  <th>Batas Atas (95%)</th>
+                  <th>Status / Keterangan</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="(row, i) in paginatedTable" :key="i" :class="{ 'row-forecast': row.is_future_forecast, 'row-anomaly': row.is_anomaly }">
+                  <td class="font-mono">{{ row.date }}</td>
+                  <td class="font-bold">{{ row.actual_value !== null ? row.actual_value.toLocaleString('id-ID') : '-' }}</td>
+                  <td class="font-bold text-green">{{ row.predicted_value !== null ? row.predicted_value.toLocaleString('id-ID') : '-' }}</td>
+                  <td class="text-muted">{{ row.lower_bound !== null ? row.lower_bound.toLocaleString('id-ID') : '-' }}</td>
+                  <td class="text-muted">{{ row.upper_bound !== null ? row.upper_bound.toLocaleString('id-ID') : '-' }}</td>
+                  <td>
+                    <span v-if="row.is_anomaly" class="tag-status tag-anomaly">⚠️ Anomali</span>
+                    <span v-else-if="row.is_future_forecast" class="tag-status tag-forecast">🔮 Forecast AI</span>
+                    <span v-else class="tag-status tag-actual">✓ Data Riil</span>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <!-- Pagination -->
+          <div class="pagination-bar">
+            <div class="page-info">Menampilkan {{ paginatedTable.length }} dari {{ filteredTable.length }} baris data</div>
+            <div class="page-btns">
+              <button class="btn-page" :disabled="tablePage <= 1" @click="tablePage--">Sebelumnya</button>
+              <span class="page-num">{{ tablePage }} / {{ totalTablePages }}</span>
+              <button class="btn-page" :disabled="tablePage >= totalTablePages" @click="tablePage++">Selanjutnya</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- TAB 3: API & INTEGRATION -->
+      <div v-if="activeTab === 'api_integration'" class="tab-content">
+        <div class="integration-card">
+          <div class="int-header">
+            <h3 class="int-title">Integrasikan ke Website atau Portal Lain</h3>
+            <p class="int-desc">
+              Gunakan endpoint REST API untuk mengambil data prediksi mentah atau pasang tag Iframe untuk langsung menampilkan grafik interaktif di website klien Anda.
+            </p>
+          </div>
+
+          <div class="lang-pills">
+            <button class="lang-btn" :class="{ active: selectedSnippetLang === 'curl' }" @click="selectedSnippetLang = 'curl'">cURL / Terminal</button>
+            <button class="lang-btn" :class="{ active: selectedSnippetLang === 'python' }" @click="selectedSnippetLang = 'python'">Python Requests</button>
+            <button class="lang-btn" :class="{ active: selectedSnippetLang === 'javascript' }" @click="selectedSnippetLang = 'javascript'">JavaScript (Fetch / Axios)</button>
+            <button class="lang-btn" :class="{ active: selectedSnippetLang === 'iframe' }" @click="selectedSnippetLang = 'iframe'">HTML &lt;iframe&gt; Embed</button>
+          </div>
+
+          <div class="code-wrapper">
+            <div class="code-top">
+              <span class="code-lang">{{ selectedSnippetLang.toUpperCase() }}</span>
+              <button class="copy-btn" @click="copySnippet">
+                <svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+                {{ copiedSnippet ? 'Tersalin ke Clipboard!' : 'Salin Kode' }}
+              </button>
+            </div>
+            <pre class="code-block"><code>{{ getIntegrationSnippet }}</code></pre>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</template>
+
+<style scoped>
+.automl-container {
+  padding: 24px;
+  max-width: 1350px;
+  margin: 0 auto;
+  color: #f8fafc;
+}
+
+/* Header */
+.header-section {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  margin-bottom: 24px;
+  flex-wrap: wrap;
+  gap: 16px;
+}
+
+.badge-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: rgba(59, 130, 246, 0.15);
+  border: 1px solid rgba(59, 130, 246, 0.3);
+  color: #60a5fa;
+  padding: 4px 12px;
+  border-radius: 9999px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  margin-bottom: 8px;
+}
+
+.pulse-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #3b82f6;
+  box-shadow: 0 0 8px #3b82f6;
+}
+
+.page-title {
+  font-size: 1.6rem;
+  font-weight: 800;
+  color: #ffffff;
+  letter-spacing: -0.5px;
+}
+
+.page-desc {
+  font-size: 0.9rem;
+  color: #94a3b8;
+  max-width: 750px;
+  margin-top: 4px;
+  line-height: 1.5;
+}
+
+.header-actions {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+}
+
+.btn-primary {
+  background: linear-gradient(135deg, #3b82f6, #2563eb);
+  color: #fff;
+  border: none;
+  padding: 10px 18px;
+  border-radius: 8px;
+  font-weight: 600;
+  font-size: 0.875rem;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  box-shadow: 0 4px 12px rgba(37, 99, 235, 0.3);
+  transition: all 0.2s;
+}
+
+.btn-primary:hover:not(:disabled) {
+  opacity: 0.95;
+  transform: translateY(-1px);
+}
+
+.btn-secondary {
+  background: #1e293b;
+  border: 1px solid #334155;
+  color: #e2e8f0;
+  padding: 10px 16px;
+  border-radius: 8px;
+  font-size: 0.875rem;
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.btn-secondary:hover {
+  background: #334155;
+  color: #fff;
+}
+
+/* Alerts */
+.alert {
+  padding: 12px 16px;
+  border-radius: 8px;
+  margin-bottom: 20px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 0.875rem;
+}
+.alert-error { background: rgba(239, 68, 68, 0.15); border: 1px solid rgba(239, 68, 68, 0.3); color: #f87171; }
+.alert-success { background: rgba(16, 185, 129, 0.15); border: 1px solid rgba(16, 185, 129, 0.3); color: #34d399; }
+
+/* Control Panel */
+.control-panel {
+  background: #1e293b;
+  border: 1px solid #334155;
+  border-radius: 12px;
+  padding: 18px;
+  margin-bottom: 24px;
+}
+
+.control-label {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: #94a3b8;
+  display: block;
+  margin-bottom: 8px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.preset-pills {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.preset-btn {
+  background: #0f172a;
+  border: 1px solid #334155;
+  color: #cbd5e1;
+  padding: 7px 14px;
+  border-radius: 6px;
+  font-size: 0.825rem;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.preset-btn.active {
+  background: rgba(59, 130, 246, 0.2);
+  border-color: #3b82f6;
+  color: #60a5fa;
+  font-weight: 600;
+}
+
+.upload-chip {
+  background: #0f172a;
+  border: 1px dashed #475569;
+  color: #94a3b8;
+  padding: 7px 14px;
+  border-radius: 6px;
+  font-size: 0.825rem;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  transition: all 0.2s;
+}
+
+.upload-chip.active {
+  border-color: #10b981;
+  color: #34d399;
+  background: rgba(16, 185, 129, 0.1);
+}
+
+.control-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 16px;
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.param-label {
+  font-size: 0.775rem;
+  color: #94a3b8;
+  margin-bottom: 6px;
+  display: block;
+}
+
+.range-wrapper {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.range-slider {
+  flex: 1;
+  accent-color: #3b82f6;
+}
+
+.range-val {
+  font-size: 0.85rem;
+  font-weight: 700;
+  color: #60a5fa;
+  min-width: 60px;
+}
+
+.param-input {
+  width: 100%;
+  background: #0f172a;
+  border: 1px solid #334155;
+  color: #fff;
+  padding: 8px 12px;
+  border-radius: 6px;
+  font-size: 0.825rem;
+}
+
+/* Auto-detect Banner */
+.autodetect-banner {
+  background: linear-gradient(135deg, rgba(30, 41, 59, 0.9), rgba(15, 23, 42, 0.9));
+  border: 1px solid rgba(59, 130, 246, 0.4);
+  border-radius: 10px;
+  padding: 16px 20px;
+  margin-bottom: 20px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.badge-tech {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: #60a5fa;
+  font-size: 0.75rem;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.autodetect-title {
+  font-size: 1.15rem;
+  font-weight: 700;
+  color: #fff;
+  margin: 4px 0;
+}
+
+.autodetect-meta {
+  font-size: 0.825rem;
+  color: #94a3b8;
+}
+
+.latency-tag {
+  background: #0f172a;
+  border: 1px solid #334155;
+  padding: 6px 12px;
+  border-radius: 6px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: #10b981;
+}
+
+/* Metric Cards */
+.metrics-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 16px;
+  margin-bottom: 24px;
+}
+
+.metric-card {
+  background: #1e293b;
+  border: 1px solid #334155;
+  border-radius: 10px;
+  padding: 16px;
+}
+
+.metric-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.m-label {
+  font-size: 0.775rem;
+  color: #94a3b8;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.m-value {
+  font-size: 1.45rem;
+  font-weight: 800;
+  color: #fff;
+}
+
+.trend-green { color: #34d399; }
+.purple { color: #a78bfa; }
+.red { color: #f87171; }
+
+.m-sub {
+  font-size: 0.75rem;
+  color: #64748b;
+  margin-top: 4px;
+}
+
+/* Navigation Tabs */
+.nav-tabs {
+  display: flex;
+  gap: 8px;
+  border-bottom: 1px solid #334155;
+  margin-bottom: 20px;
+}
+
+.tab-btn {
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: #94a3b8;
+  padding: 10px 16px;
+  font-size: 0.875rem;
+  font-weight: 600;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  transition: all 0.2s;
+}
+
+.tab-btn.active {
+  color: #60a5fa;
+  border-bottom-color: #3b82f6;
+}
+
+/* Chart Card */
+.chart-card {
+  background: #1e293b;
+  border: 1px solid #334155;
+  border-radius: 12px;
+  padding: 20px;
+  margin-bottom: 24px;
+}
+
+.chart-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  margin-bottom: 16px;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.chart-title {
+  font-size: 1.05rem;
+  font-weight: 700;
+  color: #fff;
+}
+
+.chart-subtitle {
+  font-size: 0.8rem;
+  color: #94a3b8;
+  margin-top: 2px;
+}
+
+.legend-group {
+  display: flex;
+  gap: 14px;
+  align-items: center;
+  font-size: 0.8rem;
+  color: #cbd5e1;
+}
+
+.legend-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.legend-box {
+  width: 14px;
+  height: 4px;
+  border-radius: 2px;
+}
+.legend-box.blue { background: #3b82f6; }
+.legend-box.green { background: #10b981; }
+.legend-box.dashed { border-top: 2px dashed #10b981; height: 0; }
+.legend-box.green-area { background: rgba(16, 185, 129, 0.25); height: 10px; }
+.legend-box.red-dot { width: 8px; height: 8px; border-radius: 50%; background: #ef4444; }
+
+.svg-chart-container {
+  position: relative;
+  width: 100%;
+  overflow-x: auto;
+}
+
+.main-svg-chart {
+  width: 100%;
+  height: auto;
+  display: block;
+}
+
+.hover-circle {
+  cursor: pointer;
+  transition: r 0.15s ease;
+}
+.hover-circle:hover {
+  r: 6.5;
+}
+
+.chart-tooltip {
+  position: absolute;
+  transform: translate(-50%, -115%);
+  background: #0f172a;
+  border: 1px solid #334155;
+  border-radius: 8px;
+  padding: 10px 14px;
+  pointer-events: none;
+  font-size: 0.8rem;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+  z-index: 10;
+  min-width: 180px;
+}
+
+.tooltip-date { font-weight: 700; color: #fff; margin-bottom: 4px; }
+.tooltip-val.blue { color: #60a5fa; }
+.tooltip-val.green { color: #34d399; margin-top: 2px; }
+.tooltip-bounds { font-size: 0.725rem; color: #94a3b8; margin-top: 2px; }
+.tooltip-badge-anom { color: #f87171; font-weight: 700; margin-top: 6px; font-size: 0.75rem; }
+
+/* AI Executive Card */
+.ai-card {
+  background: linear-gradient(135deg, rgba(30, 41, 59, 0.95), rgba(15, 23, 42, 0.95));
+  border: 1px solid rgba(139, 92, 246, 0.35);
+  border-radius: 12px;
+  padding: 22px;
+}
+
+.ai-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 16px;
+}
+
+.ai-title-wrap {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.ai-sparkle {
+  font-size: 1.5rem;
+}
+
+.ai-title {
+  font-size: 1.1rem;
+  font-weight: 700;
+  color: #e2e8f0;
+}
+
+.ai-subtitle {
+  font-size: 0.8rem;
+  color: #94a3b8;
+}
+
+.ai-badge {
+  background: rgba(139, 92, 246, 0.15);
+  border: 1px solid rgba(139, 92, 246, 0.3);
+  color: #c084fc;
+  padding: 4px 10px;
+  border-radius: 9999px;
+  font-size: 0.75rem;
+  font-weight: 700;
+}
+
+.formatted-ai-text {
+  font-size: 0.9rem;
+  line-height: 1.7;
+  color: #cbd5e1;
+}
+
+/* Table Card */
+.table-card {
+  background: #1e293b;
+  border: 1px solid #334155;
+  border-radius: 12px;
+  padding: 20px;
+}
+
+.table-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 16px;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.search-box {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: #0f172a;
+  border: 1px solid #334155;
+  border-radius: 6px;
+  padding: 6px 12px;
+  width: 280px;
+}
+
+.search-input {
+  background: transparent;
+  border: none;
+  color: #fff;
+  font-size: 0.825rem;
+  width: 100%;
+}
+.search-input:focus { outline: none; }
+
+.table-responsive {
+  overflow-x: auto;
+}
+
+.data-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+  text-align: left;
+}
+
+.data-table th {
+  background: #0f172a;
+  color: #94a3b8;
+  padding: 10px 14px;
+  font-size: 0.775rem;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  border-bottom: 1px solid #334155;
+}
+
+.data-table td {
+  padding: 10px 14px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  color: #e2e8f0;
+}
+
+.data-table tr.row-forecast td {
+  background: rgba(16, 185, 129, 0.04);
+}
+
+.data-table tr.row-anomaly td {
+  background: rgba(239, 68, 68, 0.06);
+}
+
+.text-green { color: #34d399; }
+.text-muted { color: #64748b; }
+
+.tag-status {
+  padding: 3px 8px;
+  border-radius: 4px;
+  font-size: 0.725rem;
+  font-weight: 700;
+}
+.tag-actual { background: rgba(59, 130, 246, 0.15); color: #60a5fa; }
+.tag-forecast { background: rgba(16, 185, 129, 0.15); color: #34d399; }
+.tag-anomaly { background: rgba(239, 68, 68, 0.2); color: #f87171; }
+
+.pagination-bar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px solid #334155;
+  font-size: 0.8rem;
+  color: #94a3b8;
+}
+
+.page-btns {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.btn-page {
+  background: #0f172a;
+  border: 1px solid #334155;
+  color: #cbd5e1;
+  padding: 5px 10px;
+  border-radius: 4px;
+  font-size: 0.775rem;
+  cursor: pointer;
+}
+.btn-page:disabled { opacity: 0.4; cursor: not-allowed; }
+
+/* Integration Card */
+.integration-card {
+  background: #1e293b;
+  border: 1px solid #334155;
+  border-radius: 12px;
+  padding: 22px;
+}
+
+.int-title { font-size: 1.1rem; font-weight: 700; color: #fff; margin-bottom: 4px; }
+.int-desc { font-size: 0.85rem; color: #94a3b8; margin-bottom: 18px; }
+
+.lang-pills {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 16px;
+  flex-wrap: wrap;
+}
+
+.lang-btn {
+  background: #0f172a;
+  border: 1px solid #334155;
+  color: #94a3b8;
+  padding: 6px 14px;
+  border-radius: 6px;
+  font-size: 0.825rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+.lang-btn.active {
+  background: rgba(59, 130, 246, 0.2);
+  border-color: #3b82f6;
+  color: #60a5fa;
+}
+
+.code-wrapper {
+  background: #090d16;
+  border: 1px solid #334155;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.code-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 14px;
+  background: #0f172a;
+  border-bottom: 1px solid #334155;
+}
+
+.code-lang { font-size: 0.75rem; font-weight: 700; color: #64748b; }
+
+.copy-btn {
+  background: transparent;
+  border: 1px solid #334155;
+  color: #cbd5e1;
+  padding: 4px 10px;
+  border-radius: 4px;
+  font-size: 0.75rem;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.copy-btn:hover { background: #334155; color: #fff; }
+
+.code-block {
+  padding: 16px;
+  color: #e2e8f0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.85rem;
+  line-height: 1.5;
+  overflow-x: auto;
+}
+</style>

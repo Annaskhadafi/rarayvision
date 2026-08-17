@@ -58,6 +58,15 @@ const routes = [
     redirect: '/rag'
   },
   {
+    path: '/automl',
+    component: () => import('./views/AutoMLAnalyticsView.vue'),
+    meta: { requiresAuth: true }
+  },
+  {
+    path: '/forecast',
+    redirect: '/automl'
+  },
+  {
     path: '/anti-spoof',
     component: () => import('./views/AntiSpoofCompareView.vue'),
     meta: { requiresAuth: true }

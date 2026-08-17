@@ -225,7 +225,7 @@ async def filter_openapi_schema(request: Request, call_next):
             return JSONResponse(content=json.loads(body), status_code=response.status_code)
     return response
 
-from backend.app.controllers import auth_controller, api_key_controller, face_controller, tire_controller, inventory_controller, hse_controller, camera_controller, pdf_inspector_controller, anti_spoof_controller, anydoc_controller, rag_controller, rag_datasource_controller
+from backend.app.controllers import auth_controller, api_key_controller, face_controller, tire_controller, inventory_controller, hse_controller, camera_controller, pdf_inspector_controller, anti_spoof_controller, anydoc_controller, rag_controller, rag_datasource_controller, automl_controller
 
 # Include Routers
 fastapi_app.include_router(auth_controller.router)
@@ -241,6 +241,7 @@ fastapi_app.include_router(anti_spoof_controller.router)
 fastapi_app.include_router(anydoc_controller.router)
 fastapi_app.include_router(rag_controller.router)
 fastapi_app.include_router(rag_datasource_controller.router)
+fastapi_app.include_router(automl_controller.router)
 
 # Mount Tire Counter Sub-App directly onto /tire-api
 try:
