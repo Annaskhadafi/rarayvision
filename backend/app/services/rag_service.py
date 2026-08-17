@@ -961,25 +961,30 @@ Pertanyaan Pengguna:
         if not text:
             return ""
 
+        cleaned = text
         # 1. Remove XML reasoning/thought tags (<think>...</think>, <thought>...</thought>)
-        cleaned = re.sub(r'<think>[\s\S]*?</think>', '', text, flags=re.IGNORECASE)
-        cleaned = re.sub(r'<thought>[\s\S]*?</thought>', '', cleaned, flags=re.IGNORECASE)
-        cleaned = re.sub(r'<think>[\s\S]*$', '', cleaned, flags=re.IGNORECASE)
-        cleaned = re.sub(r'<thought>[\s\S]*$', '', cleaned, flags=re.IGNORECASE)
+        if re.search(r'</(?:think|thought)>', cleaned, flags=re.IGNORECASE):
+            parts = re.split(r'</(?:think|thought)>', cleaned, flags=re.IGNORECASE)
+            cleaned = parts[-1].strip()
+        else:
+            cleaned = re.sub(r'<(?:think|thought)>[\s\S]*$', '', cleaned, flags=re.IGNORECASE).strip()
 
         # 2. Remove meta-reasoning and constraint check blocks
         constraint_patterns = [
-            # Trailing or section blocks starting with "Check against Constraints", "Constraint Check", "Self-Correction", etc.
             r'(?i)\n*(?:(?:\d+[\.\)]\s*)?(?:Check\s+(?:against\s+)?Constraints?|Constraint\s+Check|Self-[Cc]orrection(?:/Refinement)?|Refinement\s+during\s+thought|Thinking\s+Process|Thought\s+Process|Proses\s+Berpikir|Evaluasi\s+Batasan)[\s\S]*)$',
-            # Individual constraint check evaluation lines
             r'(?i)^\s*-\s*(?:Language|Efficient\s*&\s*direct|Bullet\s*points/table|Based\s*on\s*context|Citation|Matches\s*all\s*constraints|Self-Correction).*$\n?',
+            r'(?i)^Here\'s a thinking process:[\s\S]*?\n(?=[A-Z0-9#|•\-])',
         ]
         for pattern in constraint_patterns:
             cleaned = re.sub(pattern, '', cleaned, flags=re.MULTILINE)
 
         # 3. Clean up excessive whitespace/newlines
         cleaned = re.sub(r'\n{3,}', '\n\n', cleaned).strip()
-        return cleaned or text.strip()
+        
+        if not cleaned:
+            return "Informasi spesifik mengenai pertanyaan tersebut tidak ditemukan dalam basis pengetahuan dokumen."
+
+        return cleaned
 
     @staticmethod
     def _call_llm(system_prompt: str, user_prompt: str) -> str:
@@ -1016,7 +1021,8 @@ Pertanyaan Pengguna:
                         "model": groq_model,
                         "messages": messages,
                         "temperature": 0.2,
-                        "max_tokens": 2048
+                        "max_tokens": 2048,
+                        "reasoning_format": "hidden"
                     },
                     timeout=25
                 )
