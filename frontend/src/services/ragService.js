@@ -225,8 +225,11 @@ export const ragService = {
     return this._handleResponse(res)
   },
 
-  async getLearnedFacts(limit = 50) {
-    const res = await fetch(`${API_BASE_URL}/api/v1/rag/memory/facts?limit=${limit}`, {
+  async getLearnedFacts({ limit = 100, factType = null, learnedFrom = null } = {}) {
+    const params = new URLSearchParams({ limit })
+    if (factType) params.append('fact_type', factType)
+    if (learnedFrom) params.append('learned_from', learnedFrom)
+    const res = await fetch(`${API_BASE_URL}/api/v1/rag/memory/facts?${params.toString()}`, {
       headers: this.getAuthHeaders()
     })
     return this._handleResponse(res)
@@ -236,6 +239,18 @@ export const ragService = {
     const res = await fetch(`${API_BASE_URL}/api/v1/rag/memory/facts/${factId}`, {
       method: 'DELETE',
       headers: this.getAuthHeaders()
+    })
+    return this._handleResponse(res)
+  },
+
+  async deleteLearnedFactsBulk(factIds) {
+    const res = await fetch(`${API_BASE_URL}/api/v1/rag/memory/facts/bulk-delete`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...this.getAuthHeaders()
+      },
+      body: JSON.stringify({ fact_ids: factIds })
     })
     return this._handleResponse(res)
   },

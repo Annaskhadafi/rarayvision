@@ -43,6 +43,10 @@ class LearnFactRequest(BaseModel):
     fact_type: str = "learned_knowledge"
 
 
+class BulkDeleteFactsRequest(BaseModel):
+    fact_ids: List[str]
+
+
 @router.get("/info", summary="Get RAG & Embedding Engine Info")
 def get_rag_info():
     """Returns active embedding provider (FastEmbed local ONNX, Gemini, etc.) and vector dimensions."""
@@ -214,16 +218,20 @@ async def teach_fact(
 
 @router.get("/memory/facts", summary="List All Learned Long-Term Memory Facts")
 async def get_learned_facts(
-    limit: int = Query(50, ge=1, le=100),
+    limit: int = Query(100, ge=1, le=500),
+    fact_type: Optional[str] = Query(None, description="Filter by fact_type: auto_chat, user_correction, learned_knowledge"),
+    learned_from: Optional[str] = Query(None, description="Filter by learned_from: auto_chat, user_feedback, direct_input"),
     db: Session = Depends(get_db),
     current_user: db_models.User = Depends(get_current_user)
 ):
-    """Retrieves all active learned facts from PostgreSQL long-term memory."""
+    """Retrieves active learned facts from PostgreSQL long-term memory, with optional filters."""
     facts = await run_in_threadpool(
         RagService.get_learned_facts,
         db=db,
         user_id=current_user.id if current_user else None,
-        limit=limit
+        limit=limit,
+        fact_type=fact_type,
+        learned_from=learned_from
     )
     return {"status": "success", "total": len(facts), "data": facts}
 
@@ -239,6 +247,25 @@ async def delete_fact(
     if not success:
         raise HTTPException(status_code=404, detail="Fact not found")
     return {"status": "success", "message": "Fact deleted"}
+
+
+@router.post("/memory/facts/bulk-delete", summary="Bulk Delete Multiple Learned Facts")
+async def bulk_delete_facts(
+    req: BulkDeleteFactsRequest,
+    db: Session = Depends(get_db),
+    current_user: db_models.User = Depends(get_current_user)
+):
+    """Bulk-deletes multiple learned facts by ID array."""
+    try:
+        deleted_count = await run_in_threadpool(
+            RagService.delete_learned_facts_bulk,
+            db=db,
+            fact_ids=req.fact_ids
+        )
+        return {"status": "success", "deleted": deleted_count}
+    except Exception as e:
+        logger.error(f"[RagController] bulk_delete_facts error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get("/sessions", summary="List Persistent Conversation Sessions")

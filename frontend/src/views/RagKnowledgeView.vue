@@ -90,6 +90,30 @@ const feedbackNotes = ref('')
 const isSubmittingFeedback = ref(false)
 const feedbackSuccessToast = ref('')
 
+// Memory History Manager State
+const memoryTab = ref('all')         // 'all', 'auto', 'correction', 'manual'
+const memorySearchQuery = ref('')
+const selectedFactIds = ref(new Set())
+const isBulkDeleting = ref(false)
+const isAutoSaveEnabled = ref(true)
+const showAutoSaveToast = ref(false)
+
+const filteredMemoryFacts = computed(() => {
+  let base = learnedFacts.value
+  if (memoryTab.value === 'auto') base = base.filter(f => f.learned_from === 'auto_chat')
+  else if (memoryTab.value === 'correction') base = base.filter(f => f.fact_type === 'user_correction')
+  else if (memoryTab.value === 'manual') base = base.filter(f => f.learned_from === 'direct_input')
+  if (memorySearchQuery.value.trim()) {
+    const q = memorySearchQuery.value.toLowerCase()
+    base = base.filter(f => (f.subject || '').toLowerCase().includes(q) || (f.content || '').toLowerCase().includes(q))
+  }
+  return base
+})
+
+const allFilteredSelected = computed(() => {
+  return filteredMemoryFacts.value.length > 0 && filteredMemoryFacts.value.every(f => selectedFactIds.value.has(f.id))
+})
+
 const newFactForm = ref({
   subject: '',
   content: '',
@@ -574,7 +598,7 @@ const startNewDatabase = () => {
 const fetchLearnedFacts = async () => {
   isLoadingFacts.value = true
   try {
-    const res = await ragService.getLearnedFacts(50)
+    const res = await ragService.getLearnedFacts({ limit: 200 })
     if (res?.data) {
       learnedFacts.value = res.data
     }
@@ -651,10 +675,52 @@ const handleDeleteFact = async (factId) => {
   if (!confirm('Hapus fakta / aturan memori ini?')) return
   try {
     await ragService.deleteLearnedFact(factId)
+    selectedFactIds.value.delete(factId)
     await fetchLearnedFacts()
   } catch (err) {
     alert('Gagal menghapus fakta: ' + err.message)
   }
+}
+
+const toggleFactSelection = (factId) => {
+  const s = new Set(selectedFactIds.value)
+  if (s.has(factId)) s.delete(factId)
+  else s.add(factId)
+  selectedFactIds.value = s
+}
+
+const toggleSelectAll = () => {
+  if (allFilteredSelected.value) {
+    const s = new Set(selectedFactIds.value)
+    filteredMemoryFacts.value.forEach(f => s.delete(f.id))
+    selectedFactIds.value = s
+  } else {
+    const s = new Set(selectedFactIds.value)
+    filteredMemoryFacts.value.forEach(f => s.add(f.id))
+    selectedFactIds.value = s
+  }
+}
+
+const handleBulkDelete = async () => {
+  const ids = Array.from(selectedFactIds.value)
+  if (!ids.length) return
+  if (!confirm(`Hapus ${ids.length} memori yang dipilih secara permanen?`)) return
+  isBulkDeleting.value = true
+  try {
+    await ragService.deleteLearnedFactsBulk(ids)
+    selectedFactIds.value = new Set()
+    await fetchLearnedFacts()
+  } catch (err) {
+    alert('Gagal bulk delete: ' + err.message)
+  } finally {
+    isBulkDeleting.value = false
+  }
+}
+
+const toggleAutoSave = () => {
+  isAutoSaveEnabled.value = !isAutoSaveEnabled.value
+  showAutoSaveToast.value = true
+  setTimeout(() => { showAutoSaveToast.value = false }, 2500)
 }
 
 // Chatbot Send with Multi-Turn Memory & Persistent DB Session
@@ -728,6 +794,8 @@ const handleSendMessage = async () => {
         rating: null
       })
       fetchSessions()
+      // Auto-refresh memory panel after each chat turn
+      fetchLearnedFacts()
     }
   } catch (err) {
     chatMessages.value.push({
@@ -1768,35 +1836,55 @@ print("Sumber:", [s["filename"] for s in chat_res["data"]["sources"]])`
 
     <!-- Tab 5: Memori & Self-Growth -->
     <div v-else-if="mainTab === 'memory'" class="tab-content">
+      <!-- Auto-save toast notification -->
+      <Transition name="toast-fade">
+        <div v-if="showAutoSaveToast" class="auto-save-toast">
+          {{ isAutoSaveEnabled ? '🟢 Auto-Save Diaktifkan' : '🔴 Auto-Save Dinonaktifkan' }}
+        </div>
+      </Transition>
+
       <div class="memory-container">
+        <!-- Header Card -->
         <div class="card memory-header-card">
           <div class="memory-header-info">
-            <h2 class="section-title">🧠 Memori Pengetahuan & Self-Growth AI</h2>
+            <h2 class="section-title">🧠 Memory History Manager</h2>
             <p class="section-desc">
-              Hero Assistant secara dinamis mempelajari aturan baru, koreksi pengguna, dan preferensi domain. Pengetahuan ini disimpan secara permanen di PostgreSQL dan langsung diingat di setiap pertanyaan RAG mendatang.
+              Semua pengetahuan yang dipelajari AI tersimpan di sini — otomatis dari percakapan chat maupun input manual. Pilih dan hapus sesuka Anda.
             </p>
           </div>
           <div class="memory-stats-grid">
             <div class="mem-stat-box">
               <span class="mem-stat-val">{{ learnedFacts.length }}</span>
-              <span class="mem-stat-lbl">Fakta & Aturan Dipelajari</span>
+              <span class="mem-stat-lbl">Total Memori</span>
             </div>
             <div class="mem-stat-box">
-              <span class="mem-stat-val">{{ learnedFacts.filter(f => f.fact_type === 'user_correction').length }}</span>
-              <span class="mem-stat-lbl">Koreksi Pengguna</span>
+              <span class="mem-stat-val auto-val">{{ learnedFacts.filter(f => f.learned_from === 'auto_chat').length }}</span>
+              <span class="mem-stat-lbl">Auto-Chat</span>
             </div>
             <div class="mem-stat-box">
-              <span class="mem-stat-val">{{ learnedFacts.filter(f => f.fact_type === 'rule' || f.fact_type === 'learned_knowledge').length }}</span>
-              <span class="mem-stat-lbl">Aturan & Pengetahuan Domain</span>
+              <span class="mem-stat-val corr-val">{{ learnedFacts.filter(f => f.fact_type === 'user_correction').length }}</span>
+              <span class="mem-stat-lbl">Koreksi</span>
+            </div>
+            <div class="mem-stat-box">
+              <span class="mem-stat-val manual-val">{{ learnedFacts.filter(f => f.learned_from === 'direct_input').length }}</span>
+              <span class="mem-stat-lbl">Manual</span>
+            </div>
+            <!-- Auto-Save Toggle -->
+            <div class="mem-stat-box autosave-toggle-box" @click="toggleAutoSave" :title="isAutoSaveEnabled ? 'Klik untuk nonaktifkan auto-save' : 'Klik untuk aktifkan auto-save'">
+              <span class="autosave-pill" :class="{ active: isAutoSaveEnabled }">
+                <span class="autosave-dot"></span>
+                {{ isAutoSaveEnabled ? 'ON' : 'OFF' }}
+              </span>
+              <span class="mem-stat-lbl">Auto-Save Q&A</span>
             </div>
           </div>
         </div>
 
         <div class="memory-content-grid">
-          <!-- Form: Ajari AI Fakta Baru -->
+          <!-- Left: Input manual fakta baru -->
           <div class="card memory-form-card">
             <h3 class="form-block-title">💡 Ajari AI Fakta / Aturan Baru</h3>
-            <p class="form-block-sub">Tambahkan informasi penting atau SOP operasional langsung tanpa perlu mengunggah berkas dokumen.</p>
+            <p class="form-block-sub">Tambahkan informasi penting atau SOP langsung tanpa mengunggah berkas.</p>
 
             <div class="form-group">
               <label class="form-label">Tipe Memori</label>
@@ -1815,10 +1903,10 @@ print("Sumber:", [s["filename"] for s in chat_res["data"]["sources"]])`
 
             <div class="form-group">
               <label class="form-label">Isi Fakta / Aturan yang Harus Diingat AI *</label>
-              <textarea 
-                v-model="newFactForm.content" 
-                rows="4" 
-                placeholder="Contoh: Ban ukuran 29.5R25 merk Bridgestone digunakan khusus untuk unit Wheel Loader Komatsu WA500 di Pit A." 
+              <textarea
+                v-model="newFactForm.content"
+                rows="4"
+                placeholder="Contoh: Ban ukuran 29.5R25 merk Bridgestone digunakan khusus untuk unit Wheel Loader Komatsu WA500 di Pit A."
                 class="form-control"
               ></textarea>
             </div>
@@ -1829,35 +1917,98 @@ print("Sumber:", [s["filename"] for s in chat_res["data"]["sources"]])`
             </button>
           </div>
 
-          <!-- List: Fakta & Aturan yang Sudah Dipelajari -->
+          <!-- Right: Memory History Manager -->
           <div class="card memory-list-card">
-            <div class="memory-list-header">
-              <h3 class="form-block-title">📋 Daftar Memori yang Telah Dipelajari ({{ learnedFacts.length }})</h3>
-              <button class="btn-refresh" @click="fetchLearnedFacts">🔄 Refresh</button>
+            <!-- Toolbar row -->
+            <div class="mem-toolbar">
+              <div class="mem-toolbar-left">
+                <h3 class="form-block-title" style="margin:0">📋 History Memori</h3>
+                <span class="mem-count-badge">{{ filteredMemoryFacts.length }}</span>
+              </div>
+              <div class="mem-toolbar-right">
+                <button
+                  v-if="selectedFactIds.size > 0"
+                  class="btn-bulk-delete"
+                  :disabled="isBulkDeleting"
+                  @click="handleBulkDelete"
+                >
+                  <span v-if="isBulkDeleting" class="spinner"></span>
+                  <span v-else>🗑️ Hapus ({{ selectedFactIds.size }})</span>
+                </button>
+                <button class="btn-refresh" @click="fetchLearnedFacts">🔄</button>
+              </div>
             </div>
 
+            <!-- Tab Filter -->
+            <div class="mem-tab-bar">
+              <button :class="['mem-tab-btn', { active: memoryTab === 'all' }]" @click="memoryTab = 'all'; selectedFactIds = new Set()">Semua</button>
+              <button :class="['mem-tab-btn auto', { active: memoryTab === 'auto' }]" @click="memoryTab = 'auto'; selectedFactIds = new Set()">🤖 Auto-Chat</button>
+              <button :class="['mem-tab-btn corr', { active: memoryTab === 'correction' }]" @click="memoryTab = 'correction'; selectedFactIds = new Set()">✏️ Koreksi</button>
+              <button :class="['mem-tab-btn manual', { active: memoryTab === 'manual' }]" @click="memoryTab = 'manual'; selectedFactIds = new Set()">💡 Manual</button>
+            </div>
+
+            <!-- Search -->
+            <div class="mem-search-bar">
+              <span class="mem-search-icon">🔍</span>
+              <input
+                type="text"
+                v-model="memorySearchQuery"
+                placeholder="Cari berdasarkan judul atau isi memori..."
+                class="mem-search-input"
+              />
+              <button v-if="memorySearchQuery" class="mem-search-clear" @click="memorySearchQuery = ''">✕</button>
+            </div>
+
+            <!-- Select all row -->
+            <div v-if="filteredMemoryFacts.length > 0" class="mem-select-all-row">
+              <label class="mem-checkbox-label">
+                <input type="checkbox" :checked="allFilteredSelected" @change="toggleSelectAll" />
+                <span>Pilih Semua ({{ filteredMemoryFacts.length }})</span>
+              </label>
+            </div>
+
+            <!-- Loading -->
             <div v-if="isLoadingFacts" class="loading-state">
               <div class="spinner"></div>
-              <span>Memuat memori AI...</span>
+              <span>Memuat history memori...</span>
             </div>
 
-            <div v-else-if="learnedFacts.length === 0" class="empty-memory">
-              <p>Belum ada fakta atau koreksi yang dipelajari. Anda dapat mengajarkan fakta di samping kiri atau memberikan tombol "Koreksi" pada percakapan chat.</p>
+            <!-- Empty -->
+            <div v-else-if="filteredMemoryFacts.length === 0" class="empty-memory">
+              <div class="empty-mem-icon">🧠</div>
+              <p v-if="memoryTab === 'auto'">Belum ada Q&A yang tersimpan otomatis. Mulai percakapan di tab Chat!</p>
+              <p v-else-if="memoryTab === 'correction'">Belum ada koreksi tersimpan. Gunakan tombol ✏️ Koreksi pada jawaban chat.</p>
+              <p v-else-if="memoryTab === 'manual'">Belum ada fakta manual. Gunakan form di samping kiri.</p>
+              <p v-else>Belum ada memori yang dipelajari.</p>
             </div>
 
+            <!-- Memory items -->
             <div v-else class="memory-items-list">
-              <div v-for="fact in learnedFacts" :key="fact.id" class="memory-fact-card">
+              <div
+                v-for="fact in filteredMemoryFacts"
+                :key="fact.id"
+                class="memory-fact-card"
+                :class="{ selected: selectedFactIds.has(fact.id) }"
+                @click.self="toggleFactSelection(fact.id)"
+              >
                 <div class="fact-top-row">
-                  <span :class="['fact-type-badge', fact.fact_type]">
-                    {{ fact.fact_type === 'user_correction' ? '✏️ Koreksi Pengguna' : fact.fact_type === 'rule' ? '⚖️ Aturan SOP' : '💡 Fakta Khusus' }}
+                  <label class="mem-item-checkbox" @click.stop>
+                    <input
+                      type="checkbox"
+                      :checked="selectedFactIds.has(fact.id)"
+                      @change="toggleFactSelection(fact.id)"
+                    />
+                  </label>
+                  <span :class="['fact-type-badge', fact.learned_from === 'auto_chat' ? 'auto_chat' : fact.fact_type]">
+                    {{ fact.learned_from === 'auto_chat' ? '🤖 Auto-Chat' : fact.fact_type === 'user_correction' ? '✏️ Koreksi' : fact.fact_type === 'rule' ? '⚖️ Aturan' : '💡 Manual' }}
                   </span>
-                  <button class="btn-delete-fact" @click="handleDeleteFact(fact.id)" title="Hapus dari memori">🗑️</button>
+                  <button class="btn-delete-fact" @click.stop="handleDeleteFact(fact.id)" title="Hapus dari memori">🗑️</button>
                 </div>
-                <h4 class="fact-subject">{{ fact.subject || 'Fakta Memori' }}</h4>
-                <p class="fact-content">{{ fact.content }}</p>
+                <h4 class="fact-subject">{{ fact.subject || 'Memori RAG' }}</h4>
+                <p class="fact-content">{{ fact.content.length > 180 ? fact.content.slice(0, 180) + '…' : fact.content }}</p>
                 <div class="fact-meta">
-                  <span>Sumber: {{ fact.learned_from }}</span>
-                  <span v-if="fact.created_at">{{ new Date(fact.created_at).toLocaleString() }}</span>
+                  <span>{{ fact.learned_from === 'auto_chat' ? 'Auto dari chat' : fact.learned_from === 'direct_input' ? 'Input manual' : 'Koreksi pengguna' }}</span>
+                  <span v-if="fact.created_at">{{ new Date(fact.created_at).toLocaleString('id-ID', { dateStyle: 'short', timeStyle: 'short' }) }}</span>
                 </div>
               </div>
             </div>
@@ -3912,4 +4063,221 @@ print("Sumber:", [s["filename"] for s in chat_res["data"]["sources"]])`
   color: #1d4ed8;
   font-weight: 700;
 }
+
+/* ── Memory History Manager ─────────────────── */
+
+/* Stat value color variants */
+.mem-stat-val.auto-val   { color: #0d9488; }
+.mem-stat-val.corr-val   { color: #b45309; }
+.mem-stat-val.manual-val { color: #6d28d9; }
+
+/* Auto-Save Toggle Box */
+.autosave-toggle-box {
+  cursor: pointer;
+  transition: background 0.15s;
+  user-select: none;
+}
+.autosave-toggle-box:hover { background: #f0fdf4; border-color: #86efac; }
+
+.autosave-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  font-weight: 800;
+  padding: 3px 10px;
+  border-radius: 9999px;
+  background: #fee2e2;
+  color: #b91c1c;
+  transition: all 0.2s;
+}
+.autosave-pill.active {
+  background: #dcfce7;
+  color: #15803d;
+}
+.autosave-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: currentColor;
+  display: inline-block;
+}
+
+/* Auto-save toast */
+.auto-save-toast {
+  position: fixed;
+  top: 72px;
+  right: 24px;
+  z-index: 9999;
+  background: #1e293b;
+  color: #f1f5f9;
+  padding: 10px 20px;
+  border-radius: 10px;
+  font-size: 13px;
+  font-weight: 600;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.2);
+  pointer-events: none;
+}
+.toast-fade-enter-active, .toast-fade-leave-active { transition: all 0.3s ease; }
+.toast-fade-enter-from, .toast-fade-leave-to { opacity: 0; transform: translateY(-8px); }
+
+/* Toolbar */
+.mem-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 14px;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.mem-toolbar-left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.mem-toolbar-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.mem-count-badge {
+  background: #e2e8f0;
+  color: #475569;
+  font-size: 12px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 9999px;
+}
+
+/* Tab filter bar */
+.mem-tab-bar {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 12px;
+  flex-wrap: wrap;
+}
+.mem-tab-btn {
+  padding: 5px 13px;
+  border-radius: 9999px;
+  border: 1px solid #cbd5e1;
+  background: #f8fafc;
+  font-size: 12px;
+  font-weight: 600;
+  color: #475569;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.mem-tab-btn:hover { background: #e2e8f0; }
+.mem-tab-btn.active { background: #0f172a; color: #fff; border-color: #0f172a; }
+.mem-tab-btn.auto.active   { background: #0f766e; border-color: #0f766e; }
+.mem-tab-btn.corr.active   { background: #b45309; border-color: #b45309; }
+.mem-tab-btn.manual.active { background: #6d28d9; border-color: #6d28d9; }
+
+/* Search bar */
+.mem-search-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  padding: 6px 12px;
+  margin-bottom: 12px;
+  transition: border-color 0.15s;
+}
+.mem-search-bar:focus-within { border-color: #94a3b8; }
+.mem-search-icon { font-size: 14px; opacity: 0.5; }
+.mem-search-input {
+  flex: 1;
+  border: none;
+  background: transparent;
+  outline: none;
+  font-size: 13px;
+  color: #334155;
+}
+.mem-search-clear {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: #94a3b8;
+  font-size: 13px;
+  padding: 0;
+  line-height: 1;
+}
+.mem-search-clear:hover { color: #475569; }
+
+/* Select all row */
+.mem-select-all-row {
+  padding: 6px 4px;
+  margin-bottom: 10px;
+  border-bottom: 1px solid #f0f4f8;
+}
+.mem-checkbox-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: #64748b;
+  cursor: pointer;
+}
+.mem-checkbox-label input { cursor: pointer; accent-color: #0f172a; }
+
+/* Per-item checkbox */
+.mem-item-checkbox {
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+}
+.mem-item-checkbox input { accent-color: #0f172a; cursor: pointer; }
+
+/* Selected card state */
+.memory-fact-card.selected {
+  border-color: #94a3b8;
+  background: #f0f9ff;
+  box-shadow: 0 0 0 2px #bfdbfe;
+}
+
+/* Fact top row with checkbox */
+.fact-top-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+/* Badge for auto_chat type */
+.fact-type-badge.auto_chat {
+  background: #ccfbf1;
+  color: #0f766e;
+  border: 1px solid #99f6e4;
+}
+
+/* Bulk delete button */
+.btn-bulk-delete {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 14px;
+  background: #fef2f2;
+  border: 1px solid #fca5a5;
+  color: #b91c1c;
+  border-radius: 8px;
+  font-size: 12.5px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.btn-bulk-delete:hover:not(:disabled) {
+  background: #fee2e2;
+  border-color: #f87171;
+}
+.btn-bulk-delete:disabled { opacity: 0.6; cursor: not-allowed; }
+
+/* Empty memory icon */
+.empty-mem-icon {
+  font-size: 40px;
+  margin-bottom: 10px;
+}
+
 </style>

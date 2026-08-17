@@ -512,16 +512,23 @@ class RagService:
         Retrieves top learned facts/rules/corrections using vector similarity + keyword matching.
         """
         try:
-            facts = db.query(RagMemoryFact).filter(RagMemoryFact.is_active == True).all()
+            # Only retrieve corrections & manual facts for answering — auto_chat accumulates
+            # too much noise and slows down retrieval as volume grows.
+            facts = db.query(RagMemoryFact).filter(
+                RagMemoryFact.is_active == True,
+                RagMemoryFact.learned_from.in_(["user_feedback", "direct_input"])
+            ).order_by(RagMemoryFact.created_at.desc()).limit(150).all()
             if not facts:
                 return []
 
             query_vec = cls.generate_single_embedding(query)
             import numpy as np
 
-            scored = []
             q_vec = np.array(query_vec, dtype=np.float32)
             q_norm = np.linalg.norm(q_vec)
+
+            scored = []
+            q_words = set(re.findall(r'\w+', query.lower()))
 
             for f in facts:
                 sim = 0.0
@@ -531,13 +538,12 @@ class RagService:
                     if f_norm > 0:
                         sim = float(np.dot(q_vec, f_vec) / (q_norm * f_norm))
 
-                # Simple keyword overlap boost
-                q_words = set(re.findall(r'\w+', query.lower()))
+                # Keyword overlap boost
                 f_words = set(re.findall(r'\w+', (f.content or '').lower()))
                 overlap = len(q_words & f_words)
                 combined_score = sim + (0.1 * min(overlap, 3))
 
-                if combined_score > 0.45 or overlap >= 2:
+                if combined_score > 0.30 or overlap >= 1:
                     scored.append({
                         "id": f.id,
                         "subject": f.subject,
@@ -631,10 +637,25 @@ class RagService:
         learned_fact = None
         # If user provided a correction or detailed feedback, ingest as learned memory
         if correction_text and len(correction_text.strip()) > 5:
+            # Use the user's original question as subject for better retrieval similarity
+            # Find the user message that preceded this AI message
+            user_question = ""
+            try:
+                prev_user_msg = db.query(RagChatMessage).filter(
+                    RagChatMessage.session_id == msg.session_id,
+                    RagChatMessage.role == "user",
+                    RagChatMessage.created_at < msg.created_at
+                ).order_by(RagChatMessage.created_at.desc()).first()
+                if prev_user_msg:
+                    user_question = prev_user_msg.content[:80]
+            except Exception:
+                user_question = ""
+
+            subject_label = f"Koreksi untuk: {user_question}" if user_question else f"Koreksi: {msg.content[:40]}..."
             learned_fact = cls.learn_fact(
                 db=db,
                 content=correction_text.strip(),
-                subject=f"Koreksi: {msg.content[:40]}...",
+                subject=subject_label,
                 fact_type="user_correction",
                 user_id=user_id,
                 source_session_id=msg.session_id,
@@ -750,11 +771,21 @@ class RagService:
         return False
 
     @classmethod
-    def get_learned_facts(cls, db: Session, user_id: Optional[int] = None, limit: int = 50) -> List[Dict[str, Any]]:
-        """Retrieves learned long-term memory facts."""
-        facts = db.query(RagMemoryFact).filter(
-            RagMemoryFact.is_active == True
-        ).order_by(RagMemoryFact.created_at.desc()).limit(limit).all()
+    def get_learned_facts(
+        cls,
+        db: Session,
+        user_id: Optional[int] = None,
+        limit: int = 100,
+        fact_type: Optional[str] = None,
+        learned_from: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """Retrieves learned long-term memory facts with optional filters."""
+        q = db.query(RagMemoryFact).filter(RagMemoryFact.is_active == True)
+        if fact_type:
+            q = q.filter(RagMemoryFact.fact_type == fact_type)
+        if learned_from:
+            q = q.filter(RagMemoryFact.learned_from == learned_from)
+        facts = q.order_by(RagMemoryFact.created_at.desc()).limit(limit).all()
 
         return [
             {
@@ -778,6 +809,18 @@ class RagService:
             db.commit()
             return True
         return False
+
+    @classmethod
+    def delete_learned_facts_bulk(cls, db: Session, fact_ids: List[str]) -> int:
+        """Bulk-deletes multiple learned facts by their IDs."""
+        if not fact_ids:
+            return 0
+        deleted = db.query(RagMemoryFact).filter(
+            RagMemoryFact.id.in_(fact_ids)
+        ).delete(synchronize_session=False)
+        db.commit()
+        logger.info(f"[RagService] Bulk deleted {deleted} memory facts.")
+        return deleted
 
     @classmethod
     def chat_completion(
@@ -871,15 +914,17 @@ class RagService:
             "Anda adalah Hero Assistant, asisten AI resmi yang cerdas, efisien, dan profesional.\n\n"
             "ATURAN WAJIB FORMAT JAWABAN (STRICT RULES):\n"
             "1. BAHASA: Wajib 100% menggunakan Bahasa Indonesia yang baku, jelas, ringkas, dan profesional. Jangan pernah menjawab dalam Bahasa Inggris kecuali nama model/merek, istilah teknis, satuan, atau kode part/ukuran yang tidak dapat diterjemahkan.\n"
-            "2. HANYA JAWABAN AKHIR (NO META-THOUGHTS / NO CONSTRAINT CHECKS): Langsung berikan jawaban akhir yang siap dibaca oleh pengguna tanpa catatan meta evaluasi aturan/checklist internal.\n"
-            "3. WAJIB TABEL MARKDOWN UNTUK DATA SPESIFIKASI/TABULAR:\n"
+            "2. PRIORITAS MEMORI KOREKSI PENGGUNA (TERTINGGI): Jika terdapat bagian '[Memori & Aturan Khusus yang Dipelajari dari Pengguna]' dalam konteks, Anda WAJIB menjawab berdasarkan informasi tersebut terlebih dahulu. Koreksi dari pengguna selalu lebih akurat daripada dokumen. Jangan pernah mengabaikan atau mengabaikan memori ini.\n"
+            "3. HANYA JAWABAN AKHIR (NO META-THOUGHTS / NO CONSTRAINT CHECKS): Langsung berikan jawaban akhir yang siap dibaca oleh pengguna tanpa catatan meta evaluasi aturan/checklist internal.\n"
+            "4. WAJIB TABEL MARKDOWN UNTUK DATA SPESIFIKASI/TABULAR:\n"
             "   - Jika jawaban memuat data spesifikasi ban, ukuran, tekanan angin (pressure/bar/psi), beban/muatan (load index/kg/lbs), kecepatan, dimensi, kode part, atau perbandingan tipe ban, ANDA WAJIB MENYAJIKANNYA DALAM TABEL MARKDOWN LENGKAP:\n"
             "     | Model / Tipe | Ukuran Ban | Tekanan Angin (Bar / PSI) | Beban / Load (kg) | Kecepatan (km/h) |\n"
             "     | :--- | :--- | :--- | :--- | :--- |\n"
             "     | ... | ... | ... | ... | ... |\n"
             "   - Untuk penjelasan teks atau langkah operasional lainnya, gunakan poin-poin (bullet points) yang rapi, ringkas, dan to-the-point.\n"
-            "4. BERBASIS KONTEKS DOKUMEN & MEMORI: Analisis dan terjemahkan informasi teknis dari Konteks Dokumen Pengetahuan (termasuk istilah bahasa Inggris seperti 'inflation pressure', 'load capacity', 'tread depth', 'operating pressure') ke jawaban Bahasa Indonesia yang akurat dan jelas.\n"
-            "5. JIKA TIDAK DITEMUKAN: Sampaikan secara sopan dan singkat (cukup 1 kalimat) bahwa informasi spesifik tersebut tidak ditemukan dalam basis pengetahuan dokumen."
+            "5. BERBASIS KONTEKS DOKUMEN & MEMORI: Analisis dan terjemahkan informasi teknis dari Konteks Dokumen Pengetahuan (termasuk istilah bahasa Inggris seperti 'inflation pressure', 'load capacity', 'tread depth', 'operating pressure') ke jawaban Bahasa Indonesia yang akurat dan jelas.\n"
+            "6. JIKA TIDAK DITEMUKAN DI DOKUMEN TAPI ADA DI MEMORI: Jawab berdasarkan memori/koreksi pengguna, jangan katakan 'tidak ditemukan'.\n"
+            "7. JIKA BENAR-BENAR TIDAK DITEMUKAN: Sampaikan secara sopan dan singkat (cukup 1 kalimat) bahwa informasi spesifik tersebut tidak ditemukan dalam basis pengetahuan dokumen maupun memori."
         )
 
         current_prompt = f"""Konteks Dokumen & Memori Pengetahuan (Markdown):
@@ -933,6 +978,45 @@ Pertanyaan Pengguna:
 
         RedisService.save_chat_turn(session_id, "user", query)
         RedisService.save_chat_turn(session_id, "assistant", answer, sources=sources)
+
+        # 10. Auto-save Q&A pair — runs in BACKGROUND thread to not block response
+        is_not_found_answer = any(phrase in (answer or "").lower() for phrase in [
+            "tidak ditemukan", "tidak ada informasi", "tidak tersedia", "maaf, informasi"
+        ])
+        if answer and not is_not_found_answer:
+            import concurrent.futures
+            try:
+                from app.database.database import SessionLocal as _SessionLocal
+            except ImportError:
+                from backend.app.database.database import SessionLocal as _SessionLocal
+            _auto_query = query
+            _auto_answer = answer[:800]
+            _auto_session = session_id
+            _auto_msg_id = assistant_msg.id
+            _auto_user_id = user_id
+
+            def _background_auto_save():
+                try:
+                    bg_db = _SessionLocal()
+                    try:
+                        RagService.learn_fact(
+                            db=bg_db,
+                            content=f"Pertanyaan: {_auto_query}\nJawaban: {_auto_answer}",
+                            subject=f"Auto: {_auto_query[:70]}",
+                            fact_type="auto_chat",
+                            user_id=_auto_user_id,
+                            source_session_id=_auto_session,
+                            source_message_id=_auto_msg_id,
+                            learned_from="auto_chat"
+                        )
+                    finally:
+                        bg_db.close()
+                except Exception as bg_err:
+                    logger.warning(f"[RagService] Background auto-save failed: {bg_err}")
+
+            executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+            executor.submit(_background_auto_save)
+            executor.shutdown(wait=False)
 
         result = {
             "query": query,
