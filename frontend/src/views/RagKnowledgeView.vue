@@ -69,7 +69,7 @@ const redisStatus = ref(null)
 const chatMessages = ref([
   {
     role: 'assistant',
-    content: 'Halo! Saya adalah Hero Assistant terhubung ke basis pengetahuan Anda (didukung oleh **Groq Qwen 2.5/3.6**, **PostgreSQL Persistent Memory**, & **Self-Growth Engine**). Tanyakan apa saja mengenai dokumen dan data database yang telah Anda sinkronkan.',
+    content: 'Halo! Saya adalah Hero Assistant terhubung ke basis pengetahuan Anda. Tanyakan apa saja mengenai dokumen dan data database yang telah Anda sinkronkan.',
     sources: []
   }
 ])
@@ -658,13 +658,25 @@ const handleDeleteFact = async (factId) => {
 }
 
 // Chatbot Send with Multi-Turn Memory & Persistent DB Session
+const getUniqueSources = (sources) => {
+  if (!sources || !Array.isArray(sources)) return []
+  const map = new Map()
+  for (const s of sources) {
+    const key = `${s.filename}__${s.heading || ''}`
+    if (!map.has(key) || (s.similarity_score > map.get(key).similarity_score)) {
+      map.set(key, s)
+    }
+  }
+  return Array.from(map.values())
+}
+
 const clearChat = async () => {
   currentSessionId.value = 'sess_' + Math.random().toString(36).substring(2, 12)
   localStorage.setItem('raray_rag_session_id', currentSessionId.value)
   chatMessages.value = [
     {
       role: 'assistant',
-      content: 'Halo! Sesi percakapan baru telah dibuat. Saya adalah Hero Assistant terhubung ke basis pengetahuan Anda (didukung oleh **Groq Qwen 2.5/3.6**, **PostgreSQL Persistent Memory**, dan **Self-Growth Engine**). Tanyakan apa saja mengenai dokumen dan data database yang telah Anda sinkronkan.',
+      content: 'Halo! Sesi percakapan baru telah dibuat. Saya adalah Hero Assistant terhubung ke basis pengetahuan Anda. Tanyakan apa saja mengenai dokumen dan data database yang telah Anda sinkronkan.',
       sources: []
     }
   ]
@@ -781,6 +793,50 @@ const submitFeedbackAction = async () => {
   }
 }
 
+const formatInlineMarkdown = (text) => {
+  if (!text) return ''
+  return text
+    .replace(/`([^`]+)`/g, '<code class="chat-inline-code">$1</code>')
+    .replace(/\*\*\*(.*?)\*\*\*/g, '<strong><em>$1</em></strong>')
+    .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+    .replace(/\*(.*?)\*/g, '<em>$1</em>')
+}
+
+const renderTableHtml = (tableLines) => {
+  if (!tableLines || tableLines.length < 2) return ''
+  let tableHtml = '<div class="chat-table-wrapper"><table class="chat-table">'
+  let isFirstRow = true
+  let hasBody = false
+
+  for (let r = 0; r < tableLines.length; r++) {
+    const rawLine = tableLines[r].trim()
+    if (!rawLine) continue
+    let rowCells = rawLine.split('|')
+    if (rawLine.startsWith('|')) rowCells.shift()
+    if (rawLine.endsWith('|') && rowCells.length > 0) rowCells.pop()
+    rowCells = rowCells.map(c => c.trim())
+
+    // Skip separator lines like |:---|:---|
+    if (rowCells.every(c => /^:?-+:?$/.test(c))) {
+      continue
+    }
+
+    if (isFirstRow) {
+      tableHtml += '<thead><tr>' + rowCells.map(c => `<th>${formatInlineMarkdown(c)}</th>`).join('') + '</tr></thead><tbody>'
+      isFirstRow = false
+      hasBody = true
+    } else {
+      tableHtml += '<tr>' + rowCells.map(c => `<td>${formatInlineMarkdown(c)}</td>`).join('') + '</tr>'
+    }
+  }
+
+  if (hasBody) {
+    tableHtml += '</tbody>'
+  }
+  tableHtml += '</table></div>'
+  return tableHtml
+}
+
 const formatMarkdown = (text) => {
   if (!text) return ''
   let html = text
@@ -796,77 +852,38 @@ const formatMarkdown = (text) => {
     return placeholder
   })
 
-  // Parse Markdown Tables and store in placeholders to protect from <br> injection
+  // Parse Markdown Tables and store in placeholders
   const tableBlocks = []
   const lines = html.split('\n')
   const newLines = []
   let currentTable = []
 
+  const isTableRow = (line) => {
+    const trimmed = line.trim()
+    return trimmed.startsWith('|') && (trimmed.endsWith('|') || trimmed.includes('|', 1))
+  }
+
   for (let i = 0; i < lines.length; i++) {
-    const line = lines[i].trim()
-    if (line.startsWith('|') && line.endsWith('|')) {
+    const line = lines[i]
+    if (isTableRow(line)) {
       currentTable.push(line)
     } else {
       if (currentTable.length >= 2) {
-        let tableHtml = '<div class="chat-table-wrapper"><table class="chat-table">'
-        let isFirstRow = true
-        let hasBody = false
-
-        for (let r = 0; r < currentTable.length; r++) {
-          const rowCells = currentTable[r].split('|').slice(1, -1).map(c => c.trim())
-          if (rowCells.every(c => /^:?-+:?$/.test(c))) {
-            continue
-          }
-          if (isFirstRow) {
-            tableHtml += '<thead><tr>' + rowCells.map(c => `<th>${c}</th>`).join('') + '</tr></thead><tbody>'
-            isFirstRow = false
-            hasBody = true
-          } else {
-            tableHtml += '<tr>' + rowCells.map(c => `<td>${c}</td>`).join('') + '</tr>'
-          }
-        }
-        if (hasBody) {
-          tableHtml += '</tbody>'
-        }
-        tableHtml += '</table></div>'
-
         const placeholder = `__TABLE_BLOCK_${tableBlocks.length}__`
-        tableBlocks.push(tableHtml)
+        tableBlocks.push(renderTableHtml(currentTable))
         newLines.push(placeholder)
         currentTable = []
       } else if (currentTable.length === 1) {
         newLines.push(currentTable[0])
         currentTable = []
       }
-      newLines.push(lines[i])
+      newLines.push(line)
     }
   }
 
   if (currentTable.length >= 2) {
-    let tableHtml = '<div class="chat-table-wrapper"><table class="chat-table">'
-    let isFirstRow = true
-    let hasBody = false
-
-    for (let r = 0; r < currentTable.length; r++) {
-      const rowCells = currentTable[r].split('|').slice(1, -1).map(c => c.trim())
-      if (rowCells.every(c => /^:?-+:?$/.test(c))) {
-        continue
-      }
-      if (isFirstRow) {
-        tableHtml += '<thead><tr>' + rowCells.map(c => `<th>${c}</th>`).join('') + '</tr></thead><tbody>'
-        isFirstRow = false
-        hasBody = true
-      } else {
-        tableHtml += '<tr>' + rowCells.map(c => `<td>${c}</td>`).join('') + '</tr>'
-      }
-    }
-    if (hasBody) {
-      tableHtml += '</tbody>'
-    }
-    tableHtml += '</table></div>'
-
     const placeholder = `__TABLE_BLOCK_${tableBlocks.length}__`
-    tableBlocks.push(tableHtml)
+    tableBlocks.push(renderTableHtml(currentTable))
     newLines.push(placeholder)
   } else if (currentTable.length === 1) {
     newLines.push(currentTable[0])
@@ -1040,7 +1057,7 @@ print("Sumber:", [s["filename"] for s in chat_res["data"]["sources"]])`
             </svg>
             RAG Knowledge Base & pgvector
           </h1>
-          <span class="pill-badge">AnyDoc + pgvector + Groq Qwen + External DB</span>
+          <span class="pill-badge">AnyDoc + pgvector + External DB</span>
         </div>
         <p class="page-subtitle">
           Basis pengetahuan cerdas untuk Chatbot: Konversi otomatis dokumen (Word, PDF, Excel, OCR) & sinkronisasi tabel database PostgreSQL eksternal ke vektor semantik untuk retrieval instan di Next.js.
@@ -1058,8 +1075,8 @@ print("Sumber:", [s["filename"] for s in chat_res["data"]["sources"]])`
           <span class="stat-lbl">Vektor Chunks</span>
         </div>
         <div class="stat-card engine-stat">
-          <span class="stat-val">Groq Qwen</span>
-          <span class="stat-lbl">Fast AI Engine</span>
+          <span class="stat-val">Hero AI</span>
+          <span class="stat-lbl">AI Assistant Engine</span>
         </div>
         <div class="stat-card redis-stat">
           <span class="stat-val">{{ redisStatus?.available ? '⚡ Connected' : '⚡ Redis Active' }}</span>
@@ -1635,8 +1652,8 @@ print("Sumber:", [s["filename"] for s in chat_res["data"]["sources"]])`
             <div class="chat-title-box">
               <span class="status-indicator"></span>
               <div>
-                <h3>RAG Knowledge Chatbot (Groq Qwen 2.5/3.6)</h3>
-                <span class="context-memory-sub">🧠 PostgreSQL Persistent Memory + Self-Growth Engine Aktif</span>
+                <h3>RAG Knowledge Chatbot</h3>
+                <span class="context-memory-sub">🧠 Basis Pengetahuan & Memori Aktif</span>
               </div>
             </div>
             <div class="chat-controls">
@@ -1669,21 +1686,11 @@ print("Sumber:", [s["filename"] for s in chat_res["data"]["sources"]])`
                 <div class="bubble-sender">{{ msg.role === 'user' ? 'Anda' : 'Hero Assistant' }}</div>
                 <div class="bubble-content" v-html="formatMarkdown(msg.content)"></div>
 
-                <!-- Learned Facts Footnote -->
-                <div v-if="msg.learned_facts && msg.learned_facts.length > 0" class="learned-facts-box">
-                  <div class="learned-title">🧠 Memori yang Dipelajari & Diterapkan:</div>
-                  <div class="learned-tags">
-                    <span v-for="(f, fIdx) in msg.learned_facts" :key="fIdx" class="learned-tag">
-                      💡 {{ f.subject || f.content }} ({{ f.fact_type }})
-                    </span>
-                  </div>
-                </div>
-
                 <!-- Sources Footnote -->
                 <div v-if="msg.sources && msg.sources.length > 0" class="sources-box">
                   <div class="sources-title">📎 Sumber Rujukan Dokumen / Database:</div>
                   <div class="sources-tags">
-                    <span v-for="(s, sIdx) in msg.sources" :key="sIdx" class="source-tag">
+                    <span v-for="(s, sIdx) in getUniqueSources(msg.sources)" :key="sIdx" class="source-tag">
                       <span v-if="s.filename.startsWith('db_')">🗄️</span>
                       <span v-else>📄</span>
                       {{ s.filename }} <span v-if="s.heading">({{ s.heading }})</span> - Skor: {{ (s.similarity_score * 100).toFixed(0) }}%
@@ -1692,8 +1699,8 @@ print("Sumber:", [s["filename"] for s in chat_res["data"]["sources"]])`
                 </div>
 
                 <div v-if="msg.latency" class="bubble-latency">
-                  <span v-if="msg.from_cache" class="cache-badge">⚡ Redis Instant Cache Hit ({{ msg.latency }} ms)</span>
-                  <span v-else>⏱️ {{ msg.latency }} ms (Groq + PostgreSQL Memory)</span>
+                  <span v-if="msg.from_cache" class="cache-badge">⚡ Instant Cache Hit ({{ msg.latency }} ms)</span>
+                  <span v-else>⏱️ {{ msg.latency }} ms</span>
                 </div>
 
                 <!-- Interactive Feedback & Self-Growth Bar -->
@@ -1733,7 +1740,7 @@ print("Sumber:", [s["filename"] for s in chat_res["data"]["sources"]])`
             <div v-if="isGenerating" class="chat-bubble-wrap assistant">
               <div class="chat-bubble loading">
                 <div class="typing-dots"><span></span><span></span><span></span></div>
-                <span>Mencari vektor dokumen & memori yang dipelajari via Groq Qwen...</span>
+                <span>Mencari jawaban dalam basis pengetahuan...</span>
               </div>
             </div>
           </div>

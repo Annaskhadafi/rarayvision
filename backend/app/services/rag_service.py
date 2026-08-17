@@ -43,6 +43,51 @@ def get_fastembed_model():
     return _fastembed_instance
 
 
+# Domain Bilingual Query Expansion Dictionary (Indonesian -> Technical Engineering / Tire Standards)
+DOMAIN_SYNONYMS = {
+    "tekanan": ["pressure", "inflation", "operating pressure", "bar", "psi", "cold pressure"],
+    "angin": ["pressure", "inflation", "psi", "bar"],
+    "ban": ["tire", "tyre", "earthmover", "otr", "tubeless"],
+    "muatan": ["load", "payload", "capacity", "kg", "lbs", "load index"],
+    "beban": ["load", "payload", "capacity", "kg", "lbs", "load index"],
+    "kapasitas": ["capacity", "payload", "load"],
+    "kecepatan": ["speed", "km/h", "mph", "speed symbol"],
+    "ukuran": ["size", "dimension", "radial", "rim", "diameter"],
+    "dimensi": ["dimension", "size", "width", "diameter", "overall diameter"],
+    "tapak": ["tread", "tread depth", "otd", "pattern"],
+    "alur": ["tread", "tread depth", "otd", "groove"],
+    "kembangan": ["tread", "pattern", "otd"],
+    "kedalaman": ["depth", "tread depth", "otd", "mm", "32nds"],
+    "panas": ["tkph", "tmph", "temperature", "heat"],
+    "suhu": ["temperature", "tkph", "tmph", "heat"],
+    "berat": ["weight", "kg", "lbs", "mass"],
+    "velg": ["rim", "wheel", "flange"],
+    "pelek": ["rim", "wheel", "flange"],
+    "tipe": ["type", "pattern", "star rating", "code"],
+    "aturan": ["sop", "procedure", "rule", "instruction"],
+    "dongkrak": ["hydraulic jack", "jack", "lifting"],
+    "bongkar": ["demounting", "removal", "disassembly"],
+    "pasang": ["mounting", "assembly", "installation"]
+}
+
+
+def expand_bilingual_query(query: str) -> str:
+    """Expands Indonesian technical query terms with English technical synonyms for enhanced RAG cross-lingual recall."""
+    if not query:
+        return ""
+    q_clean = query.lower()
+    words = re.findall(r'[a-zA-Z0-9_\-\.\/]+', q_clean)
+    added_terms = []
+    for w in words:
+        if w in DOMAIN_SYNONYMS:
+            added_terms.extend(DOMAIN_SYNONYMS[w])
+    if added_terms:
+        # Keep unique terms
+        unique_added = list(dict.fromkeys(added_terms))
+        return f"{query} {' '.join(unique_added[:8])}"
+    return query
+
+
 def tokenize_text(text: str) -> List[str]:
     """Tokenize alphanumeric words, technical identifiers, SKU numbers, and size codes."""
     if not text:
@@ -344,10 +389,12 @@ class RagService:
         document_id: Optional[str] = None
     ) -> List[Dict[str, Any]]:
         """
-        Executes high-accuracy Hybrid Search (Dense Vector Cosine Similarity + BM25 Sparse Lexical Scoring with RRF).
+        Executes high-accuracy Hybrid Search (Dense Vector Cosine Similarity + BM25 Sparse Lexical Scoring with RRF)
+        with automatic Cross-Lingual & Domain Technical Synonym Query Expansion.
         """
-        query_vec = cls.generate_single_embedding(query)
-        return cls._hybrid_similarity_search(db, query, query_vec, top_k, document_id)
+        expanded_query = expand_bilingual_query(query)
+        query_vec = cls.generate_single_embedding(expanded_query)
+        return cls._hybrid_similarity_search(db, expanded_query, query_vec, top_k, document_id, original_query=query)
 
     @classmethod
     def _hybrid_similarity_search(
@@ -356,7 +403,8 @@ class RagService:
         query: str,
         query_vec: List[float],
         top_k: int,
-        document_id: Optional[str] = None
+        document_id: Optional[str] = None,
+        original_query: Optional[str] = None
     ) -> List[Dict[str, Any]]:
         """
         Hybrid retrieval combining Dense Vector Cosine Similarity and BM25 Sparse Lexical Scoring
@@ -416,6 +464,7 @@ class RagService:
 
         # 5. Reciprocal Rank Fusion (RRF with k=60 constant) + Exact Keyword Boost
         q_lower = query.lower().strip()
+        orig_lower = (original_query or query).lower().strip()
         scored = []
         for idx, item in enumerate(items):
             r_vec = vec_rank_map[idx]
@@ -425,10 +474,10 @@ class RagService:
             # Exact phrase match boost
             content_lower = item["content"].lower()
             heading_lower = item["heading"].lower()
-            if q_lower in heading_lower:
+            if orig_lower in heading_lower or any(w in heading_lower for w in orig_lower.split() if len(w) > 3):
                 rrf_score += 0.015
-            elif q_lower in content_lower:
-                rrf_score += 0.008
+            if orig_lower in content_lower:
+                rrf_score += 0.010
 
             # Normalized score for UI presentation [0.0 - 1.0]
             norm_sim = min(1.0, (item["vector_sim"] * 0.65) + (min(1.0, bm25_scores[idx] / 5.0) * 0.35))
@@ -771,20 +820,19 @@ class RagService:
                 cached_res["latency_ms"] = round((time.perf_counter() - start_time) * 1000, 2)
                 return cached_res
 
-        # 3. Context-aware search query
+        # 3. Context-aware search query without assistant message pollution
         search_query = query.strip()
-        history_for_search = []
-        if active_messages:
-            for m in active_messages:
-                if isinstance(m, dict) and m.get("content") and m.get("role") in ["user", "assistant"]:
-                    c_text = re.sub(r'📎 Sumber Rujukan[\s\S]*$', '', str(m["content"])).strip()
-                    if c_text:
-                        history_for_search.append(c_text)
+        user_history = [
+            str(m.get("content")).strip() for m in active_messages 
+            if isinstance(m, dict) and m.get("role") == "user" and m.get("content")
+        ]
+        # Only prepend previous user context if the current query is very short and contains anaphoric pronouns
+        if user_history and len(query.split()) < 4:
+            q_lower = query.lower()
+            if any(p in q_lower for p in ["itu", "tersebut", "nya", "ini", "dia", "maksud", "bagaimana", "tekanannya"]):
+                search_query = f"{user_history[-1][:80]} {query.strip()}"
 
-        if len(history_for_search) >= 2 and len(query.split()) < 7:
-            search_query = f"{history_for_search[-2][:80]} {query.strip()}"
-
-        # 4. Retrieve relevant chunks from documents
+        # 4. Retrieve relevant chunks from documents (with bilingual expansion)
         chunks = cls.search_similar_chunks(db, search_query, top_k=top_k, document_id=document_id)
         if not chunks and search_query != query.strip():
             chunks = cls.search_similar_chunks(db, query.strip(), top_k=top_k, document_id=document_id)
@@ -822,13 +870,16 @@ class RagService:
         system_instruction = custom_system_prompt or (
             "Anda adalah Hero Assistant, asisten AI resmi yang cerdas, efisien, dan profesional.\n\n"
             "ATURAN WAJIB FORMAT JAWABAN (STRICT RULES):\n"
-            "1. BAHASA: Wajib 100% menggunakan Bahasa Indonesia yang baku, jelas, ringkas, dan profesional. Jangan pernah menjawab dalam Bahasa Inggris kecuali istilah teknis atau kode part yang tidak dapat diterjemahkan.\n"
-            "2. HANYA JAWABAN AKHIR (NO META-THOUGHTS / NO CONSTRAINT CHECKS): Langsung berikan jawaban akhir yang siap dibaca oleh pengguna. DILARANG KERAS menampilkan proses berpikir internal, evaluasi aturan/checklist (seperti 'Check against Constraints', 'Thinking Process', 'Self-Correction', atau catatan meta lainnya) di dalam teks jawaban.\n"
-            "3. STRUKTUR TABEL & POIN-POIN:\n"
-            "   - Jika data/informasi memuat perbandingan, daftar ukuran/spesifikasi ban, kode part/SKU, daftar harga, stok inventaris, rincian data tabular, jadwal, atau informasi multi-kolom, WAJIB sajikan dalam bentuk TABEL MARKDOWN yang rapi (`| Header 1 | Header 2 | ... |` dan `| :--- | :--- | ... |`).\n"
-            "   - Untuk penjelasan non-tabular, gunakan poin-poin (bullet points) yang rapi, ringkas, dan to-the-point tanpa kata pengantar bertele-tele.\n"
-            "4. BERBASIS KONTEKS DOKUMEN & MEMORI: Jawab secara akurat dan setia berdasarkan Konteks Dokumen Pengetahuan dan Memori Fakta yang disediakan.\n"
-            "5. JIKA TIDAK DITEMUKAN: Sampaikan secara sopan dan singkat (cukup 1 kalimat) bahwa informasi tidak ditemukan dalam basis pengetahuan dokumen."
+            "1. BAHASA: Wajib 100% menggunakan Bahasa Indonesia yang baku, jelas, ringkas, dan profesional. Jangan pernah menjawab dalam Bahasa Inggris kecuali nama model/merek, istilah teknis, satuan, atau kode part/ukuran yang tidak dapat diterjemahkan.\n"
+            "2. HANYA JAWABAN AKHIR (NO META-THOUGHTS / NO CONSTRAINT CHECKS): Langsung berikan jawaban akhir yang siap dibaca oleh pengguna tanpa catatan meta evaluasi aturan/checklist internal.\n"
+            "3. WAJIB TABEL MARKDOWN UNTUK DATA SPESIFIKASI/TABULAR:\n"
+            "   - Jika jawaban memuat data spesifikasi ban, ukuran, tekanan angin (pressure/bar/psi), beban/muatan (load index/kg/lbs), kecepatan, dimensi, kode part, atau perbandingan tipe ban, ANDA WAJIB MENYAJIKANNYA DALAM TABEL MARKDOWN LENGKAP:\n"
+            "     | Model / Tipe | Ukuran Ban | Tekanan Angin (Bar / PSI) | Beban / Load (kg) | Kecepatan (km/h) |\n"
+            "     | :--- | :--- | :--- | :--- | :--- |\n"
+            "     | ... | ... | ... | ... | ... |\n"
+            "   - Untuk penjelasan teks atau langkah operasional lainnya, gunakan poin-poin (bullet points) yang rapi, ringkas, dan to-the-point.\n"
+            "4. BERBASIS KONTEKS DOKUMEN & MEMORI: Analisis dan terjemahkan informasi teknis dari Konteks Dokumen Pengetahuan (termasuk istilah bahasa Inggris seperti 'inflation pressure', 'load capacity', 'tread depth', 'operating pressure') ke jawaban Bahasa Indonesia yang akurat dan jelas.\n"
+            "5. JIKA TIDAK DITEMUKAN: Sampaikan secara sopan dan singkat (cukup 1 kalimat) bahwa informasi spesifik tersebut tidak ditemukan dalam basis pengetahuan dokumen."
         )
 
         current_prompt = f"""Konteks Dokumen & Memori Pengetahuan (Markdown):

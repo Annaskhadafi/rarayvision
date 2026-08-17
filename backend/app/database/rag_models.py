@@ -4,8 +4,13 @@ from datetime import datetime
 
 try:
     from app.database.database import Base
+    from app.database.models import User
 except ImportError:
     from backend.app.database.database import Base
+    try:
+        from backend.app.database.models import User
+    except ImportError:
+        pass
 
 
 class RagDocument(Base):
