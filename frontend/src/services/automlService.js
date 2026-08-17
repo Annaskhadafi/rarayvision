@@ -32,6 +32,24 @@ export const automlService = {
   },
 
   /**
+   * Fetches data directly from an external API URL (e.g. ERP, POS, CRM)
+   */
+  async fetchExternalApi(payload) {
+    const res = await fetch(`${API_BASE_URL}/api/v1/automl/fetch-external-api`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(payload)
+    })
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}))
+      throw new Error(err.detail || 'Gagal mengambil atau memproses data dari API eksternal.')
+    }
+    return await res.json()
+  },
+
+  /**
    * Real-Time What-If Scenario Simulation (< 15ms)
    */
   async simulateScenario(payload) {

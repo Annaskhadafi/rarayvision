@@ -36,6 +36,70 @@ class AutoMLService:
     """
 
     @classmethod
+    def fetch_and_analyze_external_api(
+        cls,
+        api_url: str,
+        method: str = "GET",
+        headers: Optional[Dict[str, str]] = None,
+        request_body: Optional[Dict[str, Any]] = None,
+        data_path: Optional[str] = None,
+        dataset_name: Optional[str] = None,
+        target_column: Optional[str] = None,
+        date_column: Optional[str] = None,
+        forecast_horizon: int = 14,
+        base_url: str = ""
+    ) -> Dict[str, Any]:
+        """
+        Fetches tabular data directly from an external API endpoint and processes AutoML.
+        """
+        import requests
+        req_headers = {"User-Agent": "RarayVision-AutoML/1.0", "Accept": "application/json"}
+        if headers:
+            req_headers.update(headers)
+
+        method = (method or "GET").upper()
+        try:
+            if method == "POST":
+                resp = requests.post(api_url, headers=req_headers, json=request_body or {}, timeout=15)
+            else:
+                resp = requests.get(api_url, headers=req_headers, timeout=15)
+
+            if resp.status_code >= 400:
+                raise ValueError(f"External API returned HTTP status {resp.status_code}: {resp.text[:200]}")
+
+            json_resp = resp.json()
+        except Exception as e:
+            raise ValueError(f"Gagal memanggil API eksternal ({api_url}): {str(e)}")
+
+        # Extract data list if wrapped inside an object (e.g. {"data": [...]}, {"items": [...]}, {"results": [...]})
+        data_list = json_resp
+        if data_path:
+            for part in data_path.split('.'):
+                if isinstance(data_list, dict):
+                    data_list = data_list.get(part, [])
+        elif isinstance(json_resp, dict):
+            for possible_key in ["data", "items", "results", "records", "rows", "payload", "list"]:
+                if isinstance(json_resp.get(possible_key), list) and len(json_resp.get(possible_key)) > 0:
+                    data_list = json_resp[possible_key]
+                    break
+
+        if not isinstance(data_list, list) or len(data_list) == 0:
+            raise ValueError(
+                "Response dari API tidak berupa array/list data tabel. "
+                "Jika data terbungkus objek (misal: `{\"data\": [...]}`), masukkan 'data' pada field Data Key Path."
+            )
+
+        name = dataset_name or f"API_{api_url.split('//')[-1].split('/')[0]}"
+        return cls.process_and_analyze(
+            data=data_list,
+            dataset_name=name,
+            target_column=target_column,
+            date_column=date_column,
+            forecast_horizon=forecast_horizon,
+            base_url=base_url
+        )
+
+    @classmethod
     def get_presets(cls) -> List[Dict[str, Any]]:
         """Provides realistic sample datasets for instant demonstration."""
         today = datetime.utcnow()

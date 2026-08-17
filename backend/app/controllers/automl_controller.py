@@ -29,10 +29,51 @@ class SimulateScenarioRequest(BaseModel):
     safety_buffer_days: int = Field(0, description="Jumlah hari buffer persediaan/safety stock yang direkomendasikan")
 
 
+class FetchExternalApiRequest(BaseModel):
+    api_url: str = Field(..., description="URL endpoint API eksternal yang mengembalikan data JSON")
+    method: Optional[str] = Field("GET", description="HTTP Method (GET / POST)")
+    headers: Optional[Dict[str, str]] = Field(None, description="Header kustom seperti Authorization Bearer token")
+    request_body: Optional[Dict[str, Any]] = Field(None, description="Payload body jika POST")
+    data_path: Optional[str] = Field(None, description="Key path jika data terbungkus (misal: 'data' atau 'items')")
+    dataset_name: Optional[str] = Field(None, description="Nama dataset")
+    target_column: Optional[str] = Field(None, description="Kolom target nilai numerik")
+    date_column: Optional[str] = Field(None, description="Kolom tanggal/waktu")
+    forecast_horizon: Optional[int] = Field(14, description="Jumlah periode proyeksi masa depan")
+
+
 class AskAiRequest(BaseModel):
     job_id: str = Field(..., description="Job ID dari sesi dataset analitik yang sedang dibuka")
     question: str = Field(..., description="Pertanyaan analisis pengguna seputar data ini")
     chat_history: Optional[List[Dict[str, str]]] = Field(None, description="Riwayat percakapan sebelumnya")
+
+
+@router.post("/fetch-external-api", summary="Fetch Tabular Data from External API URL & Run AutoML")
+async def fetch_external_api(payload: FetchExternalApiRequest, request: Request):
+    """
+    Direct External API Ingestion:
+    Fetches raw JSON data from any 3rd party URL (ERP, POS, HR, CRM),
+    extracts the tabular records, and runs the complete AutoML pipeline.
+    """
+    try:
+        base_url = str(request.base_url)
+        res = AutoMLService.fetch_and_analyze_external_api(
+            api_url=payload.api_url,
+            method=payload.method or "GET",
+            headers=payload.headers,
+            request_body=payload.request_body,
+            data_path=payload.data_path,
+            dataset_name=payload.dataset_name,
+            target_column=payload.target_column,
+            date_column=payload.date_column,
+            forecast_horizon=payload.forecast_horizon or 14,
+            base_url=base_url
+        )
+        return res
+    except ValueError as ve:
+        raise HTTPException(status_code=400, detail=str(ve))
+    except Exception as e:
+        logger.error(f"[AutoMLController] Fetch external API error: {e}")
+        raise HTTPException(status_code=500, detail=f"Gagal memproses data API: {str(e)}")
 
 
 @router.get("/presets", summary="Get Preset Datasets for Testing")

@@ -3,15 +3,31 @@ import { ref, computed, onMounted } from 'vue'
 import { automlService } from '../services/automlService'
 import { API_BASE_URL } from '../utils'
 
+// Ingestion Modes: 'api_url', 'json_paste', 'csv_upload', 'presets'
+const ingestionMode = ref('api_url')
+
+// Presets
 const presets = ref([])
 const selectedPresetId = ref('sales_revenue')
+
+// External API Config
+const externalApiUrl = ref('https://jsonplaceholder.typicode.com/posts')
+const externalApiMethod = ref('GET')
+const externalApiHeader = ref('')
+const externalApiBody = ref('')
+const externalDataPath = ref('')
+
+// Raw JSON / CSV Config
 const customJsonInput = ref('')
 const selectedFile = ref(null)
-const datasetName = ref('Data Penjualan Harian')
+
+// Shared Params
+const datasetName = ref('Data API Eksternal')
 const forecastHorizon = ref(14)
 const targetColumn = ref('')
 const dateColumn = ref('')
 
+// State
 const isLoading = ref(false)
 const errorMessage = ref('')
 const successMessage = ref('')
@@ -40,7 +56,7 @@ const isAiThinking = ref(false)
 
 // Integration snippet state
 const copiedSnippet = ref(false)
-const selectedSnippetLang = ref('curl') // 'curl', 'python', 'javascript', 'iframe'
+const selectedSnippetLang = ref('curl')
 
 // Interactive Chart Tooltip State
 const hoveredPoint = ref(null)
@@ -51,6 +67,7 @@ onMounted(async () => {
     const res = await automlService.getPresets()
     presets.value = res.presets || []
     if (presets.value.length > 0) {
+      customJsonInput.value = JSON.stringify(presets.value[0].data, null, 2)
       loadPreset(presets.value[0])
     }
   } catch (err) {
@@ -76,7 +93,6 @@ const onFileSelect = (event) => {
   if (file) {
     selectedFile.value = file
     datasetName.value = file.name.replace('.csv', '').replace(/_/g, ' ')
-    selectedPresetId.value = 'custom_csv'
     errorMessage.value = ''
     resetSimulationState()
   }
@@ -97,7 +113,46 @@ const runAnalysis = async () => {
 
   try {
     let res
-    if (selectedFile.value) {
+    if (ingestionMode.value === 'api_url') {
+      if (!externalApiUrl.value.trim()) {
+        throw new Error('Harap masukkan URL Endpoint API Eksternal yang valid.')
+      }
+
+      let parsedHeaders = {}
+      if (externalApiHeader.value.trim()) {
+        try {
+          parsedHeaders = JSON.parse(externalApiHeader.value)
+        } catch (e) {
+          // If simple string, assume Authorization header
+          parsedHeaders = { "Authorization": externalApiHeader.value.trim() }
+        }
+      }
+
+      let parsedBody = null
+      if (externalApiMethod.value === 'POST' && externalApiBody.value.trim()) {
+        try {
+          parsedBody = JSON.parse(externalApiBody.value)
+        } catch (e) {
+          throw new Error('Format Request Body POST harus berupa JSON valid.')
+        }
+      }
+
+      const payload = {
+        api_url: externalApiUrl.value.trim(),
+        method: externalApiMethod.value,
+        headers: parsedHeaders,
+        request_body: parsedBody,
+        data_path: externalDataPath.value.trim() || null,
+        dataset_name: datasetName.value || 'Data_API_Live',
+        forecast_horizon: Number(forecastHorizon.value),
+        target_column: targetColumn.value || null,
+        date_column: dateColumn.value || null
+      }
+      res = await automlService.fetchExternalApi(payload)
+    } else if (ingestionMode.value === 'csv_upload') {
+      if (!selectedFile.value) {
+        throw new Error('Silakan pilih atau upload file CSV terlebih dahulu.')
+      }
       const formData = new FormData()
       formData.append('file', selectedFile.value)
       formData.append('dataset_name', datasetName.value)
@@ -124,9 +179,9 @@ const runAnalysis = async () => {
     }
 
     resultData.value = res
-    successMessage.value = `Turnamen Model selesai! Model Juara: ${res.tournament_results?.winner?.name} (Akurasi: ${res.tournament_results?.accuracy_score}%) dalam ${res.latency_ms} ms.`
+    successMessage.value = `Berhasil! Model Juara: ${res.tournament_results?.winner?.name} (Akurasi: ${res.tournament_results?.accuracy_score}%) diproses dalam ${res.latency_ms} ms.`
   } catch (err) {
-    errorMessage.value = err.message || 'Gagal menjalankan pemrosesan AutoML.'
+    errorMessage.value = err.message || 'Gagal menjalankan pemrosesan data.'
   } finally {
     isLoading.value = false
   }
@@ -186,7 +241,7 @@ const sendAiQuestion = async (presetQuestion = null) => {
   }
 }
 
-// ── SVG Chart Computed Geometry ──────────────────────────────────────────
+// ── SVG Chart Geometry ──────────────────────────────────────────────────
 const chartData = computed(() => {
   if (!resultData.value || !resultData.value.table_data) return null
   const table = resultData.value.table_data
@@ -448,7 +503,7 @@ const downloadCsv = () => {
         <button class="btn-primary" :disabled="isLoading" @click="runAnalysis">
           <svg v-if="isLoading" class="animate-spin" viewBox="0 0 24 24" width="16" height="16" fill="none"><circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" class="opacity-25"></circle><path fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" class="opacity-75"></path></svg>
           <svg v-else viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
-          {{ isLoading ? 'Memproses ML & AI...' : 'Analisis & Prediksi' }}
+          {{ isLoading ? 'Memproses Data...' : 'Tarik & Analisis Data' }}
         </button>
       </div>
     </div>
@@ -463,47 +518,149 @@ const downloadCsv = () => {
       <span>{{ successMessage }}</span>
     </div>
 
-    <!-- Presets & Ingestion Control Bar (Clean Light Card) -->
+    <!-- Data Ingestion Control Card (Clean White Card) -->
     <div class="control-panel">
-      <div class="control-grid">
-        <div class="control-item">
-          <label class="control-label">Pilih Dataset Contoh (Preset):</label>
-          <div class="preset-pills">
-            <button 
-              v-for="p in presets" 
-              :key="p.id" 
-              class="preset-btn" 
-              :class="{ active: selectedPresetId === p.id }"
-              @click="loadPreset(p)"
+      <!-- Ingestion Mode Selector Tabs -->
+      <div class="mode-nav-tabs">
+        <button 
+          class="mode-tab" 
+          :class="{ active: ingestionMode === 'api_url' }"
+          @click="ingestionMode = 'api_url'"
+        >
+          <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg>
+          1. Input Endpoint API Eksternal
+        </button>
+        <button 
+          class="mode-tab" 
+          :class="{ active: ingestionMode === 'json_paste' }"
+          @click="ingestionMode = 'json_paste'"
+        >
+          <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none"><polyline points="16 18 22 12 16 6"></polyline><polyline points="8 6 2 12 8 18"></polyline></svg>
+          2. Paste Raw JSON Data
+        </button>
+        <button 
+          class="mode-tab" 
+          :class="{ active: ingestionMode === 'csv_upload' }"
+          @click="ingestionMode = 'csv_upload'"
+        >
+          <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="17 8 12 3 7 8"></polyline><line x1="12" y1="3" x2="12" y2="15"></line></svg>
+          3. Upload CSV File
+        </button>
+        <button 
+          class="mode-tab" 
+          :class="{ active: ingestionMode === 'presets' }"
+          @click="ingestionMode = 'presets'"
+        >
+          <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon></svg>
+          4. Preset Demo Cepat
+        </button>
+      </div>
+
+      <!-- MODE 1: EXTERNAL API URL -->
+      <div v-if="ingestionMode === 'api_url'" class="mode-content">
+        <div class="api-inputs-grid">
+          <div class="input-group-full">
+            <label class="param-label">URL Endpoint API Eksternal (Website / Server Anda):</label>
+            <div class="url-input-wrap">
+              <select v-model="externalApiMethod" class="method-select">
+                <option value="GET">GET</option>
+                <option value="POST">POST</option>
+              </select>
+              <input 
+                type="text" 
+                v-model="externalApiUrl" 
+                placeholder="https://api.domainanda.com/v1/sales-records" 
+                class="param-input url-field"
+              >
+            </div>
+            <span class="field-hint">Sistem akan otomatis memanggil URL ini, membaca data tabel JSON, dan memproses analisis & prediksinya.</span>
+          </div>
+
+          <div class="param-box">
+            <label class="param-label">Auth Token / Headers (Opsional):</label>
+            <input 
+              type="text" 
+              v-model="externalApiHeader" 
+              placeholder='Bearer token123 atau {"X-API-Key":"..."}' 
+              class="param-input"
             >
-              {{ p.title }}
-            </button>
-            <label class="upload-chip" :class="{ active: selectedPresetId === 'custom_csv' }">
-              <svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="17 8 12 3 7 8"></polyline><line x1="12" y1="3" x2="12" y2="15"></line></svg>
-              {{ selectedFile ? selectedFile.name : 'Upload CSV Sendiri' }}
-              <input type="file" accept=".csv" class="hidden" @change="onFileSelect">
-            </label>
+          </div>
+
+          <div class="param-box">
+            <label class="param-label">Data Key Path (Jika data terbungkus):</label>
+            <input 
+              type="text" 
+              v-model="externalDataPath" 
+              placeholder='Contoh: "data" atau "items"' 
+              class="param-input"
+            >
+          </div>
+        </div>
+      </div>
+
+      <!-- MODE 2: RAW JSON PASTE -->
+      <div v-if="ingestionMode === 'json_paste'" class="mode-content">
+        <label class="param-label">Paste Array JSON Data Tabel di Sini:</label>
+        <textarea 
+          v-model="customJsonInput" 
+          rows="5" 
+          placeholder='[{"date": "2026-01-01", "total_sales": 15000000}, {"date": "2026-01-02", "total_sales": 18500000}]' 
+          class="json-textarea font-mono"
+        ></textarea>
+      </div>
+
+      <!-- MODE 3: CSV UPLOAD -->
+      <div v-if="ingestionMode === 'csv_upload'" class="mode-content">
+        <label class="param-label">Upload File CSV:</label>
+        <div class="csv-dropzone">
+          <input type="file" accept=".csv" @change="onFileSelect" class="file-input-hidden" id="csvFileInput">
+          <label for="csvFileInput" class="csv-label">
+            <svg viewBox="0 0 24 24" width="32" height="32" stroke="#2563eb" stroke-width="2" fill="none"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="17 8 12 3 7 8"></polyline><line x1="12" y1="3" x2="12" y2="15"></line></svg>
+            <span class="file-main-text">{{ selectedFile ? selectedFile.name : 'Klik untuk memilih file CSV (.csv)' }}</span>
+            <span class="file-sub-text">Mendukung format CSV dengan header kolom tanggal dan angka</span>
+          </label>
+        </div>
+      </div>
+
+      <!-- MODE 4: PRESETS -->
+      <div v-if="ingestionMode === 'presets'" class="mode-content">
+        <label class="param-label">Pilih Dataset Contoh:</label>
+        <div class="preset-pills">
+          <button 
+            v-for="p in presets" 
+            :key="p.id" 
+            class="preset-btn" 
+            :class="{ active: selectedPresetId === p.id }"
+            @click="loadPreset(p)"
+          >
+            {{ p.title }}
+          </button>
+        </div>
+      </div>
+
+      <!-- Shared Configuration Row -->
+      <div class="control-row">
+        <div class="param-box">
+          <label class="param-label">Nama Dataset / Label:</label>
+          <input type="text" v-model="datasetName" placeholder="Data Analitik 2026" class="param-input">
+        </div>
+
+        <div class="param-box">
+          <label class="param-label">Horizon Prediksi (Hari ke Depan):</label>
+          <div class="range-wrapper">
+            <input type="range" min="7" max="45" step="1" v-model="forecastHorizon" class="range-slider">
+            <span class="range-val">{{ forecastHorizon }} Hari</span>
           </div>
         </div>
 
-        <div class="control-row">
-          <div class="param-box">
-            <label class="param-label">Horizon Prediksi (Hari ke Depan):</label>
-            <div class="range-wrapper">
-              <input type="range" min="7" max="45" step="1" v-model="forecastHorizon" class="range-slider">
-              <span class="range-val">{{ forecastHorizon }} Hari</span>
-            </div>
-          </div>
+        <div class="param-box">
+          <label class="param-label">Target Nilai (Auto/Manual):</label>
+          <input type="text" v-model="targetColumn" placeholder="Auto-detect (e.g. total_sales)" class="param-input">
+        </div>
 
-          <div class="param-box">
-            <label class="param-label">Target Kolom (Auto/Manual):</label>
-            <input type="text" v-model="targetColumn" placeholder="Auto-detect (e.g. total_sales)" class="param-input">
-          </div>
-
-          <div class="param-box">
-            <label class="param-label">Kolom Tanggal (Auto/Manual):</label>
-            <input type="text" v-model="dateColumn" placeholder="Auto-detect (e.g. date)" class="param-input">
-          </div>
+        <div class="param-box">
+          <label class="param-label">Kolom Waktu (Auto/Manual):</label>
+          <input type="text" v-model="dateColumn" placeholder="Auto-detect (e.g. date)" class="param-input">
         </div>
       </div>
     </div>
@@ -537,7 +694,7 @@ const downloadCsv = () => {
         </div>
       </div>
 
-      <!-- Key Metric Cards (Clean Light Cards) -->
+      <!-- Key Metric Cards -->
       <div class="metrics-grid">
         <div class="metric-card">
           <div class="metric-header">
@@ -614,12 +771,11 @@ const downloadCsv = () => {
 
       <!-- TAB 1: CHART & AI INTERPRETATION -->
       <div v-if="activeTab === 'analytics'" class="tab-content">
-        <!-- Interactive Chart Card (Clean White) -->
         <div class="chart-card">
           <div class="chart-card-header">
             <div>
               <h3 class="chart-title">Visualisasi Deret Waktu & Forecast Horizon</h3>
-              <p class="chart-subtitle">Garis biru: data aktual riil • Garis putus hijau: proyeksi prediksi • Area hijau muda: 95% Confidence Interval</p>
+              <p class="chart-subtitle">Garis biru: data riil • Garis putus hijau: proyeksi prediksi • Area hijau muda: 95% Confidence Interval</p>
             </div>
             <div class="legend-group">
               <span class="legend-item"><span class="legend-box blue"></span> Aktual</span>
@@ -642,7 +798,6 @@ const downloadCsv = () => {
                 </filter>
               </defs>
 
-              <!-- Grid Horizontal Lines -->
               <g class="grid-lines">
                 <line 
                   v-for="(tick, i) in chartData.yTicks" 
@@ -669,14 +824,12 @@ const downloadCsv = () => {
                 </text>
               </g>
 
-              <!-- Confidence Interval Shading -->
               <path 
                 v-if="chartData.confidenceAreaPath" 
                 :d="chartData.confidenceAreaPath" 
                 fill="url(#areaGradientLight)"
               />
 
-              <!-- Actual Data Line (Royal Blue) -->
               <path 
                 :d="chartData.actualPath" 
                 fill="none" 
@@ -686,7 +839,6 @@ const downloadCsv = () => {
                 stroke-linejoin="round"
               />
 
-              <!-- Forecast Data Line (Emerald Green Dashed) -->
               <path 
                 :d="chartData.forecastPath" 
                 fill="none" 
@@ -697,7 +849,6 @@ const downloadCsv = () => {
                 stroke-linejoin="round"
               />
 
-              <!-- Actual Points -->
               <circle 
                 v-for="p in chartData.actualPoints" 
                 :key="`act-${p.index}`" 
@@ -712,7 +863,6 @@ const downloadCsv = () => {
                 @mouseleave="hoveredPoint = null"
               />
 
-              <!-- Forecast Points -->
               <circle 
                 v-for="p in chartData.forecastPoints" 
                 :key="`fc-${p.index}`" 
@@ -727,13 +877,11 @@ const downloadCsv = () => {
                 @mouseleave="hoveredPoint = null"
               />
 
-              <!-- Anomaly Highlights (Red Pulsing Rings) -->
               <g v-for="anom in chartData.anomalyMarkers" :key="`anom-${anom.index}`">
                 <circle :cx="anom.x" :cy="anom.y" r="8" fill="none" stroke="#DC2626" stroke-width="2" opacity="0.8" filter="url(#glowLight)" />
                 <circle :cx="anom.x" :cy="anom.y" r="4.5" fill="#DC2626" stroke="#FFF" stroke-width="1.5" />
               </g>
 
-              <!-- X-Axis Labels -->
               <g class="x-axis-labels">
                 <text 
                   v-for="(tick, i) in chartData.xTicks" 
@@ -750,7 +898,6 @@ const downloadCsv = () => {
               </g>
             </svg>
 
-            <!-- Tooltip (Clean Light Theme) -->
             <div 
               v-if="hoveredPoint" 
               class="chart-tooltip"
@@ -774,7 +921,7 @@ const downloadCsv = () => {
           </div>
         </div>
 
-        <!-- AI Executive Report Card (Soft Violet Card) -->
+        <!-- AI Executive Report Card -->
         <div class="ai-card">
           <div class="ai-header">
             <div class="ai-title-wrap">
@@ -876,7 +1023,6 @@ const downloadCsv = () => {
             </div>
           </div>
 
-          <!-- Quick Prompts -->
           <div class="quick-prompts">
             <span class="quick-label">Pertanyaan Cepat:</span>
             <button 
@@ -890,7 +1036,6 @@ const downloadCsv = () => {
             </button>
           </div>
 
-          <!-- Chat Conversation Log -->
           <div class="chat-messages-box">
             <div v-if="chatHistory.length === 0" class="chat-empty">
               <p>Pilih pertanyaan cepat di atas atau ketik pertanyaan spesifik seputar analisis data ini...</p>
@@ -916,7 +1061,6 @@ const downloadCsv = () => {
             </div>
           </div>
 
-          <!-- Chat Input -->
           <form class="chat-input-bar" @submit.prevent="sendAiQuestion()">
             <input 
               type="text" 
@@ -1015,7 +1159,7 @@ const downloadCsv = () => {
       </div>
     </div>
 
-    <!-- Tournament Leaderboard Modal (Clean Light Theme) -->
+    <!-- Tournament Leaderboard Modal -->
     <div v-if="showLeaderboardModal" class="modal-backdrop" @click="showLeaderboardModal = false">
       <div class="modal-card" @click.stop>
         <div class="modal-header">
@@ -1066,8 +1210,8 @@ const downloadCsv = () => {
   padding: 24px;
   max-width: 1350px;
   margin: 0 auto;
-  color: #0f172a;
-  background: transparent;
+  color: #0f172a !important;
+  background: transparent !important;
 }
 
 /* Header */
@@ -1105,14 +1249,14 @@ const downloadCsv = () => {
 .page-title {
   font-size: 1.6rem;
   font-weight: 800;
-  color: #0f172a;
+  color: #0f172a !important;
   letter-spacing: -0.5px;
-  margin: 0 0 4px 0;
+  margin: 0 0 6px 0;
 }
 
 .page-desc {
   font-size: 0.9rem;
-  color: #64748b;
+  color: #475569 !important;
   max-width: 750px;
   margin: 0;
   line-height: 1.5;
@@ -1137,13 +1281,11 @@ const downloadCsv = () => {
   transition: all 0.2s;
   box-shadow: 0 1px 2px rgba(0,0,0,0.04);
 }
-.btn-tournament:hover {
-  background: #d1fae5;
-}
+.btn-tournament:hover { background: #d1fae5; }
 
 .btn-primary {
   background: linear-gradient(135deg, #2563eb, #1d4ed8);
-  color: #ffffff;
+  color: #ffffff !important;
   border: none;
   padding: 10px 18px;
   border-radius: 8px;
@@ -1177,115 +1319,165 @@ const downloadCsv = () => {
   transition: all 0.2s;
   box-shadow: 0 1px 2px rgba(0,0,0,0.04);
 }
-.btn-secondary:hover {
-  background: #f8fafc;
-  border-color: #94a3b8;
-  color: #0f172a;
-}
+.btn-secondary:hover { background: #f8fafc; border-color: #94a3b8; color: #0f172a; }
 
 /* Alerts */
-.alert {
-  padding: 12px 16px;
-  border-radius: 8px;
-  margin-bottom: 20px;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  font-size: 0.875rem;
-}
+.alert { padding: 12px 16px; border-radius: 8px; margin-bottom: 20px; display: flex; align-items: center; gap: 10px; font-size: 0.875rem; }
 .alert-error { background: #fef2f2; border: 1px solid #fecaca; color: #b91c1c; }
 .alert-success { background: #f0fdf4; border: 1px solid #bbf7d0; color: #15803d; }
 
 /* Control Panel (Clean Light Card) */
 .control-panel {
-  background: #ffffff;
-  border: 1px solid #e2e8f0;
+  background: #ffffff !important;
+  border: 1px solid #e2e8f0 !important;
   border-radius: 12px;
   padding: 20px;
   margin-bottom: 24px;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04), 0 1px 2px rgba(0, 0, 0, 0.02);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05), 0 1px 2px rgba(0, 0, 0, 0.02);
 }
 
-.control-label {
-  font-size: 0.775rem;
-  font-weight: 700;
-  color: #64748b;
-  display: block;
-  margin-bottom: 10px;
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-}
-
-.preset-pills {
+/* Ingestion Mode Navigation Tabs */
+.mode-nav-tabs {
   display: flex;
-  gap: 10px;
-  flex-wrap: wrap;
-  align-items: center;
+  gap: 8px;
+  border-bottom: 1px solid #e2e8f0;
+  padding-bottom: 12px;
+  margin-bottom: 16px;
+  overflow-x: auto;
 }
 
+.mode-tab {
+  background: #f8fafc;
+  border: 1px solid #cbd5e1;
+  color: #475569;
+  padding: 8px 14px;
+  border-radius: 8px;
+  font-size: 0.825rem;
+  font-weight: 600;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  transition: all 0.2s;
+  white-space: nowrap;
+}
+.mode-tab:hover { background: #f1f5f9; color: #0f172a; }
+.mode-tab.active {
+  background: #eff6ff;
+  border-color: #3b82f6;
+  color: #1d4ed8;
+  box-shadow: 0 1px 3px rgba(59, 130, 246, 0.15);
+}
+
+.mode-content {
+  margin-bottom: 16px;
+}
+
+/* API Inputs Grid */
+.api-inputs-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 14px;
+}
+
+.input-group-full {
+  grid-column: 1 / -1;
+}
+
+.url-input-wrap {
+  display: flex;
+  gap: 8px;
+}
+
+.method-select {
+  background: #f8fafc;
+  border: 1px solid #cbd5e1;
+  color: #0f172a;
+  padding: 8px 12px;
+  border-radius: 6px;
+  font-size: 0.85rem;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.url-field {
+  flex: 1;
+}
+
+.field-hint {
+  font-size: 0.75rem;
+  color: #64748b;
+  margin-top: 4px;
+  display: block;
+}
+
+/* JSON Textarea */
+.json-textarea {
+  width: 100%;
+  background: #f8fafc;
+  border: 1px solid #cbd5e1;
+  color: #0f172a;
+  padding: 10px 14px;
+  border-radius: 8px;
+  font-size: 0.85rem;
+  line-height: 1.5;
+  resize: vertical;
+}
+.json-textarea:focus { outline: none; border-color: #2563eb; background: #ffffff; }
+
+/* CSV Dropzone */
+.file-input-hidden { display: none; }
+.csv-dropzone {
+  border: 2px dashed #94a3b8;
+  border-radius: 8px;
+  padding: 24px;
+  text-align: center;
+  background: #f8fafc;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+.csv-dropzone:hover { background: #eff6ff; border-color: #3b82f6; }
+.csv-label { cursor: pointer; display: flex; flex-direction: column; align-items: center; gap: 6px; }
+.file-main-text { font-size: 0.9rem; font-weight: 600; color: #0f172a; }
+.file-sub-text { font-size: 0.775rem; color: #64748b; }
+
+.preset-pills { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
 .preset-btn {
   background: #f8fafc;
   border: 1px solid #cbd5e1;
   color: #334155;
-  padding: 7px 14px;
+  padding: 8px 16px;
   border-radius: 6px;
   font-size: 0.825rem;
   font-weight: 500;
   cursor: pointer;
   transition: all 0.2s;
 }
-.preset-btn:hover {
-  background: #f1f5f9;
-  border-color: #94a3b8;
-}
+.preset-btn:hover { background: #f1f5f9; border-color: #94a3b8; }
 .preset-btn.active {
   background: #eff6ff;
   border-color: #3b82f6;
   color: #1d4ed8;
   font-weight: 600;
-  box-shadow: 0 1px 2px rgba(59, 130, 246, 0.1);
-}
-
-.upload-chip {
-  background: #f8fafc;
-  border: 1px dashed #94a3b8;
-  color: #475569;
-  padding: 7px 14px;
-  border-radius: 6px;
-  font-size: 0.825rem;
-  cursor: pointer;
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  transition: all 0.2s;
-}
-.upload-chip:hover {
-  background: #f1f5f9;
-  border-color: #64748b;
-}
-.upload-chip.active {
-  border-color: #10b981;
-  color: #047857;
-  background: #ecfdf5;
 }
 
 .control-row {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
   gap: 16px;
   margin-top: 16px;
   padding-top: 16px;
   border-top: 1px solid #f1f5f9;
 }
 
-.param-label { font-size: 0.775rem; font-weight: 600; color: #64748b; margin-bottom: 6px; display: block; }
+.param-label { font-size: 0.775rem; font-weight: 700; color: #475569; margin-bottom: 6px; display: block; }
 .range-wrapper { display: flex; align-items: center; gap: 10px; }
 .range-slider { flex: 1; accent-color: #2563eb; cursor: pointer; }
 .range-val { font-size: 0.85rem; font-weight: 700; color: #1d4ed8; min-width: 60px; }
 .param-input { width: 100%; background: #f8fafc; border: 1px solid #cbd5e1; color: #0f172a; padding: 8px 12px; border-radius: 6px; font-size: 0.825rem; }
 .param-input:focus { outline: none; border-color: #2563eb; background: #ffffff; }
 
-/* Auto-detect Banner (Light Blue Gradient) */
+/* Auto-detect Banner */
 .autodetect-banner {
   background: linear-gradient(135deg, #f0f9ff, #f8fafc);
   border: 1px solid #bae6fd;
@@ -1300,34 +1492,11 @@ const downloadCsv = () => {
   box-shadow: 0 1px 3px rgba(0,0,0,0.03);
 }
 
-.banner-top-badges {
-  display: flex;
-  gap: 8px;
-  align-items: center;
-  flex-wrap: wrap;
-}
-
-.badge-tech {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  color: #0369a1;
-  font-size: 0.75rem;
-  font-weight: 700;
-  text-transform: uppercase;
-}
-
-.badge-winner {
-  background: #dcfce7;
-  border: 1px solid #86efac;
-  color: #15803d;
-  padding: 3px 10px;
-  border-radius: 6px;
-  font-size: 0.775rem;
-  font-weight: 500;
-}
-
+.banner-top-badges { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.badge-tech { display: inline-flex; align-items: center; gap: 6px; color: #0369a1; font-size: 0.75rem; font-weight: 700; text-transform: uppercase; }
+.badge-winner { background: #dcfce7; border: 1px solid #86efac; color: #15803d; padding: 3px 10px; border-radius: 6px; font-size: 0.775rem; font-weight: 500; }
 .autodetect-meta { font-size: 0.825rem; color: #475569; margin-top: 6px; }
+
 .accuracy-highlight {
   text-align: right;
   background: #ffffff;
@@ -1339,7 +1508,7 @@ const downloadCsv = () => {
 .acc-score { font-size: 1.4rem; font-weight: 800; color: #059669; }
 .acc-label { font-size: 0.7rem; font-weight: 600; color: #64748b; text-transform: uppercase; }
 
-/* Metric Cards (Light White Cards) */
+/* Metric Cards */
 .metrics-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
@@ -1357,14 +1526,7 @@ const downloadCsv = () => {
 .metric-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
 .m-label { font-size: 0.75rem; font-weight: 700; color: #64748b; text-transform: uppercase; letter-spacing: 0.5px; }
 
-.m-icon-box {
-  width: 28px;
-  height: 28px;
-  border-radius: 6px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
+.m-icon-box { width: 28px; height: 28px; border-radius: 6px; display: flex; align-items: center; justify-content: center; }
 .m-icon-box.green { background: #ecfdf5; }
 .m-icon-box.blue { background: #eff6ff; }
 .m-icon-box.purple { background: #f5f3ff; }
@@ -1378,41 +1540,20 @@ const downloadCsv = () => {
 .badge-sim-tag { color: #2563eb; font-weight: 700; margin-left: 4px; }
 
 /* Navigation Tabs */
-.nav-tabs {
-  display: flex;
-  gap: 8px;
-  border-bottom: 1px solid #e2e8f0;
-  margin-bottom: 20px;
-  overflow-x: auto;
-}
-
-.tab-btn {
-  background: transparent;
-  border: none;
-  border-bottom: 2px solid transparent;
-  color: #64748b;
-  padding: 10px 16px;
-  font-size: 0.875rem;
-  font-weight: 600;
-  cursor: pointer;
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  transition: all 0.2s;
-  white-space: nowrap;
-}
+.nav-tabs { display: flex; gap: 8px; border-bottom: 1px solid #e2e8f0; margin-bottom: 20px; overflow-x: auto; }
+.tab-btn { background: transparent; border: none; border-bottom: 2px solid transparent; color: #64748b; padding: 10px 16px; font-size: 0.875rem; font-weight: 600; cursor: pointer; display: inline-flex; align-items: center; gap: 8px; transition: all 0.2s; white-space: nowrap; }
 .tab-btn:hover { color: #0f172a; }
 .tab-btn.active { color: #2563eb; border-bottom-color: #2563eb; }
 .tab-dot-alert { width: 6px; height: 6px; border-radius: 50%; background: #2563eb; }
 
-/* Chart Card (Light White) */
+/* Chart Card */
 .chart-card {
   background: #ffffff;
   border: 1px solid #e2e8f0;
   border-radius: 12px;
   padding: 20px;
   margin-bottom: 24px;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04), 0 1px 2px rgba(0, 0, 0, 0.02);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
 }
 .chart-card-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 16px; flex-wrap: wrap; gap: 12px; }
 .chart-title { font-size: 1.05rem; font-weight: 700; color: #0f172a; margin: 0; }
@@ -1452,7 +1593,7 @@ const downloadCsv = () => {
 .tooltip-bounds { font-size: 0.725rem; color: #cbd5e1; margin-top: 2px; }
 .tooltip-badge-anom { color: #fca5a5; font-weight: 700; margin-top: 6px; font-size: 0.75rem; }
 
-/* AI Executive Card (Soft Violet Theme) */
+/* AI Executive Card */
 .ai-card {
   background: linear-gradient(135deg, #faf5ff, #ffffff);
   border: 1px solid #e9d5ff;
@@ -1468,7 +1609,7 @@ const downloadCsv = () => {
 .ai-badge { background: #f3e8ff; border: 1px solid #d8b4fe; color: #7e22ce; padding: 4px 10px; border-radius: 9999px; font-size: 0.75rem; font-weight: 700; }
 .formatted-ai-text { font-size: 0.9rem; line-height: 1.7; color: #334155; }
 
-/* Simulation Card (Clean White) */
+/* Simulation Card */
 .sim-card {
   background: #ffffff;
   border: 1px solid #e2e8f0;
@@ -1488,7 +1629,7 @@ const downloadCsv = () => {
 .sim-badge-val.negative { background: #fef2f2; color: #b91c1c; }
 .sim-hint { font-size: 0.75rem; color: #64748b; margin-top: 8px; }
 
-/* Chat Card (Clean White) */
+/* Chat Card */
 .chat-card {
   background: #ffffff;
   border: 1px solid #e2e8f0;
@@ -1534,7 +1675,7 @@ const downloadCsv = () => {
 .chat-input { flex: 1; background: #ffffff; border: 1px solid #cbd5e1; color: #0f172a; padding: 10px 14px; border-radius: 8px; font-size: 0.875rem; }
 .chat-input:focus { outline: none; border-color: #2563eb; }
 
-/* Table Card (Clean White) */
+/* Table Card */
 .table-card {
   background: #ffffff;
   border: 1px solid #e2e8f0;
