@@ -24,6 +24,7 @@ services:
       LLM_PROVIDER: groq
       GEMINI_API_KEY: ${GEMINI_API_KEY}
       EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-local}
+      RERANKER_MODEL: ${RERANKER_MODEL:-Xenova/ms-marco-MiniLM-L-6-v2}
       REDIS_URL: ${REDIS_URL}
     volumes:
       - uploads_data:/app/backend/uploads

@@ -28,6 +28,7 @@ logger = logging.getLogger(__name__)
 
 # Lazy singleton for FastEmbed ONNX
 _fastembed_instance = None
+_fastembed_reranker_instance = None
 
 # Global HTTP Session with Keep-Alive & Connection Pooling
 _http_session = None
@@ -71,6 +72,22 @@ def get_fastembed_model():
             logger.error(f"[RagService] Failed to load FastEmbed: {e}")
             _fastembed_instance = False
     return _fastembed_instance
+
+
+def get_reranker_model():
+    global _fastembed_reranker_instance
+    if _fastembed_reranker_instance is None:
+        try:
+            from fastembed.rerank.cross_encoder import TextCrossEncoder
+            # Xenova/ms-marco-MiniLM-L-6-v2 is ultra-fast (~80MB ONNX), free & accurate
+            model_name = os.getenv("RERANKER_MODEL", "Xenova/ms-marco-MiniLM-L-6-v2")
+            threads = min(4, os.cpu_count() or 2)
+            _fastembed_reranker_instance = TextCrossEncoder(model_name, threads=threads)
+            logger.info(f"[RagService] FastEmbed Cross-Encoder Reranker initialized ({model_name}, {threads} threads).")
+        except Exception as e:
+            logger.error(f"[RagService] Failed to load FastEmbed Reranker: {e}")
+            _fastembed_reranker_instance = False
+    return _fastembed_reranker_instance
 
 
 # Domain Bilingual Query Expansion Dictionary (Indonesian -> Technical Engineering / Tire Standards)
@@ -181,19 +198,23 @@ def compute_bm25_scores(query: str, items: List[Dict[str, Any]], k1: float = 1.5
 class RagService:
     @staticmethod
     def get_embedding_info() -> Dict[str, Any]:
-        """Returns active embedding provider, LLM engine info, and Redis status."""
+        """Returns active embedding provider, reranker info, LLM engine info, and Redis status."""
         groq_key = os.getenv("GROQ_API_KEY", "")
         gemini_key = os.getenv("GEMINI_API_KEY", "")
         openrouter_key = os.getenv("OPENROUTER_API_KEY", "")
         groq_model = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
 
         active_llm = f"Groq LPU ({groq_model})" if groq_key else ("OpenRouter" if openrouter_key else "Google Gemini")
+        reranker_model = os.getenv("RERANKER_MODEL", "Xenova/ms-marco-MiniLM-L-6-v2")
+        reranker_active = bool(get_reranker_model())
 
         return {
             "default_provider": "local_fastembed",
             "model_name": "BAAI/bge-small-en-v1.5",
             "vector_dimension": 384,
             "pricing": "100% Free & Offline",
+            "reranker_model": reranker_model,
+            "reranker_enabled": reranker_active,
             "active_llm": active_llm,
             "groq_configured": bool(groq_key),
             "gemini_configured": bool(gemini_key),
@@ -557,18 +578,92 @@ class RagService:
             return _memory_facts_cache
 
     @classmethod
+    def rerank_chunks(
+        cls,
+        query: str,
+        chunks: List[Dict[str, Any]],
+        top_k: int = 4
+    ) -> List[Dict[str, Any]]:
+        """
+        Applies ONNX Cross-Encoder Reranking to candidate chunks for maximum retrieval precision.
+        Computes deep semantic interaction scores between query and document text.
+        Transforms raw logits into normalized confidence scores [0.0 - 1.0] using Sigmoid.
+        """
+        if not chunks or not query:
+            return chunks[:top_k]
+
+        reranker = get_reranker_model()
+        if not reranker:
+            return chunks[:top_k]
+
+        try:
+            import numpy as np
+
+            # Combine heading and content for full structural context
+            candidate_texts = []
+            for c in chunks:
+                heading = c.get("heading", "").strip()
+                content = c.get("content", "").strip()
+                if heading and heading != "General":
+                    candidate_texts.append(f"[{heading}]\n{content}")
+                else:
+                    candidate_texts.append(content)
+
+            raw_scores = list(reranker.rerank(query, candidate_texts))
+
+            reranked = []
+            for idx, c in enumerate(chunks):
+                raw_score = float(raw_scores[idx]) if idx < len(raw_scores) else 0.0
+                # Numerically stable sigmoid: 1 / (1 + exp(-x))
+                if raw_score >= 0:
+                    norm_score = float(1.0 / (1.0 + np.exp(-raw_score)))
+                else:
+                    z = float(np.exp(raw_score))
+                    norm_score = float(z / (1.0 + z))
+
+                # Boost user memory/correction items slightly
+                if c.get("is_memory"):
+                    norm_score = min(1.0, norm_score + 0.08)
+
+                chunk_copy = dict(c)
+                chunk_copy["vector_score"] = c.get("similarity_score", 0.0)
+                chunk_copy["raw_reranker_logit"] = round(raw_score, 4)
+                chunk_copy["reranker_score"] = round(norm_score, 4)
+                # Primary similarity score becomes the calibrated reranker score
+                chunk_copy["similarity_score"] = round(norm_score, 4)
+                reranked.append(chunk_copy)
+
+            # Sort strictly descending by reranker score
+            reranked.sort(key=lambda x: x["reranker_score"], reverse=True)
+            return reranked[:top_k]
+        except Exception as e:
+            logger.warning(f"[RagService] Reranker execution failed, fallback to vector ranking: {e}")
+            return chunks[:top_k]
+
+    @classmethod
     def search_similar_chunks(
         cls,
         db: Session,
         query: str,
         top_k: int = 4,
-        document_id: Optional[str] = None
+        document_id: Optional[str] = None,
+        enable_rerank: bool = True
     ) -> List[Dict[str, Any]]:
         """
-        Pure Dense Vector Cosine Similarity Search (100% vector-based semantic matching, BM25 disabled).
+        Two-stage retrieval pipeline:
+        1. Recall Stage: Vector Cosine Similarity Search retrieves top candidate chunks (e.g. 12-16 candidates).
+        2. Precision Stage: ONNX Cross-Encoder Reranks candidates against the specific user query.
         """
         query_vec = cls.generate_single_embedding(query)
-        return cls._similarity_search(db, query, query_vec, top_k, document_id)
+
+        # Retrieve wider candidate pool for cross-encoder reranking
+        candidate_k = max(top_k * 3, 12) if enable_rerank else top_k
+        candidates = cls._similarity_search(db, query, query_vec, candidate_k, document_id)
+
+        if not candidates or not enable_rerank:
+            return candidates[:top_k]
+
+        return cls.rerank_chunks(query, candidates, top_k=top_k)
 
     @classmethod
     def _similarity_search(
@@ -1037,17 +1132,18 @@ class RagService:
         query: str,
         messages: Optional[List[Dict[str, Any]]] = None,
         session_id: Optional[str] = None,
-        top_k: int = 4,
+        top_k: int = 5,
         document_id: Optional[str] = None,
         custom_system_prompt: Optional[str] = None,
-        user_id: Optional[int] = None
+        user_id: Optional[int] = None,
+        enable_rerank: bool = True
     ) -> Dict[str, Any]:
         """
-        RAG Chat Completion with Multi-Turn Persistent Memory (Redis + PostgreSQL) & Self-Growth:
+        RAG Chat Completion with Multi-Turn Persistent Memory (Redis + PostgreSQL), Two-Stage Reranking & Self-Growth:
         1. Retrieves session conversation history from Redis L1 cache or PostgreSQL L2 database.
-        2. Retrieves top-k most relevant Markdown chunks via vector similarity search.
+        2. Retrieves top-k most relevant Markdown chunks via 2-stage vector search + ONNX Cross-Encoder reranking.
         3. Retrieves dynamic learned facts & user corrections from RagMemoryFact.
-        4. Injects context and learned facts into LLM.
+        4. Injects rich context and learned facts into LLM.
         5. Persists messages to both Redis and PostgreSQL.
         """
         start_time = time.perf_counter()
@@ -1083,10 +1179,10 @@ class RagService:
             if any(p in q_lower for p in ["itu", "tersebut", "nya", "ini", "dia", "maksud", "bagaimana", "tekanannya"]):
                 search_query = f"{user_history[-1][:80]} {query.strip()}"
 
-        # 4. Retrieve relevant chunks from documents (with bilingual expansion)
-        chunks = cls.search_similar_chunks(db, search_query, top_k=top_k, document_id=document_id)
+        # 4. Retrieve relevant chunks from documents (with bilingual expansion & 2-stage Cross-Encoder reranking)
+        chunks = cls.search_similar_chunks(db, search_query, top_k=top_k, document_id=document_id, enable_rerank=enable_rerank)
         if not chunks and search_query != query.strip():
-            chunks = cls.search_similar_chunks(db, query.strip(), top_k=top_k, document_id=document_id)
+            chunks = cls.search_similar_chunks(db, query.strip(), top_k=top_k, document_id=document_id, enable_rerank=enable_rerank)
 
         # 5. Retrieve learned facts from Self-Growth Memory
         learned_facts = cls.search_learned_facts(db, search_query, top_k=3, user_id=user_id)
@@ -1112,7 +1208,10 @@ class RagService:
                 "filename": c["filename"],
                 "heading": c.get("heading"),
                 "s3_url": c.get("s3_url"),
-                "similarity_score": c["similarity_score"],
+                "similarity_score": c.get("similarity_score", 0.0),
+                "reranker_score": c.get("reranker_score"),
+                "vector_score": c.get("vector_score"),
+                "raw_reranker_logit": c.get("raw_reranker_logit"),
                 "source_type": c.get("source_type", "document"),
                 "fact_type": c.get("fact_type"),
                 "content_preview": c.get("content", "")[:250]
@@ -1122,21 +1221,22 @@ class RagService:
 
         # 7. Formulate System Prompt & Multi-Turn Message History
         system_instruction = custom_system_prompt or (
-            "Anda adalah Hero Assistant, asisten AI resmi yang cerdas, efisien, dan profesional.\n\n"
+            "Anda adalah Hero Assistant, asisten AI resmi yang cerdas, komprehensif, dan profesional.\n\n"
             "ATURAN WAJIB FORMAT JAWABAN (STRICT RULES):\n"
-            "1. BAHASA: Wajib 100% menggunakan Bahasa Indonesia yang baku, jelas, ringkas, dan profesional. Jangan pernah menjawab dalam Bahasa Inggris kecuali nama model/merek, istilah teknis, satuan, atau kode part/ukuran yang tidak dapat diterjemahkan.\n"
-            "2. PRIORITAS MEMORI KOREKSI PENGGUNA (TERTINGGI): Jika terdapat bagian '[Memori & Aturan Khusus yang Dipelajari dari Pengguna]' dalam konteks, Anda WAJIB menjawab berdasarkan informasi tersebut terlebih dahulu. Koreksi dari pengguna selalu lebih akurat daripada dokumen. Jangan pernah mengabaikan atau mengabaikan memori ini.\n"
-            "3. HANYA JAWABAN AKHIR (NO META-THOUGHTS / NO CONSTRAINT CHECKS): Langsung berikan jawaban akhir yang siap dibaca oleh pengguna tanpa catatan meta evaluasi aturan/checklist internal.\n"
-            "4. WAJIB TABEL MARKDOWN UNTUK DATA SPESIFIKASI/TABULAR:\n"
+            "1. BAHASA: Wajib 100% menggunakan Bahasa Indonesia yang baku, jelas, komprehensif, dan profesional. Jangan pernah menjawab dalam Bahasa Inggris kecuali nama model/merek, istilah teknis, satuan, atau kode part/ukuran yang tidak dapat diterjemahkan.\n"
+            "2. PENJELASAN LENGKAP & BERBOBOT: Berikan jawaban yang informatif, terstruktur dengan baik, dan mudah dipahami. Jelaskan konsep/alasan di balik aturan teknis, standar keselamatan, atau rekomendasi operasional secara jelas dan terperinci.\n"
+            "3. PRIORITAS MEMORI KOREKSI PENGGUNA (TERTINGGI): Jika terdapat bagian '[Memori & Aturan Khusus yang Dipelajari dari Pengguna]' dalam konteks, Anda WAJIB menjawab berdasarkan informasi tersebut terlebih dahulu. Koreksi dari pengguna selalu lebih akurat daripada dokumen. Jangan pernah mengabaikan memori ini.\n"
+            "4. HANYA JAWABAN AKHIR (NO META-THOUGHTS / NO CONSTRAINT CHECKS): Langsung berikan jawaban akhir yang siap dibaca oleh pengguna tanpa catatan meta evaluasi aturan/checklist internal.\n"
+            "5. WAJIB TABEL MARKDOWN UNTUK DATA SPESIFIKASI/TABULAR:\n"
             "   - Jika jawaban memuat data spesifikasi ban, ukuran, tekanan angin (pressure/bar/psi), beban/muatan (load index/kg/lbs), kecepatan, dimensi, kode part, atau perbandingan tipe ban, ANDA WAJIB MENYAJIKANNYA DALAM TABEL MARKDOWN LENGKAP:\n"
             "     | Model / Tipe | Ukuran Ban | Tekanan Angin (Bar / PSI) | Beban / Load (kg) | Kecepatan (km/h) |\n"
             "     | :--- | :--- | :--- | :--- | :--- |\n"
             "     | ... | ... | ... | ... | ... |\n"
-            "   - Untuk penjelasan teks atau langkah operasional lainnya, gunakan poin-poin (bullet points) yang rapi, ringkas, dan to-the-point.\n"
-            "5. BERBASIS KONTEKS DOKUMEN & MEMORI: Analisis dan terjemahkan informasi teknis dari Konteks Dokumen Pengetahuan (termasuk istilah bahasa Inggris seperti 'inflation pressure', 'load capacity', 'tread depth', 'operating pressure') ke jawaban Bahasa Indonesia yang akurat dan jelas.\n"
-            "6. JIKA TIDAK DITEMUKAN DI DOKUMEN TAPI ADA DI MEMORI: Jawab berdasarkan memori/koreksi pengguna, jangan katakan 'tidak ditemukan'.\n"
-            "7. JIKA PERTANYAAN TERKAIT DATA DOKUMEN/OPERASIONAL TAPI TIDAK DITEMUKAN: Sampaikan secara sopan dan singkat (cukup 1 kalimat) bahwa informasi spesifik tersebut tidak ditemukan dalam basis pengetahuan dokumen maupun memori.\n"
-            "8. JIKA PERTANYAAN UMUM, KREATIF, ATAU SAPAAN (di luar dokumen teknis perusahaan): Jawablah dengan ramah, cerdas, kreatif, dan membantu sesuai permintaan pengguna secara wajar tanpa memaksakan rujukan dokumen."
+            "   - Untuk penjelasan prosedur atau langkah operasional, gunakan poin-poin bertahap (numbered/bullet points) yang rapi, berurutan, dan jelas.\n"
+            "6. BERBASIS KONTEKS DOKUMEN & MEMORI: Analisis dan terjemahkan informasi teknis dari Konteks Dokumen Pengetahuan (termasuk istilah bahasa Inggris seperti 'inflation pressure', 'load capacity', 'tread depth', 'operating pressure') ke jawaban Bahasa Indonesia yang akurat dan berbobot.\n"
+            "7. JIKA TIDAK DITEMUKAN DI DOKUMEN TAPI ADA DI MEMORI: Jawab berdasarkan memori/koreksi pengguna, jangan katakan 'tidak ditemukan'.\n"
+            "8. JIKA PERTANYAAN TERKAIT DATA DOKUMEN/OPERASIONAL TAPI TIDAK DITEMUKAN: Sampaikan secara sopan dan singkat bahwa informasi spesifik tersebut belum tercatat dalam basis pengetahuan dokumen maupun memori.\n"
+            "9. JIKA PERTANYAAN UMUM, KREATIF, ATAU SAPAAN: Jawablah dengan ramah, cerdas, kreatif, dan membantu sesuai konteks percakapan secara profesional."
         )
 
         current_prompt = f"""Konteks Dokumen & Memori Pengetahuan (Markdown):

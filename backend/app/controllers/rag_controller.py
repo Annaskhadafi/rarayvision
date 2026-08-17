@@ -17,17 +17,19 @@ router = APIRouter(prefix="/api/v1/rag", tags=["RAG Knowledge Base & pgvector"])
 
 class SearchRequest(BaseModel):
     query: str
-    top_k: int = 4
+    top_k: int = 5
     document_id: Optional[str] = None
+    enable_rerank: bool = True
 
 
 class ChatRequest(BaseModel):
     query: str
     messages: Optional[List[Dict[str, Any]]] = None # Multi-turn conversation history
     session_id: Optional[str] = None # Redis session ID for persistent memory
-    top_k: int = 4
+    top_k: int = 5
     document_id: Optional[str] = None
     system_prompt: Optional[str] = None
+    enable_rerank: bool = True
 
 
 class FeedbackRequest(BaseModel):
@@ -118,7 +120,8 @@ async def search_knowledge(
         db=db,
         query=req.query,
         top_k=req.top_k,
-        document_id=req.document_id
+        document_id=req.document_id,
+        enable_rerank=req.enable_rerank
     )
 
     return {
@@ -153,7 +156,8 @@ async def rag_chat(
         top_k=req.top_k,
         document_id=req.document_id,
         custom_system_prompt=req.system_prompt,
-        user_id=current_user.id if current_user else None
+        user_id=current_user.id if current_user else None,
+        enable_rerank=req.enable_rerank
     )
 
     return {
