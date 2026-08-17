@@ -30,6 +30,19 @@ class ChatRequest(BaseModel):
     system_prompt: Optional[str] = None
 
 
+class FeedbackRequest(BaseModel):
+    message_id: str
+    rating: Optional[int] = None # 1 for thumbs up, -1 for thumbs down
+    feedback_notes: Optional[str] = None
+    correction_text: Optional[str] = None
+
+
+class LearnFactRequest(BaseModel):
+    content: str
+    subject: Optional[str] = None
+    fact_type: str = "learned_knowledge"
+
+
 @router.get("/info", summary="Get RAG & Embedding Engine Info")
 def get_rag_info():
     """Returns active embedding provider (FastEmbed local ONNX, Gemini, etc.) and vector dimensions."""
@@ -135,13 +148,137 @@ async def rag_chat(
         session_id=req.session_id,
         top_k=req.top_k,
         document_id=req.document_id,
-        custom_system_prompt=req.system_prompt
+        custom_system_prompt=req.system_prompt,
+        user_id=current_user.id if current_user else None
     )
 
     return {
         "status": "success",
         "data": chat_res
     }
+
+
+@router.post("/feedback", summary="Submit Message Feedback & Corrections (Self-Growth Engine)")
+async def submit_message_feedback(
+    req: FeedbackRequest,
+    db: Session = Depends(get_db),
+    current_user: db_models.User = Depends(get_current_user)
+):
+    """
+    Records user feedback (thumbs up/down) and applies Self-Growth:
+    If a correction text is provided, it is automatically vectorized and saved
+    into long-term memory for future RAG queries.
+    """
+    try:
+        res = await run_in_threadpool(
+            RagService.submit_feedback,
+            db=db,
+            message_id=req.message_id,
+            rating=req.rating,
+            feedback_notes=req.feedback_notes,
+            correction_text=req.correction_text,
+            user_id=current_user.id if current_user else None
+        )
+        return {"status": "success", "data": res}
+    except ValueError as ve:
+        raise HTTPException(status_code=404, detail=str(ve))
+    except Exception as e:
+        logger.error(f"[RagController] submit_feedback error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/memory/learn", summary="Directly Teach AI a New Fact or Rule (Self-Growth)")
+async def teach_fact(
+    req: LearnFactRequest,
+    db: Session = Depends(get_db),
+    current_user: db_models.User = Depends(get_current_user)
+):
+    """
+    Adds a verified fact, domain rule, or glossary entry directly to RAG long-term memory.
+    """
+    try:
+        res = await run_in_threadpool(
+            RagService.learn_fact,
+            db=db,
+            content=req.content,
+            subject=req.subject,
+            fact_type=req.fact_type,
+            user_id=current_user.id if current_user else None,
+            learned_from="direct_input"
+        )
+        return {"status": "success", "data": res}
+    except Exception as e:
+        logger.error(f"[RagController] teach_fact error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/memory/facts", summary="List All Learned Long-Term Memory Facts")
+async def get_learned_facts(
+    limit: int = Query(50, ge=1, le=100),
+    db: Session = Depends(get_db),
+    current_user: db_models.User = Depends(get_current_user)
+):
+    """Retrieves all active learned facts from PostgreSQL long-term memory."""
+    facts = await run_in_threadpool(
+        RagService.get_learned_facts,
+        db=db,
+        user_id=current_user.id if current_user else None,
+        limit=limit
+    )
+    return {"status": "success", "total": len(facts), "data": facts}
+
+
+@router.delete("/memory/facts/{fact_id}", summary="Delete or Deactivate a Learned Fact")
+async def delete_fact(
+    fact_id: str,
+    db: Session = Depends(get_db),
+    current_user: db_models.User = Depends(get_current_user)
+):
+    """Deletes a learned fact from memory."""
+    success = await run_in_threadpool(RagService.delete_learned_fact, db=db, fact_id=fact_id)
+    if not success:
+        raise HTTPException(status_code=404, detail="Fact not found")
+    return {"status": "success", "message": "Fact deleted"}
+
+
+@router.get("/sessions", summary="List Persistent Conversation Sessions")
+async def list_sessions(
+    limit: int = Query(30, ge=1, le=100),
+    db: Session = Depends(get_db),
+    current_user: db_models.User = Depends(get_current_user)
+):
+    """Returns persistent conversation sessions stored in PostgreSQL."""
+    sessions = await run_in_threadpool(
+        RagService.get_user_sessions,
+        db=db,
+        user_id=current_user.id if current_user else None,
+        limit=limit
+    )
+    return {"status": "success", "total": len(sessions), "data": sessions}
+
+
+@router.get("/sessions/{session_id}/messages", summary="Get Full Messages of a Session from DB")
+async def get_session_messages(
+    session_id: str,
+    db: Session = Depends(get_db),
+    current_user: db_models.User = Depends(get_current_user)
+):
+    """Returns persistent message history for a session from PostgreSQL."""
+    messages = await run_in_threadpool(RagService.get_session_messages, db=db, session_id=session_id)
+    return {"status": "success", "session_id": session_id, "data": messages}
+
+
+@router.delete("/sessions/{session_id}", summary="Delete Conversation Session")
+async def delete_session(
+    session_id: str,
+    db: Session = Depends(get_db),
+    current_user: db_models.User = Depends(get_current_user)
+):
+    """Deletes a session from PostgreSQL and Redis."""
+    from ..services.redis_service import RedisService
+    RedisService.clear_chat_history(session_id)
+    success = await run_in_threadpool(RagService.delete_session, db=db, session_id=session_id)
+    return {"status": "success" if success else "not_found"}
 
 
 @router.get("/redis/status", summary="Get Redis Status & Latency")

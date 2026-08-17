@@ -61,7 +61,7 @@ const dbForm = ref({
   syncIntervalHours: 24
 })
 
-// Chatbot Playground State & Redis Memory Session
+// Chatbot Playground State & Persistent Memory Session
 const currentSessionId = ref(localStorage.getItem('raray_rag_session_id') || ('sess_' + Math.random().toString(36).substring(2, 12)))
 localStorage.setItem('raray_rag_session_id', currentSessionId.value)
 const redisStatus = ref(null)
@@ -69,7 +69,7 @@ const redisStatus = ref(null)
 const chatMessages = ref([
   {
     role: 'assistant',
-    content: 'Halo! Saya adalah Hero Assistant terhubung ke basis pengetahuan Anda (didukung oleh **Groq Qwen 2.5/3.6** & **Redis Memory**). Tanyakan apa saja mengenai dokumen dan data database yang telah Anda sinkronkan.',
+    content: 'Halo! Saya adalah Hero Assistant terhubung ke basis pengetahuan Anda (didukung oleh **Groq Qwen 2.5/3.6**, **PostgreSQL Persistent Memory**, & **Self-Growth Engine**). Tanyakan apa saja mengenai dokumen dan data database yang telah Anda sinkronkan.',
     sources: []
   }
 ])
@@ -77,6 +77,25 @@ const userPrompt = ref('')
 const isGenerating = ref(false)
 const chatTopK = ref(4)
 const selectedDocFilter = ref('')
+
+// Persistent Sessions & Self-Growth Memory State
+const learnedFacts = ref([])
+const isLoadingFacts = ref(false)
+const sessionsList = ref([])
+const activeFeedbackMsg = ref(null)
+const showFeedbackModal = ref(false)
+const feedbackRating = ref(1)
+const feedbackCorrection = ref('')
+const feedbackNotes = ref('')
+const isSubmittingFeedback = ref(false)
+const feedbackSuccessToast = ref('')
+
+const newFactForm = ref({
+  subject: '',
+  content: '',
+  factType: 'learned_knowledge'
+})
+const isSavingFact = ref(false)
 
 // Integration Tab
 const apiLanguage = ref('nextjs') // 'nextjs', 'nextjs_upload', 'curl', 'python'
@@ -88,7 +107,9 @@ const ragInfo = ref(null)
 onMounted(async () => {
   await Promise.all([
     fetchLibrary(),
-    fetchExternalDatabases()
+    fetchExternalDatabases(),
+    fetchLearnedFacts(),
+    fetchSessions()
   ])
   try {
     const res = await ragService.getInfo()
@@ -100,14 +121,19 @@ onMounted(async () => {
     console.warn('Could not fetch RAG info:', err)
   }
 
-  // Restore persistent conversation history from Redis
+  // Restore persistent conversation history (try DB first, then Redis)
   try {
-    const histRes = await ragService.getChatSessionHistory(currentSessionId.value)
-    if (histRes?.history && histRes.history.length > 0) {
-      chatMessages.value = histRes.history
+    const sessionRes = await ragService.getSessionMessages(currentSessionId.value)
+    if (sessionRes?.data && sessionRes.data.length > 0) {
+      chatMessages.value = sessionRes.data
+    } else {
+      const histRes = await ragService.getChatSessionHistory(currentSessionId.value)
+      if (histRes?.history && histRes.history.length > 0) {
+        chatMessages.value = histRes.history
+      }
     }
   } catch (e) {
-    console.warn('Could not restore chat session from Redis:', e)
+    console.warn('Could not restore chat session:', e)
   }
 })
 
@@ -544,22 +570,105 @@ const startNewDatabase = () => {
   dbViewMode.value = 'form'
 }
 
-// Chatbot Send with Multi-Turn Memory & Redis Session
-const clearChat = async () => {
+// Persistent Sessions & Self-Growth Memory Handlers
+const fetchLearnedFacts = async () => {
+  isLoadingFacts.value = true
   try {
-    await ragService.clearChatSession(currentSessionId.value)
-  } catch (e) {
-    console.warn('Clear session error:', e)
+    const res = await ragService.getLearnedFacts(50)
+    if (res?.data) {
+      learnedFacts.value = res.data
+    }
+  } catch (err) {
+    console.warn('Failed to fetch learned facts:', err)
+  } finally {
+    isLoadingFacts.value = false
   }
+}
+
+const fetchSessions = async () => {
+  try {
+    const res = await ragService.getSessions(30)
+    if (res?.data) {
+      sessionsList.value = res.data
+    }
+  } catch (err) {
+    console.warn('Failed to fetch sessions:', err)
+  }
+}
+
+const selectSession = async (sessId) => {
+  if (!sessId || sessId === currentSessionId.value) return
+  currentSessionId.value = sessId
+  localStorage.setItem('raray_rag_session_id', sessId)
+  try {
+    const res = await ragService.getSessionMessages(sessId)
+    if (res?.data && res.data.length > 0) {
+      chatMessages.value = res.data
+    } else {
+      chatMessages.value = []
+    }
+  } catch (err) {
+    console.error('Error loading session messages:', err)
+  }
+}
+
+const handleDeleteSession = async (sessId) => {
+  if (!confirm('Hapus sesi percakapan ini secara permanen?')) return
+  try {
+    await ragService.deleteSession(sessId)
+    await fetchSessions()
+    if (currentSessionId.value === sessId) {
+      clearChat()
+    }
+  } catch (err) {
+    alert('Gagal menghapus sesi: ' + err.message)
+  }
+}
+
+const handleSaveNewFact = async () => {
+  if (!newFactForm.value.content.trim()) {
+    alert('Isi konten fakta / aturan terlebih dahulu.')
+    return
+  }
+  isSavingFact.value = true
+  try {
+    await ragService.teachFact({
+      content: newFactForm.value.content,
+      subject: newFactForm.value.subject || null,
+      factType: newFactForm.value.factType || 'learned_knowledge'
+    })
+    newFactForm.value = { subject: '', content: '', factType: 'learned_knowledge' }
+    await fetchLearnedFacts()
+    alert('🧠 Fakta baru berhasil dipelajari dan disimpan ke dalam memori RAG!')
+  } catch (err) {
+    alert('Gagal menyimpan fakta: ' + err.message)
+  } finally {
+    isSavingFact.value = false
+  }
+}
+
+const handleDeleteFact = async (factId) => {
+  if (!confirm('Hapus fakta / aturan memori ini?')) return
+  try {
+    await ragService.deleteLearnedFact(factId)
+    await fetchLearnedFacts()
+  } catch (err) {
+    alert('Gagal menghapus fakta: ' + err.message)
+  }
+}
+
+// Chatbot Send with Multi-Turn Memory & Persistent DB Session
+const clearChat = async () => {
   currentSessionId.value = 'sess_' + Math.random().toString(36).substring(2, 12)
   localStorage.setItem('raray_rag_session_id', currentSessionId.value)
   chatMessages.value = [
     {
       role: 'assistant',
-      content: 'Halo! Sesi percakapan baru telah dibuat. Saya adalah Hero Assistant terhubung ke basis pengetahuan Anda (didukung oleh **Groq Qwen 2.5/3.6** dan **Redis Memory**). Tanyakan apa saja mengenai dokumen dan data database yang telah Anda sinkronkan.',
+      content: 'Halo! Sesi percakapan baru telah dibuat. Saya adalah Hero Assistant terhubung ke basis pengetahuan Anda (didukung oleh **Groq Qwen 2.5/3.6**, **PostgreSQL Persistent Memory**, dan **Self-Growth Engine**). Tanyakan apa saja mengenai dokumen dan data database yang telah Anda sinkronkan.',
       sources: []
     }
   ]
+  await fetchSessions()
 }
 
 const handleSendMessage = async () => {
@@ -576,11 +685,12 @@ const handleSendMessage = async () => {
       content: m.content
     }))
 
-  chatMessages.value.push({
+  const userMsgObj = {
     role: 'user',
     content: q,
     sources: []
-  })
+  }
+  chatMessages.value.push(userMsgObj)
 
   isGenerating.value = true
 
@@ -594,13 +704,18 @@ const handleSendMessage = async () => {
     })
 
     if (res?.data) {
+      userMsgObj.id = res.data.user_message_id
       chatMessages.value.push({
+        id: res.data.assistant_message_id,
         role: 'assistant',
         content: res.data.answer || 'Tidak ada jawaban.',
         sources: res.data.sources || [],
+        learned_facts: res.data.learned_facts || [],
         latency: res.data.latency_ms,
-        from_cache: res.data.from_cache
+        from_cache: res.data.from_cache,
+        rating: null
       })
+      fetchSessions()
     }
   } catch (err) {
     chatMessages.value.push({
@@ -610,6 +725,59 @@ const handleSendMessage = async () => {
     })
   } finally {
     isGenerating.value = false
+  }
+}
+
+// Feedback & Self-Growth Actions
+const openFeedbackModal = (msg, defaultRating = null) => {
+  activeFeedbackMsg.value = msg
+  feedbackRating.value = defaultRating !== null ? defaultRating : (msg.rating || 1)
+  feedbackCorrection.value = msg.correction_text || ''
+  feedbackNotes.value = msg.feedback_notes || ''
+  showFeedbackModal.value = true
+}
+
+const quickThumbsUp = async (msg) => {
+  if (!msg.id) return
+  msg.rating = 1
+  try {
+    await ragService.submitFeedback({
+      messageId: msg.id,
+      rating: 1
+    })
+  } catch (e) {
+    console.warn('Feedback error:', e)
+  }
+}
+
+const submitFeedbackAction = async () => {
+  if (!activeFeedbackMsg.value?.id) {
+    showFeedbackModal.value = false
+    return
+  }
+  isSubmittingFeedback.value = true
+  try {
+    const res = await ragService.submitFeedback({
+      messageId: activeFeedbackMsg.value.id,
+      rating: feedbackRating.value,
+      feedbackNotes: feedbackNotes.value,
+      correctionText: feedbackCorrection.value
+    })
+    activeFeedbackMsg.value.rating = feedbackRating.value
+    activeFeedbackMsg.value.feedback_notes = feedbackNotes.value
+    activeFeedbackMsg.value.correction_text = feedbackCorrection.value
+    showFeedbackModal.value = false
+
+    if (res?.data?.learned_fact) {
+      await fetchLearnedFacts()
+      alert('🧠 Koreksi Anda telah disimpan ke memori! AI akan mengingat perbaikan ini untuk pertanyaan berikutnya.')
+    } else {
+      alert('Terima kasih atas masukan Anda!')
+    }
+  } catch (err) {
+    alert('Gagal mengirim feedback: ' + err.message)
+  } finally {
+    isSubmittingFeedback.value = false
   }
 }
 
@@ -913,6 +1081,9 @@ print("Sumber:", [s["filename"] for s in chat_res["data"]["sources"]])`
       </button>
       <button :class="['tab-item', { active: mainTab === 'chat' }]" @click="mainTab = 'chat'">
         💬 RAG Chatbot Playground
+      </button>
+      <button :class="['tab-item', { active: mainTab === 'memory' }]" @click="mainTab = 'memory'">
+        🧠 Memori & Self-Growth ({{ learnedFacts.length }})
       </button>
       <button :class="['tab-item', { active: mainTab === 'integration' }]" @click="mainTab = 'integration'">
         🔗 Next.js & API Integration
@@ -1458,22 +1629,30 @@ print("Sumber:", [s["filename"] for s in chat_res["data"]["sources"]])`
     <!-- Tab 4: RAG Chatbot Playground -->
     <div v-else-if="mainTab === 'chat'" class="tab-content">
       <div class="chat-layout">
-        <!-- Chat Left Panel -->
+        <!-- Chat Main Panel -->
         <div class="chat-main card">
           <div class="chat-header">
             <div class="chat-title-box">
               <span class="status-indicator"></span>
               <div>
                 <h3>RAG Knowledge Chatbot (Groq Qwen 2.5/3.6)</h3>
-                <span class="context-memory-sub">🧠 Multi-turn Memory Aktif (Mengingat percakapan sebelumnya)</span>
+                <span class="context-memory-sub">🧠 PostgreSQL Persistent Memory + Self-Growth Engine Aktif</span>
               </div>
             </div>
             <div class="chat-controls">
+              <!-- Session Switcher -->
+              <select :value="currentSessionId" @change="selectSession($event.target.value)" class="filter-select session-select" title="Pilih riwayat percakapan">
+                <option :value="currentSessionId">💬 Sesi Aktif ({{ currentSessionId.slice(0, 10) }}...)</option>
+                <option v-for="s in sessionsList" :key="s.id" :value="s.id">
+                  {{ s.title }} ({{ s.message_count }} pesan)
+                </option>
+              </select>
+
               <select v-model="selectedDocFilter" class="filter-select">
                 <option value="">Semua Dokumen Basis Pengetahuan</option>
                 <option v-for="d in documents" :key="d.id" :value="d.id">{{ d.filename }}</option>
               </select>
-              <button class="btn-clear-chat" @click="clearChat" title="Reset konteks percakapan">
+              <button class="btn-clear-chat" @click="clearChat" title="Mulai percakapan baru">
                 🧹 Percakapan Baru
               </button>
             </div>
@@ -1483,12 +1662,22 @@ print("Sumber:", [s["filename"] for s in chat_res["data"]["sources"]])`
           <div class="messages-area">
             <div 
               v-for="(msg, idx) in chatMessages" 
-              :key="idx" 
+              :key="msg.id || idx" 
               :class="['chat-bubble-wrap', msg.role]"
             >
               <div class="chat-bubble">
                 <div class="bubble-sender">{{ msg.role === 'user' ? 'Anda' : 'Hero Assistant' }}</div>
                 <div class="bubble-content" v-html="formatMarkdown(msg.content)"></div>
+
+                <!-- Learned Facts Footnote -->
+                <div v-if="msg.learned_facts && msg.learned_facts.length > 0" class="learned-facts-box">
+                  <div class="learned-title">🧠 Memori yang Dipelajari & Diterapkan:</div>
+                  <div class="learned-tags">
+                    <span v-for="(f, fIdx) in msg.learned_facts" :key="fIdx" class="learned-tag">
+                      💡 {{ f.subject || f.content }} ({{ f.fact_type }})
+                    </span>
+                  </div>
+                </div>
 
                 <!-- Sources Footnote -->
                 <div v-if="msg.sources && msg.sources.length > 0" class="sources-box">
@@ -1504,7 +1693,39 @@ print("Sumber:", [s["filename"] for s in chat_res["data"]["sources"]])`
 
                 <div v-if="msg.latency" class="bubble-latency">
                   <span v-if="msg.from_cache" class="cache-badge">⚡ Redis Instant Cache Hit ({{ msg.latency }} ms)</span>
-                  <span v-else>⏱️ {{ msg.latency }} ms (Groq + Redis Memory)</span>
+                  <span v-else>⏱️ {{ msg.latency }} ms (Groq + PostgreSQL Memory)</span>
+                </div>
+
+                <!-- Interactive Feedback & Self-Growth Bar -->
+                <div v-if="msg.role === 'assistant' && msg.id" class="message-feedback-bar">
+                  <div class="feedback-actions">
+                    <button 
+                      class="btn-feedback" 
+                      :class="{ active: msg.rating === 1 }" 
+                      @click="quickThumbsUp(msg)" 
+                      title="Jawaban Akurat / Membantu"
+                    >
+                      👍
+                    </button>
+                    <button 
+                      class="btn-feedback" 
+                      :class="{ active: msg.rating === -1 }" 
+                      @click="openFeedbackModal(msg, -1)" 
+                      title="Jawaban Kurang Tepat"
+                    >
+                      👎
+                    </button>
+                    <button 
+                      class="btn-feedback btn-correct" 
+                      @click="openFeedbackModal(msg)" 
+                      title="Beri Koreksi / Ajari AI"
+                    >
+                      ✏️ Koreksi / Ajari AI
+                    </button>
+                  </div>
+                  <span v-if="msg.correction_text" class="correction-saved-tag">
+                    ✅ Koreksi dipelajari AI
+                  </span>
                 </div>
               </div>
             </div>
@@ -1512,7 +1733,7 @@ print("Sumber:", [s["filename"] for s in chat_res["data"]["sources"]])`
             <div v-if="isGenerating" class="chat-bubble-wrap assistant">
               <div class="chat-bubble loading">
                 <div class="typing-dots"><span></span><span></span><span></span></div>
-                <span>Mencari vektor dokumen & menyusun jawaban via Groq Qwen...</span>
+                <span>Mencari vektor dokumen & memori yang dipelajari via Groq Qwen...</span>
               </div>
             </div>
           </div>
@@ -1522,7 +1743,7 @@ print("Sumber:", [s["filename"] for s in chat_res["data"]["sources"]])`
             <input 
               type="text" 
               v-model="userPrompt" 
-              placeholder="Tanyakan sesuatu tentang dokumen atau database Anda (contoh: 'Cari customer yang butuh diperhatikan')..." 
+              placeholder="Tanyakan sesuatu tentang dokumen, database, atau beri instruksi baru..." 
               class="chat-input"
               @keydown.enter="handleSendMessage"
             />
@@ -1533,6 +1754,106 @@ print("Sumber:", [s["filename"] for s in chat_res["data"]["sources"]])`
             >
               Kirim 🚀
             </button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Tab 5: Memori & Self-Growth -->
+    <div v-else-if="mainTab === 'memory'" class="tab-content">
+      <div class="memory-container">
+        <div class="card memory-header-card">
+          <div class="memory-header-info">
+            <h2 class="section-title">🧠 Memori Pengetahuan & Self-Growth AI</h2>
+            <p class="section-desc">
+              Hero Assistant secara dinamis mempelajari aturan baru, koreksi pengguna, dan preferensi domain. Pengetahuan ini disimpan secara permanen di PostgreSQL dan langsung diingat di setiap pertanyaan RAG mendatang.
+            </p>
+          </div>
+          <div class="memory-stats-grid">
+            <div class="mem-stat-box">
+              <span class="mem-stat-val">{{ learnedFacts.length }}</span>
+              <span class="mem-stat-lbl">Fakta & Aturan Dipelajari</span>
+            </div>
+            <div class="mem-stat-box">
+              <span class="mem-stat-val">{{ learnedFacts.filter(f => f.fact_type === 'user_correction').length }}</span>
+              <span class="mem-stat-lbl">Koreksi Pengguna</span>
+            </div>
+            <div class="mem-stat-box">
+              <span class="mem-stat-val">{{ learnedFacts.filter(f => f.fact_type === 'rule' || f.fact_type === 'learned_knowledge').length }}</span>
+              <span class="mem-stat-lbl">Aturan & Pengetahuan Domain</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="memory-content-grid">
+          <!-- Form: Ajari AI Fakta Baru -->
+          <div class="card memory-form-card">
+            <h3 class="form-block-title">💡 Ajari AI Fakta / Aturan Baru</h3>
+            <p class="form-block-sub">Tambahkan informasi penting atau SOP operasional langsung tanpa perlu mengunggah berkas dokumen.</p>
+
+            <div class="form-group">
+              <label class="form-label">Tipe Memori</label>
+              <select v-model="newFactForm.factType" class="form-control">
+                <option value="learned_knowledge">💡 Pengetahuan / Fakta Operasional</option>
+                <option value="rule">⚖️ Aturan / SOP Khusus</option>
+                <option value="user_correction">✏️ Koreksi / Klarifikasi Data</option>
+                <option value="preference">⚙️ Preferensi Sistem</option>
+              </select>
+            </div>
+
+            <div class="form-group">
+              <label class="form-label">Judul / Topik (Opsional)</label>
+              <input type="text" v-model="newFactForm.subject" placeholder="Contoh: Kode Part Loader WA500" class="form-control" />
+            </div>
+
+            <div class="form-group">
+              <label class="form-label">Isi Fakta / Aturan yang Harus Diingat AI *</label>
+              <textarea 
+                v-model="newFactForm.content" 
+                rows="4" 
+                placeholder="Contoh: Ban ukuran 29.5R25 merk Bridgestone digunakan khusus untuk unit Wheel Loader Komatsu WA500 di Pit A." 
+                class="form-control"
+              ></textarea>
+            </div>
+
+            <button class="btn-primary full-width" :disabled="isSavingFact || !newFactForm.content.trim()" @click="handleSaveNewFact">
+              <span v-if="isSavingFact" class="spinner"></span>
+              <span v-else>💾 Simpan ke Memori RAG</span>
+            </button>
+          </div>
+
+          <!-- List: Fakta & Aturan yang Sudah Dipelajari -->
+          <div class="card memory-list-card">
+            <div class="memory-list-header">
+              <h3 class="form-block-title">📋 Daftar Memori yang Telah Dipelajari ({{ learnedFacts.length }})</h3>
+              <button class="btn-refresh" @click="fetchLearnedFacts">🔄 Refresh</button>
+            </div>
+
+            <div v-if="isLoadingFacts" class="loading-state">
+              <div class="spinner"></div>
+              <span>Memuat memori AI...</span>
+            </div>
+
+            <div v-else-if="learnedFacts.length === 0" class="empty-memory">
+              <p>Belum ada fakta atau koreksi yang dipelajari. Anda dapat mengajarkan fakta di samping kiri atau memberikan tombol "Koreksi" pada percakapan chat.</p>
+            </div>
+
+            <div v-else class="memory-items-list">
+              <div v-for="fact in learnedFacts" :key="fact.id" class="memory-fact-card">
+                <div class="fact-top-row">
+                  <span :class="['fact-type-badge', fact.fact_type]">
+                    {{ fact.fact_type === 'user_correction' ? '✏️ Koreksi Pengguna' : fact.fact_type === 'rule' ? '⚖️ Aturan SOP' : '💡 Fakta Khusus' }}
+                  </span>
+                  <button class="btn-delete-fact" @click="handleDeleteFact(fact.id)" title="Hapus dari memori">🗑️</button>
+                </div>
+                <h4 class="fact-subject">{{ fact.subject || 'Fakta Memori' }}</h4>
+                <p class="fact-content">{{ fact.content }}</p>
+                <div class="fact-meta">
+                  <span>Sumber: {{ fact.learned_from }}</span>
+                  <span v-if="fact.created_at">{{ new Date(fact.created_at).toLocaleString() }}</span>
+                </div>
+              </div>
+            </div>
           </div>
         </div>
       </div>
@@ -1621,6 +1942,77 @@ print("Sumber:", [s["filename"] for s in chat_res["data"]["sources"]])`
               <pre class="chunk-content">{{ c.content }}</pre>
             </div>
           </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Modal: Feedback & Koreksi AI (Self-Growth) -->
+    <div v-if="showFeedbackModal" class="modal-overlay" @click.self="showFeedbackModal = false">
+      <div class="modal-card feedback-modal">
+        <div class="modal-header">
+          <div>
+            <h3>✏️ Koreksi Jawaban & Ajari AI (Self-Growth)</h3>
+            <span class="modal-sub">AI akan mengingat fakta koreksi ini untuk pertanyaan berikutnya</span>
+          </div>
+          <button class="btn-close-modal" @click="showFeedbackModal = false">✕</button>
+        </div>
+
+        <div class="modal-body">
+          <p class="feedback-modal-desc">
+            Beri tahu AI jika ada informasi yang salah, kurang lengkap, atau aturan baru yang harus dipatuhi. Koreksi Anda akan diubah menjadi embedding semantik dan disimpan ke memori jangka panjang.
+          </p>
+
+          <div class="form-group">
+            <label class="form-label">Rating Kualitas Jawaban</label>
+            <div class="rating-btn-group">
+              <button 
+                type="button"
+                :class="['btn-rate-choice', { active: feedbackRating === 1 }]" 
+                @click="feedbackRating = 1"
+              >
+                👍 Bagus / Perlu Tambahan
+              </button>
+              <button 
+                type="button"
+                :class="['btn-rate-choice', { active: feedbackRating === -1 }]" 
+                @click="feedbackRating = -1"
+              >
+                👎 Salah / Kurang Tepat
+              </button>
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label">Koreksi Jawaban / Fakta yang Benar *</label>
+            <textarea 
+              v-model="feedbackCorrection" 
+              rows="4" 
+              placeholder="Tuliskan fakta yang benar di sini. Contoh: Untuk permohonan material ganti ban, form yang digunakan adalah F-MAT-01 dan wajib ditandatangani oleh Site Supervisor..." 
+              class="form-control"
+            ></textarea>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label">Catatan Tambahan (Opsional)</label>
+            <input 
+              type="text" 
+              v-model="feedbackNotes" 
+              placeholder="Catatan evaluasi untuk sistem..." 
+              class="form-control" 
+            />
+          </div>
+        </div>
+
+        <div class="modal-footer">
+          <button class="btn-secondary" @click="showFeedbackModal = false">Batal</button>
+          <button 
+            class="btn-primary" 
+            :disabled="isSubmittingFeedback || !feedbackCorrection.trim()" 
+            @click="submitFeedbackAction"
+          >
+            <span v-if="isSubmittingFeedback" class="spinner"></span>
+            <span v-else>🧠 Simpan & Ajarkan ke AI</span>
+          </button>
         </div>
       </div>
     </div>
@@ -3201,5 +3593,316 @@ print("Sumber:", [s["filename"] for s in chat_res["data"]["sources"]])`
 
 .chat-table tbody tr:hover {
   background: #f1f5f9;
+}
+
+/* Persistent Session Switcher */
+.session-select {
+  max-width: 200px;
+  background: #f8fafc;
+  font-weight: 600;
+  border-color: #cbd5e1;
+}
+
+/* Learned Facts Box in Chat */
+.learned-facts-box {
+  margin-top: 10px;
+  padding: 8px 12px;
+  background: #fdf4ff;
+  border: 1px solid #f5d0fe;
+  border-radius: 8px;
+}
+
+.learned-title {
+  font-size: 11px;
+  font-weight: 700;
+  color: #a21caf;
+  margin-bottom: 4px;
+}
+
+.learned-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.learned-tag {
+  background: #fae8ff;
+  color: #86198f;
+  border: 1px solid #f0abfc;
+  font-size: 11.5px;
+  padding: 3px 8px;
+  border-radius: 6px;
+  font-weight: 600;
+}
+
+/* Message Feedback Bar */
+.message-feedback-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid #f1f5f9;
+}
+
+.feedback-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.btn-feedback {
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  padding: 3px 8px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.btn-feedback:hover {
+  background: #e2e8f0;
+  border-color: #cbd5e1;
+}
+
+.btn-feedback.active {
+  background: #dbeafe;
+  border-color: #3b82f6;
+  font-weight: 700;
+}
+
+.btn-correct {
+  color: #475569;
+  font-weight: 600;
+}
+
+.btn-correct:hover {
+  color: #2563eb;
+  background: #eff6ff;
+  border-color: #bfdbfe;
+}
+
+.correction-saved-tag {
+  font-size: 11px;
+  font-weight: 600;
+  color: #16a34a;
+  background: #f0fdf4;
+  border: 1px solid #bbf7d0;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
+/* Memori & Self-Growth Tab */
+.memory-container {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.memory-header-card {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 20px;
+  background: linear-gradient(135deg, #ffffff 0%, #fdf4ff 100%);
+  border-color: #f5d0fe;
+}
+
+.memory-header-info {
+  max-width: 800px;
+}
+
+.memory-stats-grid {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.mem-stat-box {
+  background: #ffffff;
+  border: 1px solid #f0abfc;
+  border-radius: 10px;
+  padding: 10px 16px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  min-width: 110px;
+}
+
+.mem-stat-val {
+  font-size: 20px;
+  font-weight: 800;
+  color: #a21caf;
+}
+
+.mem-stat-lbl {
+  font-size: 11px;
+  color: #701a75;
+  font-weight: 600;
+}
+
+.memory-content-grid {
+  display: grid;
+  grid-template-columns: 420px 1fr;
+  gap: 20px;
+}
+
+@media (max-width: 1024px) {
+  .memory-content-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.memory-form-card {
+  height: fit-content;
+}
+
+.memory-list-card {
+  min-height: 450px;
+}
+
+.memory-list-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 16px;
+}
+
+.memory-items-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.memory-fact-card {
+  background: #fafafa;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  padding: 14px;
+  transition: all 0.15s;
+}
+
+.memory-fact-card:hover {
+  border-color: #cbd5e1;
+  background: #ffffff;
+  box-shadow: 0 2px 5px rgba(0, 0, 0, 0.04);
+}
+
+.fact-top-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 6px;
+}
+
+.fact-type-badge {
+  font-size: 11px;
+  font-weight: 700;
+  padding: 3px 8px;
+  border-radius: 9999px;
+}
+
+.fact-type-badge.user_correction {
+  background: #fef3c7;
+  color: #b45309;
+  border: 1px solid #fde68a;
+}
+
+.fact-type-badge.rule {
+  background: #e0e7ff;
+  color: #3730a3;
+  border: 1px solid #c7d2fe;
+}
+
+.fact-type-badge.learned_knowledge,
+.fact-type-badge.preference {
+  background: #fae8ff;
+  color: #86198f;
+  border: 1px solid #f0abfc;
+}
+
+.btn-delete-fact {
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 14px;
+  opacity: 0.6;
+  transition: opacity 0.15s;
+}
+
+.btn-delete-fact:hover {
+  opacity: 1;
+}
+
+.fact-subject {
+  font-size: 14px;
+  font-weight: 700;
+  color: #0f172a;
+  margin: 0 0 6px;
+}
+
+.fact-content {
+  font-size: 13px;
+  color: #334155;
+  margin: 0 0 8px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+
+.fact-meta {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11px;
+  color: #94a3b8;
+}
+
+.empty-memory {
+  text-align: center;
+  padding: 40px 20px;
+  color: #94a3b8;
+  font-size: 13.5px;
+}
+
+/* Feedback Modal Styles */
+.feedback-modal {
+  max-width: 550px;
+}
+
+.feedback-modal-desc {
+  font-size: 13px;
+  color: #64748b;
+  margin-bottom: 16px;
+  line-height: 1.5;
+}
+
+.rating-btn-group {
+  display: flex;
+  gap: 10px;
+}
+
+.btn-rate-choice {
+  flex: 1;
+  padding: 10px 14px;
+  border-radius: 8px;
+  border: 1px solid #cbd5e1;
+  background: #f8fafc;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: #475569;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.btn-rate-choice:hover {
+  background: #e2e8f0;
+}
+
+.btn-rate-choice.active {
+  background: #eff6ff;
+  border-color: #2563eb;
+  color: #1d4ed8;
+  font-weight: 700;
 }
 </style>

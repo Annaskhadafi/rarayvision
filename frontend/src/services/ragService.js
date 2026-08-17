@@ -168,6 +168,78 @@ export const ragService = {
     return this._handleResponse(res)
   },
 
+  // Persistent Sessions & Memory
+  async getSessions(limit = 30) {
+    const res = await fetch(`${API_BASE_URL}/api/v1/rag/sessions?limit=${limit}`, {
+      headers: this.getAuthHeaders()
+    })
+    return this._handleResponse(res)
+  },
+
+  async getSessionMessages(sessionId) {
+    const res = await fetch(`${API_BASE_URL}/api/v1/rag/sessions/${sessionId}/messages`, {
+      headers: this.getAuthHeaders()
+    })
+    return this._handleResponse(res)
+  },
+
+  async deleteSession(sessionId) {
+    const res = await fetch(`${API_BASE_URL}/api/v1/rag/sessions/${sessionId}`, {
+      method: 'DELETE',
+      headers: this.getAuthHeaders()
+    })
+    return this._handleResponse(res)
+  },
+
+  // Self-Growth & Feedback Loop
+  async submitFeedback({ messageId, rating = null, feedbackNotes = null, correctionText = null }) {
+    const res = await fetch(`${API_BASE_URL}/api/v1/rag/feedback`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...this.getAuthHeaders()
+      },
+      body: JSON.stringify({
+        message_id: messageId,
+        rating,
+        feedback_notes: feedbackNotes,
+        correction_text: correctionText
+      })
+    })
+    return this._handleResponse(res)
+  },
+
+  async teachFact({ content, subject = null, factType = 'learned_knowledge' }) {
+    const res = await fetch(`${API_BASE_URL}/api/v1/rag/memory/learn`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...this.getAuthHeaders()
+      },
+      body: JSON.stringify({
+        content,
+        subject,
+        fact_type: factType
+      })
+    })
+    return this._handleResponse(res)
+  },
+
+  async getLearnedFacts(limit = 50) {
+    const res = await fetch(`${API_BASE_URL}/api/v1/rag/memory/facts?limit=${limit}`, {
+      headers: this.getAuthHeaders()
+    })
+    return this._handleResponse(res)
+  },
+
+  async deleteLearnedFact(factId) {
+    const res = await fetch(`${API_BASE_URL}/api/v1/rag/memory/facts/${factId}`, {
+      method: 'DELETE',
+      headers: this.getAuthHeaders()
+    })
+    return this._handleResponse(res)
+  },
+
   // External PostgreSQL Database Endpoints
   async testDatabaseConnection(dbUrl) {
     const res = await fetch(`${API_BASE_URL}/api/v1/rag/databases/test`, {

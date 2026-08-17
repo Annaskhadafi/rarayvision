@@ -9,11 +9,17 @@ from sqlalchemy.orm import Session
 from sqlalchemy import func
 
 try:
-    from app.database.rag_models import RagDocument, RagDocumentChunk
+    from app.database.rag_models import (
+        RagDocument, RagDocumentChunk,
+        RagChatSession, RagChatMessage, RagMemoryFact
+    )
     from app.services.anydoc_service import AnyDocService
     from app.services.redis_service import RedisService
 except ImportError:
-    from backend.app.database.rag_models import RagDocument, RagDocumentChunk
+    from backend.app.database.rag_models import (
+        RagDocument, RagDocumentChunk,
+        RagChatSession, RagChatMessage, RagMemoryFact
+    )
     from backend.app.services.anydoc_service import AnyDocService
     from backend.app.services.redis_service import RedisService
 
@@ -446,6 +452,285 @@ class RagService:
         return scored[:top_k]
 
     @classmethod
+    def search_learned_facts(
+        cls,
+        db: Session,
+        query: str,
+        top_k: int = 3,
+        user_id: Optional[int] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        Retrieves top learned facts/rules/corrections using vector similarity + keyword matching.
+        """
+        try:
+            facts = db.query(RagMemoryFact).filter(RagMemoryFact.is_active == True).all()
+            if not facts:
+                return []
+
+            query_vec = cls.generate_single_embedding(query)
+            import numpy as np
+
+            scored = []
+            q_vec = np.array(query_vec, dtype=np.float32)
+            q_norm = np.linalg.norm(q_vec)
+
+            for f in facts:
+                sim = 0.0
+                if f.embedding and q_norm > 0:
+                    f_vec = np.array(f.embedding, dtype=np.float32)
+                    f_norm = np.linalg.norm(f_vec)
+                    if f_norm > 0:
+                        sim = float(np.dot(q_vec, f_vec) / (q_norm * f_norm))
+
+                # Simple keyword overlap boost
+                q_words = set(re.findall(r'\w+', query.lower()))
+                f_words = set(re.findall(r'\w+', (f.content or '').lower()))
+                overlap = len(q_words & f_words)
+                combined_score = sim + (0.1 * min(overlap, 3))
+
+                if combined_score > 0.45 or overlap >= 2:
+                    scored.append({
+                        "id": f.id,
+                        "subject": f.subject,
+                        "content": f.content,
+                        "fact_type": f.fact_type,
+                        "learned_from": f.learned_from,
+                        "similarity_score": round(sim, 4),
+                        "score": combined_score
+                    })
+
+            scored.sort(key=lambda x: x["score"], reverse=True)
+            return scored[:top_k]
+        except Exception as e:
+            logger.warning(f"[RagService] search_learned_facts error: {e}")
+            return []
+
+    @classmethod
+    def learn_fact(
+        cls,
+        db: Session,
+        content: str,
+        subject: Optional[str] = None,
+        fact_type: str = "learned_knowledge",
+        user_id: Optional[int] = None,
+        source_session_id: Optional[str] = None,
+        source_message_id: Optional[str] = None,
+        learned_from: str = "user_feedback"
+    ) -> Dict[str, Any]:
+        """
+        Self-Growth Engine: Ingests a new fact, rule, or correction into long-term memory.
+        Generates 384-d vector embedding and persists to PostgreSQL.
+        """
+        content = content.strip()
+        if not content:
+            raise ValueError("Konten fakta tidak boleh kosong")
+
+        fact_id = f"fact_{uuid.uuid4().hex[:12]}"
+        embedding = cls.generate_single_embedding(content)
+
+        new_fact = RagMemoryFact(
+            id=fact_id,
+            user_id=user_id,
+            fact_type=fact_type,
+            subject=subject or (content[:60] + "..." if len(content) > 60 else content),
+            content=content,
+            confidence_score=1.0,
+            source_session_id=source_session_id,
+            source_message_id=source_message_id,
+            embedding=embedding,
+            is_active=True,
+            learned_from=learned_from
+        )
+        db.add(new_fact)
+        db.commit()
+        db.refresh(new_fact)
+
+        logger.info(f"[RagService] Self-Growth: New fact learned [{fact_id}] ({fact_type}): {new_fact.subject}")
+        return {
+            "id": new_fact.id,
+            "subject": new_fact.subject,
+            "content": new_fact.content,
+            "fact_type": new_fact.fact_type,
+            "learned_from": new_fact.learned_from,
+            "created_at": new_fact.created_at.isoformat() if new_fact.created_at else None
+        }
+
+    @classmethod
+    def submit_feedback(
+        cls,
+        db: Session,
+        message_id: str,
+        rating: Optional[int] = None,
+        feedback_notes: Optional[str] = None,
+        correction_text: Optional[str] = None,
+        user_id: Optional[int] = None
+    ) -> Dict[str, Any]:
+        """
+        Records user feedback (thumbs up/down) and applies Self-Growth if correction text is provided.
+        """
+        msg = db.query(RagChatMessage).filter(RagChatMessage.id == message_id).first()
+        if not msg:
+            raise ValueError(f"Pesan dengan ID {message_id} tidak ditemukan")
+
+        if rating is not None:
+            msg.rating = rating
+        if feedback_notes:
+            msg.feedback_notes = feedback_notes
+        if correction_text:
+            msg.correction_text = correction_text
+
+        learned_fact = None
+        # If user provided a correction or detailed feedback, ingest as learned memory
+        if correction_text and len(correction_text.strip()) > 5:
+            learned_fact = cls.learn_fact(
+                db=db,
+                content=correction_text.strip(),
+                subject=f"Koreksi: {msg.content[:40]}...",
+                fact_type="user_correction",
+                user_id=user_id,
+                source_session_id=msg.session_id,
+                source_message_id=msg.id,
+                learned_from="user_feedback"
+            )
+
+        db.commit()
+        return {
+            "message_id": msg.id,
+            "rating": msg.rating,
+            "feedback_notes": msg.feedback_notes,
+            "correction_text": msg.correction_text,
+            "learned_fact": learned_fact
+        }
+
+    @classmethod
+    def save_message_to_db(
+        cls,
+        db: Session,
+        session_id: str,
+        role: str,
+        content: str,
+        sources: Optional[List[Dict[str, Any]]] = None,
+        retrieved_chunks_count: int = 0,
+        latency_ms: float = 0.0,
+        user_id: Optional[int] = None,
+        document_id: Optional[str] = None
+    ) -> RagChatMessage:
+        """Persists chat turn permanently into PostgreSQL database."""
+        # Find or create session
+        session = db.query(RagChatSession).filter(RagChatSession.id == session_id).first()
+        if not session:
+            title = content[:60] if role == "user" else "Percakapan Hero Assistant"
+            session = RagChatSession(
+                id=session_id,
+                user_id=user_id,
+                title=title,
+                document_id=document_id,
+                is_active=True
+            )
+            db.add(session)
+            db.commit()
+        else:
+            session.updated_at = datetime.utcnow()
+            db.commit()
+
+        msg_id = f"msg_{uuid.uuid4().hex[:12]}"
+        chat_msg = RagChatMessage(
+            id=msg_id,
+            session_id=session_id,
+            role=role,
+            content=content,
+            sources=sources or [],
+            retrieved_chunks_count=retrieved_chunks_count,
+            latency_ms=latency_ms
+        )
+        db.add(chat_msg)
+        db.commit()
+        db.refresh(chat_msg)
+        return chat_msg
+
+    @classmethod
+    def get_user_sessions(cls, db: Session, user_id: Optional[int] = None, limit: int = 30) -> List[Dict[str, Any]]:
+        """Retrieves list of persistent conversation sessions."""
+        q = db.query(RagChatSession).filter(RagChatSession.is_active == True)
+        if user_id:
+            q = q.filter(RagChatSession.user_id == user_id)
+        sessions = q.order_by(RagChatSession.updated_at.desc()).limit(limit).all()
+
+        return [
+            {
+                "id": s.id,
+                "title": s.title,
+                "document_id": s.document_id,
+                "created_at": s.created_at.isoformat() if s.created_at else None,
+                "updated_at": s.updated_at.isoformat() if s.updated_at else None,
+                "message_count": len(s.messages)
+            }
+            for s in sessions
+        ]
+
+    @classmethod
+    def get_session_messages(cls, db: Session, session_id: str) -> List[Dict[str, Any]]:
+        """Retrieves all messages for a specific session."""
+        msgs = db.query(RagChatMessage).filter(
+            RagChatMessage.session_id == session_id
+        ).order_by(RagChatMessage.created_at.asc()).all()
+
+        return [
+            {
+                "id": m.id,
+                "role": m.role,
+                "content": m.content,
+                "sources": m.sources or [],
+                "rating": m.rating,
+                "feedback_notes": m.feedback_notes,
+                "correction_text": m.correction_text,
+                "latency_ms": m.latency_ms,
+                "created_at": m.created_at.isoformat() if m.created_at else None
+            }
+            for m in msgs
+        ]
+
+    @classmethod
+    def delete_session(cls, db: Session, session_id: str) -> bool:
+        """Deletes a chat session and all its messages."""
+        session = db.query(RagChatSession).filter(RagChatSession.id == session_id).first()
+        if session:
+            db.delete(session)
+            db.commit()
+            return True
+        return False
+
+    @classmethod
+    def get_learned_facts(cls, db: Session, user_id: Optional[int] = None, limit: int = 50) -> List[Dict[str, Any]]:
+        """Retrieves learned long-term memory facts."""
+        facts = db.query(RagMemoryFact).filter(
+            RagMemoryFact.is_active == True
+        ).order_by(RagMemoryFact.created_at.desc()).limit(limit).all()
+
+        return [
+            {
+                "id": f.id,
+                "subject": f.subject,
+                "content": f.content,
+                "fact_type": f.fact_type,
+                "learned_from": f.learned_from,
+                "confidence_score": f.confidence_score,
+                "created_at": f.created_at.isoformat() if f.created_at else None
+            }
+            for f in facts
+        ]
+
+    @classmethod
+    def delete_learned_fact(cls, db: Session, fact_id: str) -> bool:
+        """Deletes or deactivates a learned fact."""
+        fact = db.query(RagMemoryFact).filter(RagMemoryFact.id == fact_id).first()
+        if fact:
+            db.delete(fact)
+            db.commit()
+            return True
+        return False
+
+    @classmethod
     def chat_completion(
         cls,
         db: Session,
@@ -454,26 +739,30 @@ class RagService:
         session_id: Optional[str] = None,
         top_k: int = 4,
         document_id: Optional[str] = None,
-        custom_system_prompt: Optional[str] = None
+        custom_system_prompt: Optional[str] = None,
+        user_id: Optional[int] = None
     ) -> Dict[str, Any]:
         """
-        RAG Chat Completion with Multi-Turn Conversation Memory & Redis Caching:
-        1. Checks Redis cache for instant response if query is standalone.
-        2. Retrieves session conversation history from Redis if session_id is provided.
-        3. Analyzes conversation history to construct contextual search query.
-        4. Retrieves top-k most relevant Markdown chunks via vector similarity search.
-        5. Constructs knowledge context.
-        6. Passes full conversation thread + grounded context to LLM (Groq / OpenRouter / Gemini).
-        7. Saves turns to Redis session memory and caches response.
+        RAG Chat Completion with Multi-Turn Persistent Memory (Redis + PostgreSQL) & Self-Growth:
+        1. Retrieves session conversation history from Redis L1 cache or PostgreSQL L2 database.
+        2. Retrieves top-k most relevant Markdown chunks via vector similarity search.
+        3. Retrieves dynamic learned facts & user corrections from RagMemoryFact.
+        4. Injects context and learned facts into LLM.
+        5. Persists messages to both Redis and PostgreSQL.
         """
         start_time = time.perf_counter()
+        session_id = session_id or f"sess_{uuid.uuid4().hex[:10]}"
 
-        # 1. Check Redis Session Memory
+        # 1. Retrieve Active Messages (Redis L1 cache or PostgreSQL L2 fallback)
         active_messages = list(messages) if messages else []
         if not active_messages and session_id:
             redis_history = RedisService.get_chat_history(session_id, limit=8)
             if redis_history:
                 active_messages = redis_history
+            else:
+                db_msgs = cls.get_session_messages(db, session_id)
+                if db_msgs:
+                    active_messages = [{"role": m["role"], "content": m["content"]} for m in db_msgs[-8:]]
 
         # 2. Check Semantic RAG Cache (if standalone query without previous turns)
         if not active_messages:
@@ -493,17 +782,24 @@ class RagService:
                         history_for_search.append(c_text)
 
         if len(history_for_search) >= 2 and len(query.split()) < 7:
-            # Short follow-up question -> combine with previous topic for better vector retrieval
             search_query = f"{history_for_search[-2][:80]} {query.strip()}"
 
-        # 4. Retrieve relevant chunks
+        # 4. Retrieve relevant chunks from documents
         chunks = cls.search_similar_chunks(db, search_query, top_k=top_k, document_id=document_id)
         if not chunks and search_query != query.strip():
             chunks = cls.search_similar_chunks(db, query.strip(), top_k=top_k, document_id=document_id)
 
-        # 5. Build Context Prompt
+        # 5. Retrieve learned facts from Self-Growth Memory
+        learned_facts = cls.search_learned_facts(db, search_query, top_k=3, user_id=user_id)
+
+        # 6. Build Context Prompt
         context_parts = []
         sources = []
+
+        # Add learned facts first with high priority
+        if learned_facts:
+            facts_text = "\n".join([f"• [{f['fact_type'].upper()}]: {f['content']}" for f in learned_facts])
+            context_parts.append(f"[Memori & Aturan Khusus yang Dipelajari dari Pengguna]:\n{facts_text}")
 
         for idx, c in enumerate(chunks, 1):
             source_tag = f"[Sumber #{idx}: {c['filename']}"
@@ -522,7 +818,7 @@ class RagService:
 
         combined_context = "\n\n---\n\n".join(context_parts) if context_parts else "Tidak ada dokumen yang relevan ditemukan di basis pengetahuan."
 
-        # 6. Formulate Prompt & Multi-Turn Message History
+        # 7. Formulate System Prompt & Multi-Turn Message History
         system_instruction = custom_system_prompt or (
             "Anda adalah Hero Assistant, asisten AI resmi yang cerdas, efisien, dan profesional.\n\n"
             "ATURAN WAJIB FORMAT JAWABAN (STRICT RULES):\n"
@@ -531,11 +827,11 @@ class RagService:
             "3. STRUKTUR TABEL & POIN-POIN:\n"
             "   - Jika data/informasi memuat perbandingan, daftar ukuran/spesifikasi ban, kode part/SKU, daftar harga, stok inventaris, rincian data tabular, jadwal, atau informasi multi-kolom, WAJIB sajikan dalam bentuk TABEL MARKDOWN yang rapi (`| Header 1 | Header 2 | ... |` dan `| :--- | :--- | ... |`).\n"
             "   - Untuk penjelasan non-tabular, gunakan poin-poin (bullet points) yang rapi, ringkas, dan to-the-point tanpa kata pengantar bertele-tele.\n"
-            "4. BERBASIS KONTEKS DOKUMEN: Jawab secara akurat dan setia berdasarkan Konteks Dokumen Pengetahuan yang disediakan.\n"
+            "4. BERBASIS KONTEKS DOKUMEN & MEMORI: Jawab secara akurat dan setia berdasarkan Konteks Dokumen Pengetahuan dan Memori Fakta yang disediakan.\n"
             "5. JIKA TIDAK DITEMUKAN: Sampaikan secara sopan dan singkat (cukup 1 kalimat) bahwa informasi tidak ditemukan dalam basis pengetahuan dokumen."
         )
 
-        current_prompt = f"""Konteks Dokumen Pengetahuan (Markdown):
+        current_prompt = f"""Konteks Dokumen & Memori Pengetahuan (Markdown):
 ----------------------------------------
 {combined_context}
 ----------------------------------------
@@ -557,25 +853,48 @@ Pertanyaan Pengguna:
 
         llm_messages.append({"role": "user", "content": current_prompt})
 
-        # 7. Invoke LLM
+        # 8. Invoke LLM
         answer = cls._call_llm_messages(llm_messages)
 
         elapsed_ms = round((time.perf_counter() - start_time) * 1000, 2)
+
+        # 9. Persist to Redis (L1) and PostgreSQL Database (L2)
+        user_msg = cls.save_message_to_db(
+            db=db,
+            session_id=session_id,
+            role="user",
+            content=query,
+            user_id=user_id,
+            document_id=document_id
+        )
+
+        assistant_msg = cls.save_message_to_db(
+            db=db,
+            session_id=session_id,
+            role="assistant",
+            content=answer,
+            sources=sources,
+            retrieved_chunks_count=len(chunks),
+            latency_ms=elapsed_ms,
+            user_id=user_id,
+            document_id=document_id
+        )
+
+        RedisService.save_chat_turn(session_id, "user", query)
+        RedisService.save_chat_turn(session_id, "assistant", answer, sources=sources)
 
         result = {
             "query": query,
             "answer": answer,
             "sources": sources,
+            "learned_facts": learned_facts,
             "session_id": session_id,
+            "user_message_id": user_msg.id,
+            "assistant_message_id": assistant_msg.id,
             "retrieved_chunks_count": len(chunks),
             "latency_ms": elapsed_ms,
             "from_cache": False
         }
-
-        # 8. Persist to Redis Memory & Cache
-        if session_id:
-            RedisService.save_chat_turn(session_id, "user", query)
-            RedisService.save_chat_turn(session_id, "assistant", answer, sources=sources)
 
         if not active_messages:
             RedisService.set_rag_cache(query, document_id, result)
