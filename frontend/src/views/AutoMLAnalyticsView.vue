@@ -10,22 +10,22 @@ const ingestionMode = ref('api_url')
 const presets = ref([])
 const selectedPresetId = ref('sales_revenue')
 
-// External API Config
-const externalApiUrl = ref('https://jsonplaceholder.typicode.com/posts')
+// External API Config (Default SAP Sales Revenue)
+const externalApiUrl = ref('https://one.chitraparatama.com/api/sales-revenue-sap?pageSize=50&excludeCancelled=true')
 const externalApiMethod = ref('GET')
-const externalApiHeader = ref('')
+const externalApiHeader = ref('Bearer och_sap_6fd98d6a2b26388f261aa6825f06bbd12cf8dcea16fe5ee1153d29f2d957bfef')
 const externalApiBody = ref('')
-const externalDataPath = ref('')
+const externalDataPath = ref('data')
 
 // Raw JSON / CSV Config
 const customJsonInput = ref('')
 const selectedFile = ref(null)
 
 // Shared Params
-const datasetName = ref('Data API Eksternal')
+const datasetName = ref('SAP Sales Revenue (One Chitra)')
 const forecastHorizon = ref(14)
-const targetColumn = ref('')
-const dateColumn = ref('')
+const targetColumn = ref('revenueInLocCurr')
+const dateColumn = ref('billingDate')
 
 // State
 const isLoading = ref(false)
