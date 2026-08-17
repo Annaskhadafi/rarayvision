@@ -320,6 +320,38 @@ def get_stats(db: Session = Depends(get_db), current_user: User = Depends(get_cu
         "today_requests": int(total_requests) # Placeholder for today
     }
 
+# ── Daily Auto-Cleanup Scheduler ────────────────────────────────────────────
+# Runs in a daemon thread: deletes chat sessions older than 7 days every 24h.
+import threading
+
+def _run_daily_chat_cleanup():
+    import time
+    # Wait 60s after startup before first run (let DB connections settle)
+    time.sleep(60)
+    while True:
+        try:
+            from backend.app.database.database import SessionLocal
+            from backend.app.services.rag_service import RagService
+            db = SessionLocal()
+            try:
+                result = RagService.cleanup_old_chat_sessions(db=db, days=7)
+                print(
+                    f"[AutoCleanup] Daily cleanup done: "
+                    f"{result['deleted_sessions']} sessions, "
+                    f"{result['deleted_facts']} auto-chat facts removed."
+                )
+            finally:
+                db.close()
+        except Exception as _cleanup_err:
+            print(f"[AutoCleanup] Error during daily cleanup: {_cleanup_err}")
+        # Sleep 24 hours before next run
+        time.sleep(86400)
+
+_cleanup_thread = threading.Thread(target=_run_daily_chat_cleanup, daemon=True, name="DailyRAGCleanup")
+_cleanup_thread.start()
+print("[AutoCleanup] Daily chat history cleanup scheduler started (retention: 7 days).")
+# ─────────────────────────────────────────────────────────────────────────────
+
 # Setup Socket.IO App
 app = socketio.ASGIApp(sio, fastapi_app)
 

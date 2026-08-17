@@ -268,6 +268,33 @@ async def bulk_delete_facts(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.post("/sessions/cleanup", summary="Manually Trigger Old Chat Session Cleanup")
+async def cleanup_old_sessions(
+    days: int = Query(7, ge=1, le=365, description="Delete sessions older than N days"),
+    db: Session = Depends(get_db),
+    current_user: db_models.User = Depends(get_current_user)
+):
+    """
+    Manually triggers cleanup of chat sessions older than `days` days.
+    Also removes associated auto_chat memory facts from those sessions.
+    The daily auto-cleanup already runs every 24 hours automatically.
+    """
+    try:
+        result = await run_in_threadpool(
+            RagService.cleanup_old_chat_sessions,
+            db=db,
+            days=days
+        )
+        return {
+            "status": "success",
+            "message": f"Cleanup selesai: sesi > {days} hari dihapus.",
+            "data": result
+        }
+    except Exception as e:
+        logger.error(f"[RagController] cleanup_old_sessions error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.get("/sessions", summary="List Persistent Conversation Sessions")
 async def list_sessions(
     limit: int = Query(30, ge=1, le=100),

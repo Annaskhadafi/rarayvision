@@ -480,21 +480,36 @@ class RagService:
                 rrf_score += 0.010
 
             # Normalized score for UI presentation [0.0 - 1.0]
-            norm_sim = min(1.0, (item["vector_sim"] * 0.65) + (min(1.0, bm25_scores[idx] / 5.0) * 0.35))
+            bm25_val = bm25_scores[idx]
+            norm_sim = min(1.0, (item["vector_sim"] * 0.65) + (min(1.0, bm25_val / 5.0) * 0.35))
 
-            scored.append({
-                "chunk_id": item["chunk_id"],
-                "document_id": item["document_id"],
-                "filename": item["filename"],
-                "format": item["format"],
-                "s3_url": item["s3_url"],
-                "chunk_index": item["chunk_index"],
-                "heading": item["heading"],
-                "content": item["content"],
-                "similarity_score": round(norm_sim, 4),
-                "distance": round(1.0 - norm_sim, 4),
-                "rrf_score": rrf_score
-            })
+            # Relevance Threshold Filter:
+            # Drop chunks that are background noise (e.g. general chat, poetry, greeting, unrelated topics)
+            # A chunk is considered relevant ONLY IF:
+            # 1. Strong dense vector similarity (vector_sim >= 0.50), OR
+            # 2. Good hybrid score with some lexical/semantic match (norm_sim >= 0.46), OR
+            # 3. Definite keyword match (bm25 > 0.8 and vector_sim >= 0.35)
+            is_relevant = (
+                item["vector_sim"] >= 0.50 or
+                norm_sim >= 0.46 or
+                (bm25_val >= 0.8 and item["vector_sim"] >= 0.35) or
+                (orig_lower in content_lower and len(orig_lower) >= 4)
+            )
+
+            if is_relevant:
+                scored.append({
+                    "chunk_id": item["chunk_id"],
+                    "document_id": item["document_id"],
+                    "filename": item["filename"],
+                    "format": item["format"],
+                    "s3_url": item["s3_url"],
+                    "chunk_index": item["chunk_index"],
+                    "heading": item["heading"],
+                    "content": item["content"],
+                    "similarity_score": round(norm_sim, 4),
+                    "distance": round(1.0 - norm_sim, 4),
+                    "rrf_score": rrf_score
+                })
 
         # 6. Sort by RRF score descending
         scored.sort(key=lambda x: x["rrf_score"], reverse=True)
@@ -823,6 +838,49 @@ class RagService:
         return deleted
 
     @classmethod
+    def cleanup_old_chat_sessions(cls, db: Session, days: int = 7) -> Dict[str, int]:
+        """
+        Auto-cleanup: Permanently deletes chat sessions (and their messages via CASCADE)
+        that are older than `days` days. Also removes associated auto_chat memory facts.
+        Called by the daily background scheduler.
+        """
+        from datetime import timedelta
+        cutoff = datetime.utcnow() - timedelta(days=days)
+        try:
+            # Find old session IDs first
+            old_sessions = db.query(RagChatSession).filter(
+                RagChatSession.updated_at < cutoff
+            ).all()
+            old_session_ids = [s.id for s in old_sessions]
+
+            deleted_sessions = 0
+            deleted_facts = 0
+
+            if old_session_ids:
+                # Delete auto_chat memory facts linked to these old sessions
+                deleted_facts = db.query(RagMemoryFact).filter(
+                    RagMemoryFact.source_session_id.in_(old_session_ids),
+                    RagMemoryFact.learned_from == "auto_chat"
+                ).delete(synchronize_session=False)
+
+                # Delete sessions (messages are cascade-deleted)
+                deleted_sessions = db.query(RagChatSession).filter(
+                    RagChatSession.id.in_(old_session_ids)
+                ).delete(synchronize_session=False)
+
+                db.commit()
+
+            logger.info(
+                f"[RagService] Auto-cleanup (>{days}d): "
+                f"deleted {deleted_sessions} sessions, {deleted_facts} auto-chat facts."
+            )
+            return {"deleted_sessions": deleted_sessions, "deleted_facts": deleted_facts}
+        except Exception as e:
+            db.rollback()
+            logger.error(f"[RagService] cleanup_old_chat_sessions error: {e}", exc_info=True)
+            return {"deleted_sessions": 0, "deleted_facts": 0}
+
+    @classmethod
     def chat_completion(
         cls,
         db: Session,
@@ -924,7 +982,8 @@ class RagService:
             "   - Untuk penjelasan teks atau langkah operasional lainnya, gunakan poin-poin (bullet points) yang rapi, ringkas, dan to-the-point.\n"
             "5. BERBASIS KONTEKS DOKUMEN & MEMORI: Analisis dan terjemahkan informasi teknis dari Konteks Dokumen Pengetahuan (termasuk istilah bahasa Inggris seperti 'inflation pressure', 'load capacity', 'tread depth', 'operating pressure') ke jawaban Bahasa Indonesia yang akurat dan jelas.\n"
             "6. JIKA TIDAK DITEMUKAN DI DOKUMEN TAPI ADA DI MEMORI: Jawab berdasarkan memori/koreksi pengguna, jangan katakan 'tidak ditemukan'.\n"
-            "7. JIKA BENAR-BENAR TIDAK DITEMUKAN: Sampaikan secara sopan dan singkat (cukup 1 kalimat) bahwa informasi spesifik tersebut tidak ditemukan dalam basis pengetahuan dokumen maupun memori."
+            "7. JIKA PERTANYAAN TERKAIT DATA DOKUMEN/OPERASIONAL TAPI TIDAK DITEMUKAN: Sampaikan secara sopan dan singkat (cukup 1 kalimat) bahwa informasi spesifik tersebut tidak ditemukan dalam basis pengetahuan dokumen maupun memori.\n"
+            "8. JIKA PERTANYAAN UMUM, KREATIF, ATAU SAPAAN (di luar dokumen teknis perusahaan): Jawablah dengan ramah, cerdas, kreatif, dan membantu sesuai permintaan pengguna secara wajar tanpa memaksakan rujukan dokumen."
         )
 
         current_prompt = f"""Konteks Dokumen & Memori Pengetahuan (Markdown):
