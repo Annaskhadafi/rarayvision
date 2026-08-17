@@ -1,12 +1,25 @@
-import sys
 import os
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["OPENBLAS_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
+os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
+os.environ["NUMEXPR_NUM_THREADS"] = "1"
 
+import sys
 _CUR_DIR = os.path.dirname(os.path.abspath(__file__))
 _PARENT_DIR = os.path.dirname(_CUR_DIR)
 if _PARENT_DIR not in sys.path:
     sys.path.insert(0, _PARENT_DIR)
 if _CUR_DIR not in sys.path:
     sys.path.insert(0, _CUR_DIR)
+
+import cv2
+cv2.setNumThreads(1)
+try:
+    import torch
+    torch.set_num_threads(1)
+except Exception:
+    pass
 
 import json
 from pathlib import Path

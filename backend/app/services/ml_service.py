@@ -1,10 +1,24 @@
+import os
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["OPENBLAS_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
+os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
+os.environ["NUMEXPR_NUM_THREADS"] = "1"
+
 import cv2
+cv2.setNumThreads(1)
+try:
+    import torch
+    torch.set_num_threads(1)
+except Exception:
+    pass
+
 import numpy as np
 import insightface
 from insightface.app import FaceAnalysis
 import onnxruntime as ort
-import os
 import json
+import base64
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
 from backend.app.database import database as db
@@ -13,23 +27,19 @@ from backend.app.core.config import ANTI_SPOOF_MODEL_PATH, EMOTION_MODEL_PATH
 import uuid
 import requests
 
-
-# JWT Secret Key
-# ================= KONFIGURASI =================
-# Path model anti-spoofing di folder ml_models/ (satu level di atas backend)
-# URL CodeIgniter API (Main Server)
-# ===============================================
-
-
+# Configure ONNX Runtime Session Options to limit CPU threads per worker
+ort_session_options = ort.SessionOptions()
+ort_session_options.intra_op_num_threads = 1
+ort_session_options.inter_op_num_threads = 1
+ort_session_options.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
 
 # --- CHECK CUDA SUPPORT ---
-import onnxruntime as ort_check
 available_providers = ['CPUExecutionProvider']
-if 'CUDAExecutionProvider' in ort_check.get_available_providers():
+if 'CUDAExecutionProvider' in ort.get_available_providers():
     available_providers = ['CUDAExecutionProvider', 'CPUExecutionProvider']
     print("[+] CUDA GPU Detected! Running ML models on GPU.")
 else:
-    print("[i] No GPU detected. Running ML models on CPU.")
+    print("[i] No GPU detected. Running ML models on CPU (1 thread per worker).")
 
 # --- 1. LOAD MODEL DETEKSI WAJAH (InsightFace) ---
 print("[*] Loading InsightFace Models...")
@@ -47,7 +57,7 @@ emotion_session = None
 print(f"[*] Loading Anti-Spoofing Model ({ANTI_SPOOF_MODEL_PATH})...")
 if os.path.exists(ANTI_SPOOF_MODEL_PATH):
     try:
-        spoof_session = ort.InferenceSession(ANTI_SPOOF_MODEL_PATH, providers=available_providers)
+        spoof_session = ort.InferenceSession(ANTI_SPOOF_MODEL_PATH, sess_options=ort_session_options, providers=available_providers)
         print(f"[+] Anti-Spoofing ONNX loaded successfully!")
     except Exception as e:
         print(f"[-] Error saat load ONNX: {e}")
@@ -57,16 +67,27 @@ else:
 print(f"[*] Loading Emotion Model ({EMOTION_MODEL_PATH})...")
 if os.path.exists(EMOTION_MODEL_PATH):
     try:
-        emotion_session = ort.InferenceSession(EMOTION_MODEL_PATH, providers=available_providers)
+        emotion_session = ort.InferenceSession(EMOTION_MODEL_PATH, sess_options=ort_session_options, providers=available_providers)
         print("[+] Emotion ONNX loaded successfully!")
     except Exception as e:
         print(f"[-] Error saat load Emotion Model: {e}")
 else:
     print(f"[!] PERINGATAN: File {EMOTION_MODEL_PATH} TIDAK DITEMUKAN!")
 
-# Thread Pool untuk memproses gambar di background
-thread_pool = ThreadPoolExecutor(max_workers=4)
+# Thread Pool untuk memproses gambar di background (diatur ke 2 worker untuk mencegah CPU 100%)
+thread_pool = ThreadPoolExecutor(max_workers=2)
 client_buffers = {}
+
+def _optimize_input_image(img, max_dim=1280):
+    """Downscales oversized camera/upload frames before feeding to deep learning models."""
+    if img is None:
+        return None
+    h, w = img.shape[:2]
+    if max(h, w) > max_dim:
+        scale = max_dim / float(max(h, w))
+        new_w, new_h = int(w * scale), int(h * scale)
+        return cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
+    return img
 
 # --- DATABASE WAJAH ---
 def get_tenant_faces(db_session, user_id):

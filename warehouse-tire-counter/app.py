@@ -6,12 +6,25 @@ and live telemetry stats API.
 """
 
 import os
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["OPENBLAS_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
+os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
+os.environ["NUMEXPR_NUM_THREADS"] = "1"
+
 import sys
 _DIR = os.path.dirname(os.path.abspath(__file__))
 if _DIR not in sys.path:
     sys.path.insert(0, _DIR)
 
 import cv2
+cv2.setNumThreads(1)
+try:
+    import torch
+    torch.set_num_threads(1)
+except Exception:
+    pass
+
 import json
 import time
 import shutil
@@ -157,6 +170,7 @@ app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 class StreamManager:
     """
     Manages background video capture and inference loop to serve smooth MJPEG streams.
+    Includes on-demand idle-timeout to keep CPU at 0% when no clients are viewing.
     """
     def __init__(self):
         self.source_type: str = "sample"  # "sample", "webcam", "upload", "rtsp"
@@ -186,8 +200,14 @@ class StreamManager:
             "status": "idle"
         }
         self.is_running = False
+        self.active_viewers: int = 0
+        self.last_viewer_activity: float = time.time()
         self.lock = threading.Lock()
         self.thread: Optional[threading.Thread] = None
+
+    def touch_viewer(self):
+        """Mark viewer activity to keep inference loop awake."""
+        self.last_viewer_activity = time.time()
 
     def start_stream(self, source_type: str, source_path: Any, model_name: str = "yolov8n.pt", conf: float = 0.25, iou: float = 0.45):
         with self.lock:
@@ -198,6 +218,7 @@ class StreamManager:
             self.model_name = model_name
             self.conf_thresh = conf
             self.iou_thresh = iou
+            self.touch_viewer()
 
             # Make sure sample video exists if selected
             if source_type == "sample":
@@ -275,6 +296,8 @@ class StreamManager:
         fps = 0.0
         reconnect_attempts = 0
         max_reconnect = 5  # For network streams, try to reconnect on failure
+        target_fps = 15.0  # 15 FPS target for optimal CPU efficiency
+        frame_interval = 1.0 / target_fps
 
         is_network = isinstance(self.source_path, str) and self.source_path.startswith(
             ("rtsp://", "rtmp://", "http://", "https://", "udp://", "tcp://")
@@ -282,6 +305,14 @@ class StreamManager:
         is_file = (not is_network) or self.source_type in ("sample", "sample_conveyor", "upload", "public_url")
 
         while self.is_running:
+            # Idle Timeout: If no active viewers and no activity in last 12s, sleep to save CPU
+            is_active = (self.active_viewers > 0) or ((time.time() - self.last_viewer_activity) < 12.0)
+            if not is_active:
+                time.sleep(0.3)
+                continue
+
+            loop_start = time.time()
+
             if not self.cap or not self.cap.isOpened():
                 if is_network and reconnect_attempts < max_reconnect:
                     reconnect_attempts += 1
@@ -310,7 +341,6 @@ class StreamManager:
                         self.latest_summary["status"] = "error"
                     break
 
-
             ret, frame = self.cap.read()
             if not ret:
                 if is_file:
@@ -332,6 +362,12 @@ class StreamManager:
             # Successful read — reset reconnect counter
             reconnect_attempts = 0
 
+            # Optimize resolution before YOLO inference if frame is larger than 854x480
+            h, w = frame.shape[:2]
+            if w > 854 or h > 480:
+                scale = min(854 / w, 480 / h)
+                frame = cv2.resize(frame, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
+
             frame_counter += 1
             if frame_counter % 10 == 0:
                 now = time.time()
@@ -351,8 +387,10 @@ class StreamManager:
                 self.latest_frame = annotated_frame
                 self.latest_summary = summary
 
-            # Regulate frame rate slightly on CPU
-            time.sleep(0.01)
+            # Regulate frame rate precisely on CPU
+            elapsed = time.time() - loop_start
+            sleep_time = max(0.002, frame_interval - elapsed)
+            time.sleep(sleep_time)
 
         print("[StreamManager] Capture loop terminated.")
 
@@ -365,7 +403,7 @@ class StreamManager:
 stream_manager = StreamManager()
 
 def ensure_default_stream():
-    """Lazily start the default mining yard stream if no stream is currently active."""
+    """Lazily initialize the default mining yard stream if no stream is currently active."""
     try:
         if not getattr(stream_manager, "is_running", False):
             sample_path = os.path.join(SAMPLES_DIR, "mining_yard_sample.mp4")
@@ -380,19 +418,16 @@ def ensure_default_stream():
     except Exception as e:
         print(f"[TireCounter] ensure_default_stream error: {e}")
 
-# Trigger auto-start in background
-try:
-    threading.Thread(target=ensure_default_stream, daemon=True).start()
-except Exception as e:
-    print(f"[TireCounter] Background thread launch error: {e}")
-
-# Auto-start default sample stream on startup in background
 @app.on_event("startup")
 def startup_event():
     try:
-        ensure_default_stream()
+        # Pre-verify sample file availability without running full continuous loop
+        sample_path = os.path.join(SAMPLES_DIR, "mining_yard_sample.mp4")
+        if not os.path.exists(sample_path):
+            from mining_yard_counter import generate_mining_yard_sample_video
+            generate_mining_yard_sample_video(sample_path)
     except Exception as e:
-        print(f"[TireCounter] startup_event error: {e}")
+        print(f"[TireCounter] startup init: {e}")
 
 
 @app.get("/")
@@ -481,38 +516,45 @@ async def upload_video(
 def video_feed():
     """Generates MJPEG multipart stream from latest analyzed frame."""
     ensure_default_stream()
+    stream_manager.touch_viewer()
 
     def generate():
-        standby_rendered = False
-        while True:
-            with stream_manager.lock:
-                frame = stream_manager.latest_frame
+        with stream_manager.lock:
+            stream_manager.active_viewers += 1
+        try:
+            while True:
+                stream_manager.touch_viewer()
+                with stream_manager.lock:
+                    frame = stream_manager.latest_frame
 
-            if frame is None:
-                # Render a standby frame so the browser doesn't wait with a blank black screen
-                standby = np.zeros((480, 854, 3), dtype=np.uint8)
-                cv2.putText(standby, "MINING OTR & WAREHOUSE TIRE COUNTER", (80, 210),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.75, (255, 255, 255), 2)
-                cv2.putText(standby, "Initializing YOLO Model & Video Pipeline...", (140, 260),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 215, 255), 1)
-                cv2.putText(standby, "Select source or model below to stream live detection", (120, 300),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.45, (180, 180, 180), 1)
-                _, buffer = cv2.imencode('.jpg', standby, [cv2.IMWRITE_JPEG_QUALITY, 80])
+                if frame is None:
+                    # Render a standby frame so the browser doesn't wait with a blank black screen
+                    standby = np.zeros((480, 854, 3), dtype=np.uint8)
+                    cv2.putText(standby, "MINING OTR & WAREHOUSE TIRE COUNTER", (80, 210),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.75, (255, 255, 255), 2)
+                    cv2.putText(standby, "Initializing YOLO Model & Video Pipeline...", (140, 260),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 215, 255), 1)
+                    cv2.putText(standby, "Select source or model below to stream live detection", (120, 300),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.45, (180, 180, 180), 1)
+                    _, buffer = cv2.imencode('.jpg', standby, [cv2.IMWRITE_JPEG_QUALITY, 70])
+                    yield (b'--frame\r\n'
+                           b'Content-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n')
+                    time.sleep(0.3)
+                    continue
+
+                # Encode as JPEG (quality 70 for reduced CPU compression overhead)
+                ret, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 70])
+                if not ret:
+                    time.sleep(0.04)
+                    continue
+
+                frame_bytes = buffer.tobytes()
                 yield (b'--frame\r\n'
-                       b'Content-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n')
-                time.sleep(0.5)
-                continue
-
-            # Encode as JPEG
-            ret, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
-            if not ret:
-                time.sleep(0.02)
-                continue
-
-            frame_bytes = buffer.tobytes()
-            yield (b'--frame\r\n'
-                   b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
-            time.sleep(0.03)
+                       b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
+                time.sleep(0.05)
+        finally:
+            with stream_manager.lock:
+                stream_manager.active_viewers = max(0, stream_manager.active_viewers - 1)
 
     return StreamingResponse(generate(), media_type="multipart/x-mixed-replace; boundary=frame")
 
@@ -520,6 +562,7 @@ def video_feed():
 def get_telemetry():
     """Returns current live stock, FPS, zone breakdown, and recent logs."""
     ensure_default_stream()
+    stream_manager.touch_viewer()
     with stream_manager.lock:
         summary = dict(stream_manager.latest_summary)
         logs = list(stream_manager.counter.event_logs[-20:]) if stream_manager.counter else []

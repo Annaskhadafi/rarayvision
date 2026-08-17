@@ -524,16 +524,15 @@ class RagService:
 
         # 6. Formulate Prompt & Multi-Turn Message History
         system_instruction = custom_system_prompt or (
-            "Anda adalah Hero Assistant, asisten AI cerdas, efisien, dan profesional.\n\n"
-            "PANDUAN BERPIKIR & FORMAT JAWABAN (WAJIB DIPATUHI):\n"
-            "1. KONSISTENSI BAHASA: Gunakan Bahasa Indonesia baku dan profesional secara konsisten (baik dalam proses berpikir/penalaran maupun jawaban akhir).\n"
-            "2. EFISIEN & LANGSUNG KE INTI: Berikan jawaban yang padat, efisien, to-the-point, dan hindari kata-kata atau kalimat yang berulang-ulang tanpa basa-basi panjang.\n"
-            "3. STRUKTUR POIN-POIN & TABEL MARKDOWN:\n"
+            "Anda adalah Hero Assistant, asisten AI resmi yang cerdas, efisien, dan profesional.\n\n"
+            "ATURAN WAJIB FORMAT JAWABAN (STRICT RULES):\n"
+            "1. BAHASA: Wajib 100% menggunakan Bahasa Indonesia yang baku, jelas, ringkas, dan profesional. Jangan pernah menjawab dalam Bahasa Inggris kecuali istilah teknis atau kode part yang tidak dapat diterjemahkan.\n"
+            "2. HANYA JAWABAN AKHIR (NO META-THOUGHTS / NO CONSTRAINT CHECKS): Langsung berikan jawaban akhir yang siap dibaca oleh pengguna. DILARANG KERAS menampilkan proses berpikir internal, evaluasi aturan/checklist (seperti 'Check against Constraints', 'Thinking Process', 'Self-Correction', atau catatan meta lainnya) di dalam teks jawaban.\n"
+            "3. STRUKTUR TABEL & POIN-POIN:\n"
             "   - Jika data/informasi memuat perbandingan, daftar ukuran/spesifikasi ban, kode part/SKU, daftar harga, stok inventaris, rincian data tabular, jadwal, atau informasi multi-kolom, WAJIB sajikan dalam bentuk TABEL MARKDOWN yang rapi (`| Header 1 | Header 2 | ... |` dan `| :--- | :--- | ... |`).\n"
-            "   - Untuk penjelasan non-tabular, susun dalam bentuk poin-poin (bullet points) yang rapi, ringkas, dan jelas.\n"
-            "4. BERBASIS KONTEKS DOKUMEN: Jawab secara akurat berdasarkan KONTEKS DOKUMEN MARKDOWN yang disediakan serta riwayat percakapan sebelumnya.\n"
-            "5. RUJUKAN SUMBER: Cantumkan rujukan nama dokumen atau bagian relevan jika tersedia.\n"
-            "6. JIKA TIDAK DITEMUKAN: Sampaikan secara singkat dan sopan (cukup 1 kalimat) bahwa informasi tidak ditemukan dalam basis pengetahuan."
+            "   - Untuk penjelasan non-tabular, gunakan poin-poin (bullet points) yang rapi, ringkas, dan to-the-point tanpa kata pengantar bertele-tele.\n"
+            "4. BERBASIS KONTEKS DOKUMEN: Jawab secara akurat dan setia berdasarkan Konteks Dokumen Pengetahuan yang disediakan.\n"
+            "5. JIKA TIDAK DITEMUKAN: Sampaikan secara sopan dan singkat (cukup 1 kalimat) bahwa informasi tidak ditemukan dalam basis pengetahuan dokumen."
         )
 
         current_prompt = f"""Konteks Dokumen Pengetahuan (Markdown):
@@ -584,6 +583,35 @@ Pertanyaan Pengguna:
         return result
 
     @staticmethod
+    def _clean_llm_response(text: str) -> str:
+        """
+        Sanitizes LLM output to remove XML reasoning/thought tags, meta-reasoning,
+        and constraint check checklists (e.g. 'Check against Constraints', 'Self-Correction').
+        """
+        if not text:
+            return ""
+
+        # 1. Remove XML reasoning/thought tags (<think>...</think>, <thought>...</thought>)
+        cleaned = re.sub(r'<think>[\s\S]*?</think>', '', text, flags=re.IGNORECASE)
+        cleaned = re.sub(r'<thought>[\s\S]*?</thought>', '', cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r'<think>[\s\S]*$', '', cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r'<thought>[\s\S]*$', '', cleaned, flags=re.IGNORECASE)
+
+        # 2. Remove meta-reasoning and constraint check blocks
+        constraint_patterns = [
+            # Trailing or section blocks starting with "Check against Constraints", "Constraint Check", "Self-Correction", etc.
+            r'(?i)\n*(?:(?:\d+[\.\)]\s*)?(?:Check\s+(?:against\s+)?Constraints?|Constraint\s+Check|Self-[Cc]orrection(?:/Refinement)?|Refinement\s+during\s+thought|Thinking\s+Process|Thought\s+Process|Proses\s+Berpikir|Evaluasi\s+Batasan)[\s\S]*)$',
+            # Individual constraint check evaluation lines
+            r'(?i)^\s*-\s*(?:Language|Efficient\s*&\s*direct|Bullet\s*points/table|Based\s*on\s*context|Citation|Matches\s*all\s*constraints|Self-Correction).*$\n?',
+        ]
+        for pattern in constraint_patterns:
+            cleaned = re.sub(pattern, '', cleaned, flags=re.MULTILINE)
+
+        # 3. Clean up excessive whitespace/newlines
+        cleaned = re.sub(r'\n{3,}', '\n\n', cleaned).strip()
+        return cleaned or text.strip()
+
+    @staticmethod
     def _call_llm(system_prompt: str, user_prompt: str) -> str:
         """Legacy helper delegating to _call_llm_messages."""
         return RagService._call_llm_messages([
@@ -625,8 +653,7 @@ Pertanyaan Pengguna:
                 if resp.status_code == 200:
                     data = resp.json()
                     content = data["choices"][0]["message"]["content"]
-                    clean_content = re.sub(r'<think>[\s\S]*?</think>', '', content).strip()
-                    return clean_content or content.strip()
+                    return RagService._clean_llm_response(content)
                 else:
                     logger.warning(f"[RagService] Groq API returned {resp.status_code}: {resp.text}")
             except Exception as e:
@@ -654,7 +681,8 @@ Pertanyaan Pengguna:
                 )
                 if resp.status_code == 200:
                     data = resp.json()
-                    return data["choices"][0]["message"]["content"].strip()
+                    content = data["choices"][0]["message"]["content"]
+                    return RagService._clean_llm_response(content)
                 else:
                     logger.warning(f"[RagService] OpenRouter returned {resp.status_code}: {resp.text}")
             except Exception as e:
@@ -673,7 +701,7 @@ Pertanyaan Pengguna:
                     contents=gemini_text
                 )
                 if response and response.text:
-                    return response.text.strip()
+                    return RagService._clean_llm_response(response.text)
             except Exception as e:
                 logger.error(f"[RagService] Gemini LLM call error: {e}")
 
