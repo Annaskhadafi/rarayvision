@@ -958,28 +958,28 @@ Tolong berikan interpretasi mendalam dan rekomendasi strategis."""
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
   <style>
     :root {{
-      --bg: #0f172a;
-      --card: #1e293b;
-      --border: #334155;
-      --text: #f8fafc;
-      --text-muted: #94a3b8;
-      --accent: #3b82f6;
-      --success: #10b981;
-      --danger: #ef4444;
+      --bg: #f8fafc;
+      --card: #ffffff;
+      --border: #e2e8f0;
+      --text: #0f172a;
+      --text-muted: #64748b;
+      --accent: #2563eb;
+      --success: #059669;
+      --danger: #dc2626;
     }}
     * {{ box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }}
     body {{ background: var(--bg); color: var(--text); padding: 16px; }}
     .header {{ display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; flex-wrap: wrap; gap: 8px; }}
-    .title {{ font-size: 1.1rem; font-weight: 700; color: #fff; }}
-    .badge {{ background: rgba(59, 130, 246, 0.15); color: #60a5fa; padding: 4px 10px; border-radius: 9999px; font-size: 0.75rem; border: 1px solid rgba(59, 130, 246, 0.3); }}
-    .badge-acc {{ background: rgba(16, 185, 129, 0.15); color: #34d399; padding: 4px 10px; border-radius: 9999px; font-size: 0.75rem; border: 1px solid rgba(16, 185, 129, 0.3); font-weight: 700; }}
+    .title {{ font-size: 1.1rem; font-weight: 700; color: #0f172a; }}
+    .badge {{ background: #eff6ff; color: #1d4ed8; padding: 4px 10px; border-radius: 9999px; font-size: 0.75rem; border: 1px solid #bfdbfe; font-weight: 600; }}
+    .badge-acc {{ background: #ecfdf5; color: #047857; padding: 4px 10px; border-radius: 9999px; font-size: 0.75rem; border: 1px solid #a7f3d0; font-weight: 700; }}
     .metrics-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 12px; margin-bottom: 16px; }}
-    .metric-card {{ background: var(--card); border: 1px solid var(--border); padding: 12px; border-radius: 8px; }}
-    .metric-label {{ font-size: 0.75rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; }}
-    .metric-val {{ font-size: 1.25rem; font-weight: 700; margin-top: 4px; }}
-    .chart-container {{ background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 16px; height: 320px; position: relative; margin-bottom: 16px; }}
-    .ai-box {{ background: linear-gradient(135deg, rgba(30, 41, 59, 0.9), rgba(15, 23, 42, 0.9)); border: 1px solid rgba(59, 130, 246, 0.4); border-radius: 8px; padding: 14px; font-size: 0.875rem; line-height: 1.6; }}
-    .ai-title {{ color: #60a5fa; font-weight: 600; margin-bottom: 8px; display: flex; align-items: center; gap: 6px; }}
+    .metric-card {{ background: var(--card); border: 1px solid var(--border); padding: 12px; border-radius: 8px; box-shadow: 0 1px 2px rgba(0,0,0,0.03); }}
+    .metric-label {{ font-size: 0.725rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; font-weight: 700; }}
+    .metric-val {{ font-size: 1.25rem; font-weight: 800; margin-top: 4px; color: #0f172a; }}
+    .chart-container {{ background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 16px; height: 320px; position: relative; margin-bottom: 16px; box-shadow: 0 1px 2px rgba(0,0,0,0.03); }}
+    .ai-box {{ background: linear-gradient(135deg, #faf5ff, #ffffff); border: 1px solid #e9d5ff; border-radius: 8px; padding: 14px; font-size: 0.875rem; line-height: 1.6; color: #334155; }}
+    .ai-title {{ color: #7e22ce; font-weight: 700; margin-bottom: 8px; display: flex; align-items: center; gap: 6px; }}
   </style>
 </head>
 <body>
@@ -1001,7 +1001,7 @@ Tolong berikan interpretasi mendalam dan rekomendasi strategis."""
     </div>
     <div class="metric-card">
       <div class="metric-label">Pertumbuhan Est.</div>
-      <div class="metric-val" style="color: #60a5fa;">{metrics.get('projected_growth_pct', 0)}%</div>
+      <div class="metric-val" style="color: #2563eb;">{metrics.get('projected_growth_pct', 0)}%</div>
     </div>
     <div class="metric-card">
       <div class="metric-label">Rata-rata Riil</div>
@@ -1023,7 +1023,7 @@ Tolong berikan interpretasi mendalam dan rekomendasi strategis."""
 
   <div class="ai-box">
     <div class="ai-title">✨ Interpretasi AI & Rekomendasi Eksekutif</div>
-    <div style="color: #cbd5e1;">{ai_text}</div>
+    <div style="color: #334155;">{ai_text}</div>
   </div>
 
   <script>
@@ -1038,16 +1038,16 @@ Tolong berikan interpretasi mendalam dan rekomendasi strategis."""
           {{
             label: 'Data Riil',
             data: payload.datasets[0].data,
-            borderColor: '#3b82f6',
-            backgroundColor: 'rgba(59, 130, 246, 0.1)',
-            borderWidth: 2,
+            borderColor: '#2563eb',
+            backgroundColor: 'rgba(37, 99, 235, 0.08)',
+            borderWidth: 2.5,
             tension: 0.3,
             pointRadius: 3
           }},
           {{
             label: 'Prediksi ML',
             data: payload.datasets[1].data,
-            borderColor: '#10b981',
+            borderColor: '#059669',
             borderDash: [5, 5],
             borderWidth: 2.5,
             tension: 0.3,
@@ -1056,7 +1056,7 @@ Tolong berikan interpretasi mendalam dan rekomendasi strategis."""
           {{
             label: 'Batas Atas (95%)',
             data: payload.datasets[2].data,
-            borderColor: 'rgba(16, 185, 129, 0.4)',
+            borderColor: 'rgba(5, 150, 105, 0.3)',
             borderDash: [2, 2],
             borderWidth: 1,
             fill: false,
@@ -1065,11 +1065,11 @@ Tolong berikan interpretasi mendalam dan rekomendasi strategis."""
           {{
             label: 'Batas Bawah (95%)',
             data: payload.datasets[3].data,
-            borderColor: 'rgba(16, 185, 129, 0.4)',
+            borderColor: 'rgba(5, 150, 105, 0.3)',
             borderDash: [2, 2],
             borderWidth: 1,
             fill: '-1',
-            backgroundColor: 'rgba(16, 185, 129, 0.08)',
+            backgroundColor: 'rgba(5, 150, 105, 0.08)',
             pointRadius: 0
           }}
         ]
@@ -1079,16 +1079,16 @@ Tolong berikan interpretasi mendalam dan rekomendasi strategis."""
         maintainAspectRatio: false,
         interaction: {{ mode: 'index', intersect: false }},
         plugins: {{
-          legend: {{ labels: {{ color: '#94a3b8', font: {{ size: 11 }} }} }}
+          legend: {{ labels: {{ color: '#475569', font: {{ size: 11 }} }} }}
         }},
         scales: {{
           x: {{
-            grid: {{ color: 'rgba(255, 255, 255, 0.05)' }},
-            ticks: {{ color: '#94a3b8', maxTicksLimit: 12 }}
+            grid: {{ color: '#f1f5f9' }},
+            ticks: {{ color: '#64748b', maxTicksLimit: 12 }}
           }},
           y: {{
-            grid: {{ color: 'rgba(255, 255, 255, 0.05)' }},
-            ticks: {{ color: '#94a3b8' }}
+            grid: {{ color: '#f1f5f9' }},
+            ticks: {{ color: '#64748b' }}
           }}
         }}
       }}

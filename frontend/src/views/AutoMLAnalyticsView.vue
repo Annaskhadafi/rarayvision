@@ -145,7 +145,6 @@ const applyScenarioSimulation = async () => {
     }
     const simRes = await automlService.simulateScenario(payload)
     
-    // Update local table data and chart without full reload
     resultData.value.table_data = simRes.table_data
     resultData.value.chart_payload = simRes.chart_payload
     resultData.value.summary_metrics = {
@@ -210,7 +209,7 @@ const chartData = computed(() => {
 
   const width = 850
   const height = 340
-  const padLeft = 70
+  const padLeft = 75
   const padRight = 30
   const padTop = 25
   const padBottom = 45
@@ -432,25 +431,24 @@ const downloadCsv = () => {
           <span class="pulse-dot"></span>
           Ultra-Fast AutoML & Multi-Model Tournament Engine
         </div>
-        <h1 class="page-title">Enterprise Forecasting, What-If & AI Analytics</h1>
+        <h1 class="page-title">Enterprise Forecasting & AI Data Analytics</h1>
         <p class="page-desc">
-          Menjalankan 4 model statistik in-memory secara paralel, memilih model terbaik dengan skor akurasi MAPE, 
-          mensimulasikan skenario bisnis *What-If* secara instan (&lt;15ms), dan berkonsultasi langsung dengan AI.
+          Menganalisis pola deret waktu, turnamen multi-model akurasi otomatis, simulasi skenario bisnis *What-If* real-time (&lt;15ms), dan interpretasi strategis berbasis AI.
         </p>
       </div>
 
       <div class="header-actions">
         <button v-if="resultData?.tournament_results" class="btn-tournament" @click="showLeaderboardModal = true">
-          🏆 Turnamen: {{ resultData.tournament_results.accuracy_score }}% Akurasi
+          🏆 Akurasi: {{ resultData.tournament_results.accuracy_score }}%
         </button>
         <button v-if="resultData?.embed_widget_url" class="btn-secondary" @click="openWidgetTab">
           <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path><polyline points="15 3 21 3 21 9"></polyline><line x1="10" y1="14" x2="21" y2="3"></line></svg>
-          Embed Widget
+          Buka Widget
         </button>
         <button class="btn-primary" :disabled="isLoading" @click="runAnalysis">
           <svg v-if="isLoading" class="animate-spin" viewBox="0 0 24 24" width="16" height="16" fill="none"><circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" class="opacity-25"></circle><path fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" class="opacity-75"></path></svg>
           <svg v-else viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
-          {{ isLoading ? 'Memproses Turnamen ML...' : 'Analisis & Prediksi' }}
+          {{ isLoading ? 'Memproses ML & AI...' : 'Analisis & Prediksi' }}
         </button>
       </div>
     </div>
@@ -465,7 +463,7 @@ const downloadCsv = () => {
       <span>{{ successMessage }}</span>
     </div>
 
-    <!-- Presets & Ingestion Control Bar -->
+    <!-- Presets & Ingestion Control Bar (Clean Light Card) -->
     <div class="control-panel">
       <div class="control-grid">
         <div class="control-item">
@@ -515,16 +513,16 @@ const downloadCsv = () => {
       <!-- Auto Detection & Tournament Winner Banner -->
       <div class="autodetect-banner">
         <div class="autodetect-info">
-          <div style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap;">
+          <div class="banner-top-badges">
             <span class="badge-tech">
-              <svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon></svg>
+              <svg viewBox="0 0 24 24" width="13" height="13" stroke="currentColor" stroke-width="2" fill="none"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon></svg>
               {{ resultData.auto_detection.task_label }}
             </span>
             <span class="badge-winner">
               Model Juara: <b>{{ resultData.tournament_results.winner.name }}</b>
             </span>
           </div>
-          <div class="autodetect-meta" style="margin-top: 6px;">
+          <div class="autodetect-meta">
             Target: <b>{{ resultData.dataset_info.target_column }}</b> • 
             Waktu: <b>{{ resultData.dataset_info.date_column || 'Otomatis' }}</b> • 
             Ukuran Data: <b>{{ resultData.dataset_info.sample_size }} Baris</b> •
@@ -539,44 +537,52 @@ const downloadCsv = () => {
         </div>
       </div>
 
-      <!-- Key Metric Cards -->
+      <!-- Key Metric Cards (Clean Light Cards) -->
       <div class="metrics-grid">
         <div class="metric-card">
           <div class="metric-header">
             <span class="m-label">Arah Tren Proyeksi</span>
-            <svg viewBox="0 0 24 24" width="18" height="18" stroke="#10b981" stroke-width="2" fill="none"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"></polyline><polyline points="17 6 23 6 23 12"></polyline></svg>
+            <span class="m-icon-box green">
+              <svg viewBox="0 0 24 24" width="16" height="16" stroke="#059669" stroke-width="2.5" fill="none"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"></polyline><polyline points="17 6 23 6 23 12"></polyline></svg>
+            </span>
           </div>
-          <div class="m-value trend-green">{{ resultData.summary_metrics.trend_direction }}</div>
+          <div class="m-value text-green">{{ resultData.summary_metrics.trend_direction }}</div>
           <div class="m-sub">
             Pertumbuhan: <b>{{ resultData.summary_metrics.simulated_growth_pct ?? resultData.summary_metrics.projected_growth_pct }}%</b>
-            <span v-if="isScenarioActive" class="badge-sim-tag">(Simulasi Aktif)</span>
+            <span v-if="isScenarioActive" class="badge-sim-tag">(Simulasi)</span>
           </div>
         </div>
 
         <div class="metric-card">
           <div class="metric-header">
             <span class="m-label">Rata-Rata Historis</span>
-            <svg viewBox="0 0 24 24" width="18" height="18" stroke="#3b82f6" stroke-width="2" fill="none"><line x1="18" y1="20" x2="18" y2="10"></line><line x1="12" y1="20" x2="12" y2="4"></line><line x1="6" y1="20" x2="6" y2="14"></line></svg>
+            <span class="m-icon-box blue">
+              <svg viewBox="0 0 24 24" width="16" height="16" stroke="#2563eb" stroke-width="2.5" fill="none"><line x1="18" y1="20" x2="18" y2="10"></line><line x1="12" y1="20" x2="12" y2="4"></line><line x1="6" y1="20" x2="6" y2="14"></line></svg>
+            </span>
           </div>
           <div class="m-value">{{ Number(resultData.summary_metrics.historical_mean).toLocaleString('id-ID') }}</div>
-          <div class="m-sub">Baseline performa riil</div>
+          <div class="m-sub">Baseline performa data riil</div>
         </div>
 
         <div class="metric-card">
           <div class="metric-header">
             <span class="m-label">Puncak Estimasi Masa Depan</span>
-            <svg viewBox="0 0 24 24" width="18" height="18" stroke="#8b5cf6" stroke-width="2" fill="none"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"></polygon></svg>
+            <span class="m-icon-box purple">
+              <svg viewBox="0 0 24 24" width="16" height="16" stroke="#7c3aed" stroke-width="2.5" fill="none"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"></polygon></svg>
+            </span>
           </div>
-          <div class="m-value purple">{{ Number(resultData.summary_metrics.simulated_peak_forecast_value ?? resultData.summary_metrics.peak_forecast_value).toLocaleString('id-ID') }}</div>
+          <div class="m-value text-purple">{{ Number(resultData.summary_metrics.simulated_peak_forecast_value ?? resultData.summary_metrics.peak_forecast_value).toLocaleString('id-ID') }}</div>
           <div class="m-sub">Titik tertinggi pada periode prediksi</div>
         </div>
 
         <div class="metric-card">
           <div class="metric-header">
             <span class="m-label">Anomali Terdeteksi</span>
-            <svg viewBox="0 0 24 24" width="18" height="18" stroke="#ef4444" stroke-width="2" fill="none"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="8" x2="12" y2="12"></line><line x1="12" y1="16" x2="12.01" y2="16"></line></svg>
+            <span class="m-icon-box red">
+              <svg viewBox="0 0 24 24" width="16" height="16" stroke="#dc2626" stroke-width="2.5" fill="none"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="8" x2="12" y2="12"></line><line x1="12" y1="16" x2="12.01" y2="16"></line></svg>
+            </span>
           </div>
-          <div class="m-value red">{{ resultData.summary_metrics.anomalies_detected_count }} Titik</div>
+          <div class="m-value text-red">{{ resultData.summary_metrics.anomalies_detected_count }} Titik</div>
           <div class="m-sub">Penyimpangan data signifikan</div>
         </div>
       </div>
@@ -598,21 +604,22 @@ const downloadCsv = () => {
         </button>
         <button class="tab-btn" :class="{ active: activeTab === 'table' }" @click="activeTab = 'table'">
           <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none"><rect x="3" y="3" width="18" height="18" rx="2"></rect><line x1="3" y1="9" x2="21" y2="9"></line><line x1="3" y1="15" x2="21" y2="15"></line><line x1="9" y1="3" x2="9" y2="21"></line></svg>
-          Tabel Prediksi Lengkap ({{ resultData.table_data.length }})
+          Tabel Prediksi ({{ resultData.table_data.length }})
         </button>
         <button class="tab-btn" :class="{ active: activeTab === 'api_integration' }" @click="activeTab = 'api_integration'">
           <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none"><polyline points="16 18 22 12 16 6"></polyline><polyline points="8 6 2 12 8 18"></polyline></svg>
-          Integrasi API & Embed Iframe
+          Integrasi API & Iframe
         </button>
       </div>
 
       <!-- TAB 1: CHART & AI INTERPRETATION -->
       <div v-if="activeTab === 'analytics'" class="tab-content">
+        <!-- Interactive Chart Card (Clean White) -->
         <div class="chart-card">
           <div class="chart-card-header">
             <div>
               <h3 class="chart-title">Visualisasi Deret Waktu & Forecast Horizon</h3>
-              <p class="chart-subtitle">Garis biru: data aktual riil • Garis putus hijau: prediksi model • Area hijau muda: 95% Confidence Interval</p>
+              <p class="chart-subtitle">Garis biru: data aktual riil • Garis putus hijau: proyeksi prediksi • Area hijau muda: 95% Confidence Interval</p>
             </div>
             <div class="legend-group">
               <span class="legend-item"><span class="legend-box blue"></span> Aktual</span>
@@ -625,16 +632,17 @@ const downloadCsv = () => {
           <div class="svg-chart-container" ref="chartSvgRef">
             <svg v-if="chartData" :viewBox="`0 0 ${chartData.width} ${chartData.height}`" class="main-svg-chart">
               <defs>
-                <linearGradient id="areaGradient" x1="0%" y1="0%" x2="0%" y2="100%">
-                  <stop offset="0%" stop-color="#10B981" stop-opacity="0.25" />
+                <linearGradient id="areaGradientLight" x1="0%" y1="0%" x2="0%" y2="100%">
+                  <stop offset="0%" stop-color="#10B981" stop-opacity="0.30" />
                   <stop offset="100%" stop-color="#10B981" stop-opacity="0.05" />
                 </linearGradient>
-                <filter id="glow" x="-20%" y="-20%" width="140%" height="140%">
-                  <feGaussianBlur stdDeviation="3" result="glow" />
+                <filter id="glowLight" x="-20%" y="-20%" width="140%" height="140%">
+                  <feGaussianBlur stdDeviation="2.5" result="glow" />
                   <feComposite in="SourceGraphic" in2="glow" operator="over" />
                 </filter>
               </defs>
 
+              <!-- Grid Horizontal Lines -->
               <g class="grid-lines">
                 <line 
                   v-for="(tick, i) in chartData.yTicks" 
@@ -643,7 +651,7 @@ const downloadCsv = () => {
                   :y1="tick.y" 
                   :x2="chartData.width - chartData.padRight" 
                   :y2="tick.y" 
-                  stroke="#334155" 
+                  stroke="#e2e8f0" 
                   stroke-dasharray="3,3" 
                   stroke-width="1"
                 />
@@ -652,80 +660,89 @@ const downloadCsv = () => {
                   :key="`lbl-${i}`" 
                   :x="chartData.padLeft - 10" 
                   :y="tick.y + 4" 
-                  fill="#94a3b8" 
+                  fill="#64748b" 
                   font-size="11" 
+                  font-weight="500"
                   text-anchor="end"
                 >
                   {{ tick.val.toLocaleString('id-ID') }}
                 </text>
               </g>
 
+              <!-- Confidence Interval Shading -->
               <path 
                 v-if="chartData.confidenceAreaPath" 
                 :d="chartData.confidenceAreaPath" 
-                fill="url(#areaGradient)"
+                fill="url(#areaGradientLight)"
               />
 
+              <!-- Actual Data Line (Royal Blue) -->
               <path 
                 :d="chartData.actualPath" 
                 fill="none" 
-                stroke="#3B82F6" 
+                stroke="#2563EB" 
                 stroke-width="3" 
                 stroke-linecap="round" 
                 stroke-linejoin="round"
               />
 
+              <!-- Forecast Data Line (Emerald Green Dashed) -->
               <path 
                 :d="chartData.forecastPath" 
                 fill="none" 
-                stroke="#10B981" 
+                stroke="#059669" 
                 stroke-width="3" 
                 stroke-dasharray="6,5" 
                 stroke-linecap="round" 
                 stroke-linejoin="round"
               />
 
+              <!-- Actual Points -->
               <circle 
                 v-for="p in chartData.actualPoints" 
                 :key="`act-${p.index}`" 
                 :cx="p.x" 
                 :cy="p.y" 
                 r="3.5" 
-                fill="#1E293B" 
-                stroke="#3B82F6" 
-                stroke-width="2" 
+                fill="#FFFFFF" 
+                stroke="#2563EB" 
+                stroke-width="2.5" 
                 class="hover-circle"
                 @mouseenter="hoveredPoint = p"
                 @mouseleave="hoveredPoint = null"
               />
 
+              <!-- Forecast Points -->
               <circle 
                 v-for="p in chartData.forecastPoints" 
                 :key="`fc-${p.index}`" 
                 :cx="p.x" 
                 :cy="p.y" 
                 r="3.5" 
-                fill="#1E293B" 
-                stroke="#10B981" 
-                stroke-width="2" 
+                fill="#FFFFFF" 
+                stroke="#059669" 
+                stroke-width="2.5" 
                 class="hover-circle"
                 @mouseenter="hoveredPoint = p"
                 @mouseleave="hoveredPoint = null"
               />
 
+              <!-- Anomaly Highlights (Red Pulsing Rings) -->
               <g v-for="anom in chartData.anomalyMarkers" :key="`anom-${anom.index}`">
-                <circle :cx="anom.x" :cy="anom.y" r="8" fill="none" stroke="#EF4444" stroke-width="2" opacity="0.8" filter="url(#glow)" />
-                <circle :cx="anom.x" :cy="anom.y" r="4.5" fill="#EF4444" stroke="#FFF" stroke-width="1.5" />
+                <circle :cx="anom.x" :cy="anom.y" r="8" fill="none" stroke="#DC2626" stroke-width="2" opacity="0.8" filter="url(#glowLight)" />
+                <circle :cx="anom.x" :cy="anom.y" r="4.5" fill="#DC2626" stroke="#FFF" stroke-width="1.5" />
               </g>
 
+              <!-- X-Axis Labels -->
               <g class="x-axis-labels">
                 <text 
                   v-for="(tick, i) in chartData.xTicks" 
                   :key="`xtick-${i}`" 
                   :x="tick.x" 
                   :y="chartData.height - 10" 
-                  fill="#94a3b8" 
+                  fill="#64748b" 
                   font-size="10.5" 
+                  font-weight="500"
                   text-anchor="middle"
                 >
                   {{ tick.label }}
@@ -733,7 +750,7 @@ const downloadCsv = () => {
               </g>
             </svg>
 
-            <!-- Tooltip -->
+            <!-- Tooltip (Clean Light Theme) -->
             <div 
               v-if="hoveredPoint" 
               class="chart-tooltip"
@@ -757,7 +774,7 @@ const downloadCsv = () => {
           </div>
         </div>
 
-        <!-- AI Executive Report Card -->
+        <!-- AI Executive Report Card (Soft Violet Card) -->
         <div class="ai-card">
           <div class="ai-header">
             <div class="ai-title-wrap">
@@ -782,7 +799,7 @@ const downloadCsv = () => {
           <div class="sim-header">
             <div>
               <h3 class="sim-title">🎛️ Real-Time "What-If" Scenario Simulator (&lt;15ms)</h3>
-              <p class="sim-desc">Geser slider di bawah untuk melihat simulasi dampak lonjakan promo, perubahan target pasar, atau penyesuaian buffer stock secara instan.</p>
+              <p class="sim-desc">Geser slider di bawah untuk melihat simulasi dampak lonjakan promo, perubahan pasar, atau penyesuaian buffer stock secara instan.</p>
             </div>
             <button class="btn-secondary" @click="resetSimulationState(); applyScenarioSimulation();">
               Reset Skenario
@@ -925,7 +942,7 @@ const downloadCsv = () => {
             </div>
             <button class="btn-secondary" @click="downloadCsv">
               <svg viewBox="0 0 24 24" width="15" height="15" stroke="currentColor" stroke-width="2" fill="none"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
-              Download CSV Hasil
+              Download CSV
             </button>
           </div>
 
@@ -998,7 +1015,7 @@ const downloadCsv = () => {
       </div>
     </div>
 
-    <!-- Tournament Leaderboard Modal -->
+    <!-- Tournament Leaderboard Modal (Clean Light Theme) -->
     <div v-if="showLeaderboardModal" class="modal-backdrop" @click="showLeaderboardModal = false">
       <div class="modal-card" @click.stop>
         <div class="modal-header">
@@ -1049,7 +1066,8 @@ const downloadCsv = () => {
   padding: 24px;
   max-width: 1350px;
   margin: 0 auto;
-  color: #f8fafc;
+  color: #0f172a;
+  background: transparent;
 }
 
 /* Header */
@@ -1066,9 +1084,9 @@ const downloadCsv = () => {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  background: rgba(59, 130, 246, 0.15);
-  border: 1px solid rgba(59, 130, 246, 0.3);
-  color: #60a5fa;
+  background: #eff6ff;
+  border: 1px solid #bfdbfe;
+  color: #1d4ed8;
   padding: 4px 12px;
   border-radius: 9999px;
   font-size: 0.75rem;
@@ -1080,22 +1098,23 @@ const downloadCsv = () => {
   width: 6px;
   height: 6px;
   border-radius: 50%;
-  background: #3b82f6;
-  box-shadow: 0 0 8px #3b82f6;
+  background: #2563eb;
+  box-shadow: 0 0 6px rgba(37, 99, 235, 0.6);
 }
 
 .page-title {
   font-size: 1.6rem;
   font-weight: 800;
-  color: #ffffff;
+  color: #0f172a;
   letter-spacing: -0.5px;
+  margin: 0 0 4px 0;
 }
 
 .page-desc {
   font-size: 0.9rem;
-  color: #94a3b8;
+  color: #64748b;
   max-width: 750px;
-  margin-top: 4px;
+  margin: 0;
   line-height: 1.5;
 }
 
@@ -1107,23 +1126,24 @@ const downloadCsv = () => {
 }
 
 .btn-tournament {
-  background: rgba(16, 185, 129, 0.15);
-  border: 1px solid rgba(16, 185, 129, 0.4);
-  color: #34d399;
-  padding: 10px 14px;
+  background: #ecfdf5;
+  border: 1px solid #a7f3d0;
+  color: #047857;
+  padding: 9px 14px;
   border-radius: 8px;
   font-size: 0.85rem;
   font-weight: 700;
   cursor: pointer;
   transition: all 0.2s;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.04);
 }
 .btn-tournament:hover {
-  background: rgba(16, 185, 129, 0.25);
+  background: #d1fae5;
 }
 
 .btn-primary {
-  background: linear-gradient(135deg, #3b82f6, #2563eb);
-  color: #fff;
+  background: linear-gradient(135deg, #2563eb, #1d4ed8);
+  color: #ffffff;
   border: none;
   padding: 10px 18px;
   border-radius: 8px;
@@ -1133,19 +1153,20 @@ const downloadCsv = () => {
   align-items: center;
   gap: 8px;
   cursor: pointer;
-  box-shadow: 0 4px 12px rgba(37, 99, 235, 0.3);
+  box-shadow: 0 2px 8px rgba(37, 99, 235, 0.25);
   transition: all 0.2s;
 }
 .btn-primary:hover:not(:disabled) {
   opacity: 0.95;
   transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(37, 99, 235, 0.35);
 }
 
 .btn-secondary {
-  background: #1e293b;
-  border: 1px solid #334155;
-  color: #e2e8f0;
-  padding: 10px 16px;
+  background: #ffffff;
+  border: 1px solid #cbd5e1;
+  color: #334155;
+  padding: 9px 15px;
   border-radius: 8px;
   font-size: 0.875rem;
   font-weight: 600;
@@ -1154,10 +1175,12 @@ const downloadCsv = () => {
   gap: 8px;
   cursor: pointer;
   transition: all 0.2s;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.04);
 }
 .btn-secondary:hover {
-  background: #334155;
-  color: #fff;
+  background: #f8fafc;
+  border-color: #94a3b8;
+  color: #0f172a;
 }
 
 /* Alerts */
@@ -1170,24 +1193,25 @@ const downloadCsv = () => {
   gap: 10px;
   font-size: 0.875rem;
 }
-.alert-error { background: rgba(239, 68, 68, 0.15); border: 1px solid rgba(239, 68, 68, 0.3); color: #f87171; }
-.alert-success { background: rgba(16, 185, 129, 0.15); border: 1px solid rgba(16, 185, 129, 0.3); color: #34d399; }
+.alert-error { background: #fef2f2; border: 1px solid #fecaca; color: #b91c1c; }
+.alert-success { background: #f0fdf4; border: 1px solid #bbf7d0; color: #15803d; }
 
-/* Control Panel */
+/* Control Panel (Clean Light Card) */
 .control-panel {
-  background: #1e293b;
-  border: 1px solid #334155;
+  background: #ffffff;
+  border: 1px solid #e2e8f0;
   border-radius: 12px;
-  padding: 18px;
+  padding: 20px;
   margin-bottom: 24px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04), 0 1px 2px rgba(0, 0, 0, 0.02);
 }
 
 .control-label {
-  font-size: 0.8rem;
-  font-weight: 600;
-  color: #94a3b8;
+  font-size: 0.775rem;
+  font-weight: 700;
+  color: #64748b;
   display: block;
-  margin-bottom: 8px;
+  margin-bottom: 10px;
   text-transform: uppercase;
   letter-spacing: 0.5px;
 }
@@ -1200,26 +1224,32 @@ const downloadCsv = () => {
 }
 
 .preset-btn {
-  background: #0f172a;
-  border: 1px solid #334155;
-  color: #cbd5e1;
+  background: #f8fafc;
+  border: 1px solid #cbd5e1;
+  color: #334155;
   padding: 7px 14px;
   border-radius: 6px;
   font-size: 0.825rem;
+  font-weight: 500;
   cursor: pointer;
   transition: all 0.2s;
 }
+.preset-btn:hover {
+  background: #f1f5f9;
+  border-color: #94a3b8;
+}
 .preset-btn.active {
-  background: rgba(59, 130, 246, 0.2);
+  background: #eff6ff;
   border-color: #3b82f6;
-  color: #60a5fa;
+  color: #1d4ed8;
   font-weight: 600;
+  box-shadow: 0 1px 2px rgba(59, 130, 246, 0.1);
 }
 
 .upload-chip {
-  background: #0f172a;
-  border: 1px dashed #475569;
-  color: #94a3b8;
+  background: #f8fafc;
+  border: 1px dashed #94a3b8;
+  color: #475569;
   padding: 7px 14px;
   border-radius: 6px;
   font-size: 0.825rem;
@@ -1229,10 +1259,14 @@ const downloadCsv = () => {
   gap: 6px;
   transition: all 0.2s;
 }
+.upload-chip:hover {
+  background: #f1f5f9;
+  border-color: #64748b;
+}
 .upload-chip.active {
   border-color: #10b981;
-  color: #34d399;
-  background: rgba(16, 185, 129, 0.1);
+  color: #047857;
+  background: #ecfdf5;
 }
 
 .control-row {
@@ -1241,19 +1275,20 @@ const downloadCsv = () => {
   gap: 16px;
   margin-top: 16px;
   padding-top: 16px;
-  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  border-top: 1px solid #f1f5f9;
 }
 
-.param-label { font-size: 0.775rem; color: #94a3b8; margin-bottom: 6px; display: block; }
+.param-label { font-size: 0.775rem; font-weight: 600; color: #64748b; margin-bottom: 6px; display: block; }
 .range-wrapper { display: flex; align-items: center; gap: 10px; }
-.range-slider { flex: 1; accent-color: #3b82f6; }
-.range-val { font-size: 0.85rem; font-weight: 700; color: #60a5fa; min-width: 60px; }
-.param-input { width: 100%; background: #0f172a; border: 1px solid #334155; color: #fff; padding: 8px 12px; border-radius: 6px; font-size: 0.825rem; }
+.range-slider { flex: 1; accent-color: #2563eb; cursor: pointer; }
+.range-val { font-size: 0.85rem; font-weight: 700; color: #1d4ed8; min-width: 60px; }
+.param-input { width: 100%; background: #f8fafc; border: 1px solid #cbd5e1; color: #0f172a; padding: 8px 12px; border-radius: 6px; font-size: 0.825rem; }
+.param-input:focus { outline: none; border-color: #2563eb; background: #ffffff; }
 
-/* Auto-detect Banner */
+/* Auto-detect Banner (Light Blue Gradient) */
 .autodetect-banner {
-  background: linear-gradient(135deg, rgba(30, 41, 59, 0.9), rgba(15, 23, 42, 0.9));
-  border: 1px solid rgba(59, 130, 246, 0.4);
+  background: linear-gradient(135deg, #f0f9ff, #f8fafc);
+  border: 1px solid #bae6fd;
   border-radius: 10px;
   padding: 16px 20px;
   margin-bottom: 20px;
@@ -1262,39 +1297,49 @@ const downloadCsv = () => {
   align-items: center;
   flex-wrap: wrap;
   gap: 12px;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.03);
+}
+
+.banner-top-badges {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
 }
 
 .badge-tech {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  color: #60a5fa;
+  color: #0369a1;
   font-size: 0.75rem;
   font-weight: 700;
   text-transform: uppercase;
 }
 
 .badge-winner {
-  background: rgba(16, 185, 129, 0.15);
-  border: 1px solid rgba(16, 185, 129, 0.3);
-  color: #34d399;
-  padding: 2px 8px;
+  background: #dcfce7;
+  border: 1px solid #86efac;
+  color: #15803d;
+  padding: 3px 10px;
   border-radius: 6px;
-  font-size: 0.75rem;
+  font-size: 0.775rem;
+  font-weight: 500;
 }
 
-.autodetect-meta { font-size: 0.825rem; color: #94a3b8; }
+.autodetect-meta { font-size: 0.825rem; color: #475569; margin-top: 6px; }
 .accuracy-highlight {
   text-align: right;
-  background: #0f172a;
-  border: 1px solid #334155;
+  background: #ffffff;
+  border: 1px solid #bfdbfe;
   padding: 8px 16px;
   border-radius: 8px;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.04);
 }
-.acc-score { font-size: 1.4rem; font-weight: 800; color: #10b981; }
-.acc-label { font-size: 0.7rem; color: #94a3b8; text-transform: uppercase; }
+.acc-score { font-size: 1.4rem; font-weight: 800; color: #059669; }
+.acc-label { font-size: 0.7rem; font-weight: 600; color: #64748b; text-transform: uppercase; }
 
-/* Metric Cards */
+/* Metric Cards (Light White Cards) */
 .metrics-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
@@ -1302,21 +1347,41 @@ const downloadCsv = () => {
   margin-bottom: 24px;
 }
 
-.metric-card { background: #1e293b; border: 1px solid #334155; border-radius: 10px; padding: 16px; }
+.metric-card {
+  background: #ffffff;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  padding: 18px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04), 0 1px 2px rgba(0, 0, 0, 0.02);
+}
 .metric-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
-.m-label { font-size: 0.775rem; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.5px; }
-.m-value { font-size: 1.45rem; font-weight: 800; color: #fff; }
-.trend-green { color: #34d399; }
-.purple { color: #a78bfa; }
-.red { color: #f87171; }
+.m-label { font-size: 0.75rem; font-weight: 700; color: #64748b; text-transform: uppercase; letter-spacing: 0.5px; }
+
+.m-icon-box {
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.m-icon-box.green { background: #ecfdf5; }
+.m-icon-box.blue { background: #eff6ff; }
+.m-icon-box.purple { background: #f5f3ff; }
+.m-icon-box.red { background: #fef2f2; }
+
+.m-value { font-size: 1.45rem; font-weight: 800; color: #0f172a; }
+.text-green { color: #059669; }
+.text-purple { color: #7c3aed; }
+.text-red { color: #dc2626; }
 .m-sub { font-size: 0.75rem; color: #64748b; margin-top: 4px; }
-.badge-sim-tag { color: #60a5fa; font-weight: 700; margin-left: 4px; }
+.badge-sim-tag { color: #2563eb; font-weight: 700; margin-left: 4px; }
 
 /* Navigation Tabs */
 .nav-tabs {
   display: flex;
   gap: 8px;
-  border-bottom: 1px solid #334155;
+  border-bottom: 1px solid #e2e8f0;
   margin-bottom: 20px;
   overflow-x: auto;
 }
@@ -1325,7 +1390,7 @@ const downloadCsv = () => {
   background: transparent;
   border: none;
   border-bottom: 2px solid transparent;
-  color: #94a3b8;
+  color: #64748b;
   padding: 10px 16px;
   font-size: 0.875rem;
   font-weight: 600;
@@ -1336,24 +1401,31 @@ const downloadCsv = () => {
   transition: all 0.2s;
   white-space: nowrap;
 }
+.tab-btn:hover { color: #0f172a; }
+.tab-btn.active { color: #2563eb; border-bottom-color: #2563eb; }
+.tab-dot-alert { width: 6px; height: 6px; border-radius: 50%; background: #2563eb; }
 
-.tab-btn.active { color: #60a5fa; border-bottom-color: #3b82f6; }
-.tab-dot-alert { width: 6px; height: 6px; border-radius: 50%; background: #3b82f6; }
-
-/* Chart Card */
-.chart-card { background: #1e293b; border: 1px solid #334155; border-radius: 12px; padding: 20px; margin-bottom: 24px; }
+/* Chart Card (Light White) */
+.chart-card {
+  background: #ffffff;
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  padding: 20px;
+  margin-bottom: 24px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04), 0 1px 2px rgba(0, 0, 0, 0.02);
+}
 .chart-card-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 16px; flex-wrap: wrap; gap: 12px; }
-.chart-title { font-size: 1.05rem; font-weight: 700; color: #fff; }
-.chart-subtitle { font-size: 0.8rem; color: #94a3b8; margin-top: 2px; }
+.chart-title { font-size: 1.05rem; font-weight: 700; color: #0f172a; margin: 0; }
+.chart-subtitle { font-size: 0.8rem; color: #64748b; margin: 2px 0 0 0; }
 
-.legend-group { display: flex; gap: 14px; align-items: center; font-size: 0.8rem; color: #cbd5e1; flex-wrap: wrap; }
-.legend-item { display: flex; align-items: center; gap: 6px; }
+.legend-group { display: flex; gap: 14px; align-items: center; font-size: 0.8rem; color: #475569; flex-wrap: wrap; }
+.legend-item { display: flex; align-items: center; gap: 6px; font-weight: 500; }
 .legend-box { width: 14px; height: 4px; border-radius: 2px; }
-.legend-box.blue { background: #3b82f6; }
-.legend-box.green { background: #10b981; }
-.legend-box.dashed { border-top: 2px dashed #10b981; height: 0; }
+.legend-box.blue { background: #2563eb; }
+.legend-box.green { background: #059669; }
+.legend-box.dashed { border-top: 2px dashed #059669; height: 0; }
 .legend-box.green-area { background: rgba(16, 185, 129, 0.25); height: 10px; }
-.legend-box.red-dot { width: 8px; height: 8px; border-radius: 50%; background: #ef4444; }
+.legend-box.red-dot { width: 8px; height: 8px; border-radius: 50%; background: #dc2626; }
 
 .svg-chart-container { position: relative; width: 100%; overflow-x: auto; }
 .main-svg-chart { width: 100%; height: auto; display: block; }
@@ -1369,59 +1441,74 @@ const downloadCsv = () => {
   padding: 10px 14px;
   pointer-events: none;
   font-size: 0.8rem;
-  box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+  color: #ffffff;
+  box-shadow: 0 8px 20px rgba(0,0,0,0.25);
   z-index: 10;
   min-width: 180px;
 }
 .tooltip-date { font-weight: 700; color: #fff; margin-bottom: 4px; }
-.tooltip-val.blue { color: #60a5fa; }
-.tooltip-val.green { color: #34d399; margin-top: 2px; }
-.tooltip-bounds { font-size: 0.725rem; color: #94a3b8; margin-top: 2px; }
-.tooltip-badge-anom { color: #f87171; font-weight: 700; margin-top: 6px; font-size: 0.75rem; }
+.tooltip-val.blue { color: #93c5fd; }
+.tooltip-val.green { color: #6ee7b7; margin-top: 2px; }
+.tooltip-bounds { font-size: 0.725rem; color: #cbd5e1; margin-top: 2px; }
+.tooltip-badge-anom { color: #fca5a5; font-weight: 700; margin-top: 6px; font-size: 0.75rem; }
 
-/* AI Executive Card */
+/* AI Executive Card (Soft Violet Theme) */
 .ai-card {
-  background: linear-gradient(135deg, rgba(30, 41, 59, 0.95), rgba(15, 23, 42, 0.95));
-  border: 1px solid rgba(139, 92, 246, 0.35);
+  background: linear-gradient(135deg, #faf5ff, #ffffff);
+  border: 1px solid #e9d5ff;
   border-radius: 12px;
   padding: 22px;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.03);
 }
 .ai-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
 .ai-title-wrap { display: flex; align-items: center; gap: 12px; }
 .ai-sparkle { font-size: 1.5rem; }
-.ai-title { font-size: 1.1rem; font-weight: 700; color: #e2e8f0; }
-.ai-subtitle { font-size: 0.8rem; color: #94a3b8; }
-.ai-badge { background: rgba(139, 92, 246, 0.15); border: 1px solid rgba(139, 92, 246, 0.3); color: #c084fc; padding: 4px 10px; border-radius: 9999px; font-size: 0.75rem; font-weight: 700; }
-.formatted-ai-text { font-size: 0.9rem; line-height: 1.7; color: #cbd5e1; }
+.ai-title { font-size: 1.1rem; font-weight: 700; color: #4c1d95; margin: 0; }
+.ai-subtitle { font-size: 0.8rem; color: #7e22ce; margin: 2px 0 0 0; }
+.ai-badge { background: #f3e8ff; border: 1px solid #d8b4fe; color: #7e22ce; padding: 4px 10px; border-radius: 9999px; font-size: 0.75rem; font-weight: 700; }
+.formatted-ai-text { font-size: 0.9rem; line-height: 1.7; color: #334155; }
 
-/* Simulation Card */
-.sim-card { background: #1e293b; border: 1px solid #334155; border-radius: 12px; padding: 22px; margin-bottom: 24px; }
+/* Simulation Card (Clean White) */
+.sim-card {
+  background: #ffffff;
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  padding: 22px;
+  margin-bottom: 24px;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.04);
+}
 .sim-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 20px; flex-wrap: wrap; gap: 12px; }
-.sim-title { font-size: 1.15rem; font-weight: 700; color: #fff; }
-.sim-desc { font-size: 0.85rem; color: #94a3b8; margin-top: 4px; }
+.sim-title { font-size: 1.15rem; font-weight: 700; color: #0f172a; margin: 0; }
+.sim-desc { font-size: 0.85rem; color: #64748b; margin: 4px 0 0 0; }
 .sim-controls-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 18px; }
-.sim-control-box { background: #0f172a; border: 1px solid #334155; padding: 16px; border-radius: 8px; }
-.sim-ctrl-label { display: flex; justify-content: space-between; font-size: 0.825rem; font-weight: 600; color: #cbd5e1; margin-bottom: 10px; }
-.sim-badge-val { background: rgba(59, 130, 246, 0.15); color: #60a5fa; padding: 2px 8px; border-radius: 4px; font-weight: 700; }
-.sim-badge-val.positive { background: rgba(16, 185, 129, 0.15); color: #34d399; }
-.sim-badge-val.negative { background: rgba(239, 68, 68, 0.15); color: #f87171; }
+.sim-control-box { background: #f8fafc; border: 1px solid #cbd5e1; padding: 16px; border-radius: 8px; }
+.sim-ctrl-label { display: flex; justify-content: space-between; font-size: 0.825rem; font-weight: 600; color: #334155; margin-bottom: 10px; }
+.sim-badge-val { background: #eff6ff; color: #1d4ed8; padding: 2px 8px; border-radius: 4px; font-weight: 700; }
+.sim-badge-val.positive { background: #ecfdf5; color: #047857; }
+.sim-badge-val.negative { background: #fef2f2; color: #b91c1c; }
 .sim-hint { font-size: 0.75rem; color: #64748b; margin-top: 8px; }
 
-/* Chat Card */
-.chat-card { background: #1e293b; border: 1px solid #334155; border-radius: 12px; padding: 22px; }
+/* Chat Card (Clean White) */
+.chat-card {
+  background: #ffffff;
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  padding: 22px;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.04);
+}
 .chat-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
 .chat-title-wrap { display: flex; align-items: center; gap: 10px; }
-.chat-title { font-size: 1.1rem; font-weight: 700; color: #fff; }
-.chat-subtitle { font-size: 0.8rem; color: #94a3b8; }
+.chat-title { font-size: 1.1rem; font-weight: 700; color: #0f172a; margin: 0; }
+.chat-subtitle { font-size: 0.8rem; color: #64748b; margin: 2px 0 0 0; }
 
 .quick-prompts { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 16px; }
-.quick-label { font-size: 0.75rem; font-weight: 700; color: #94a3b8; text-transform: uppercase; }
-.quick-btn { background: #0f172a; border: 1px solid #334155; color: #cbd5e1; padding: 6px 12px; border-radius: 6px; font-size: 0.775rem; cursor: pointer; text-align: left; transition: all 0.2s; }
-.quick-btn:hover:not(:disabled) { border-color: #3b82f6; color: #60a5fa; }
+.quick-label { font-size: 0.75rem; font-weight: 700; color: #64748b; text-transform: uppercase; }
+.quick-btn { background: #f8fafc; border: 1px solid #cbd5e1; color: #334155; padding: 6px 12px; border-radius: 6px; font-size: 0.775rem; cursor: pointer; text-align: left; transition: all 0.2s; }
+.quick-btn:hover:not(:disabled) { border-color: #2563eb; color: #1d4ed8; background: #eff6ff; }
 
 .chat-messages-box {
-  background: #090d16;
-  border: 1px solid #334155;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
   border-radius: 8px;
   padding: 16px;
   min-height: 280px;
@@ -1432,70 +1519,84 @@ const downloadCsv = () => {
   flex-direction: column;
   gap: 14px;
 }
-.chat-empty { display: flex; align-items: center; justify-content: center; height: 200px; color: #64748b; font-size: 0.875rem; }
+.chat-empty { display: flex; align-items: center; justify-content: center; height: 200px; color: #94a3b8; font-size: 0.875rem; }
 
 .chat-bubble-wrap { display: flex; gap: 10px; max-width: 85%; }
 .chat-bubble-wrap.user { align-self: flex-end; flex-direction: row-reverse; }
-.chat-avatar { width: 32px; height: 32px; border-radius: 50%; background: #1e293b; display: flex; align-items: center; justify-content: center; font-size: 1rem; border: 1px solid #334155; }
-.chat-bubble { background: #1e293b; border: 1px solid #334155; border-radius: 8px; padding: 12px 14px; font-size: 0.85rem; line-height: 1.6; }
-.chat-bubble-wrap.user .chat-bubble { background: #2563eb; border-color: #3b82f6; color: #fff; }
-.chat-sender { font-size: 0.7rem; font-weight: 700; color: #94a3b8; margin-bottom: 4px; }
+.chat-avatar { width: 32px; height: 32px; border-radius: 50%; background: #ffffff; display: flex; align-items: center; justify-content: center; font-size: 1rem; border: 1px solid #cbd5e1; box-shadow: 0 1px 2px rgba(0,0,0,0.05); }
+.chat-bubble { background: #ffffff; border: 1px solid #e2e8f0; border-radius: 8px; padding: 12px 14px; font-size: 0.85rem; line-height: 1.6; color: #1e293b; box-shadow: 0 1px 2px rgba(0,0,0,0.03); }
+.chat-bubble-wrap.user .chat-bubble { background: #2563eb; border-color: #1d4ed8; color: #ffffff; }
+.chat-sender { font-size: 0.7rem; font-weight: 700; color: #64748b; margin-bottom: 4px; }
 .chat-bubble-wrap.user .chat-sender { color: #dbeafe; }
-.chat-bubble.thinking { color: #94a3b8; font-style: italic; }
+.chat-bubble.thinking { color: #64748b; font-style: italic; }
 
 .chat-input-bar { display: flex; gap: 10px; }
-.chat-input { flex: 1; background: #0f172a; border: 1px solid #334155; color: #fff; padding: 10px 14px; border-radius: 8px; font-size: 0.875rem; }
-.chat-input:focus { outline: none; border-color: #3b82f6; }
+.chat-input { flex: 1; background: #ffffff; border: 1px solid #cbd5e1; color: #0f172a; padding: 10px 14px; border-radius: 8px; font-size: 0.875rem; }
+.chat-input:focus { outline: none; border-color: #2563eb; }
 
-/* Table Card */
-.table-card { background: #1e293b; border: 1px solid #334155; border-radius: 12px; padding: 20px; }
+/* Table Card (Clean White) */
+.table-card {
+  background: #ffffff;
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  padding: 20px;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.04);
+}
 .table-toolbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; flex-wrap: wrap; gap: 12px; }
-.search-box { display: flex; align-items: center; gap: 8px; background: #0f172a; border: 1px solid #334155; border-radius: 6px; padding: 6px 12px; width: 280px; }
-.search-input { background: transparent; border: none; color: #fff; font-size: 0.825rem; width: 100%; }
+.search-box { display: flex; align-items: center; gap: 8px; background: #f8fafc; border: 1px solid #cbd5e1; border-radius: 6px; padding: 6px 12px; width: 280px; }
+.search-input { background: transparent; border: none; color: #0f172a; font-size: 0.825rem; width: 100%; }
 .search-input:focus { outline: none; }
 .table-responsive { overflow-x: auto; }
 .data-table { width: 100%; border-collapse: collapse; font-size: 0.85rem; text-align: left; }
-.data-table th { background: #0f172a; color: #94a3b8; padding: 10px 14px; font-size: 0.775rem; text-transform: uppercase; letter-spacing: 0.5px; border-bottom: 1px solid #334155; }
-.data-table td { padding: 10px 14px; border-bottom: 1px solid rgba(255, 255, 255, 0.05); color: #e2e8f0; }
-.data-table tr.row-forecast td { background: rgba(16, 185, 129, 0.04); }
-.data-table tr.row-anomaly td { background: rgba(239, 68, 68, 0.06); }
-.text-green { color: #34d399; }
-.text-muted { color: #64748b; }
+.data-table th { background: #f8fafc; color: #64748b; padding: 10px 14px; font-size: 0.75rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; border-bottom: 1px solid #e2e8f0; }
+.data-table td { padding: 10px 14px; border-bottom: 1px solid #f1f5f9; color: #1e293b; }
+.data-table tr:hover td { background: #f8fafc; }
+.data-table tr.row-forecast td { background: rgba(16, 185, 129, 0.03); }
+.data-table tr.row-anomaly td { background: rgba(239, 68, 68, 0.05); }
+
 .tag-status { padding: 3px 8px; border-radius: 4px; font-size: 0.725rem; font-weight: 700; }
-.tag-actual { background: rgba(59, 130, 246, 0.15); color: #60a5fa; }
-.tag-forecast { background: rgba(16, 185, 129, 0.15); color: #34d399; }
-.tag-anomaly { background: rgba(239, 68, 68, 0.2); color: #f87171; }
-.pagination-bar { display: flex; justify-content: space-between; align-items: center; margin-top: 16px; padding-top: 12px; border-top: 1px solid #334155; font-size: 0.8rem; color: #94a3b8; }
+.tag-actual { background: #eff6ff; color: #1d4ed8; }
+.tag-forecast { background: #ecfdf5; color: #047857; }
+.tag-anomaly { background: #fef2f2; color: #b91c1c; }
+
+.pagination-bar { display: flex; justify-content: space-between; align-items: center; margin-top: 16px; padding-top: 12px; border-top: 1px solid #e2e8f0; font-size: 0.8rem; color: #64748b; }
 .page-btns { display: flex; align-items: center; gap: 8px; }
-.btn-page { background: #0f172a; border: 1px solid #334155; color: #cbd5e1; padding: 5px 10px; border-radius: 4px; font-size: 0.775rem; cursor: pointer; }
+.btn-page { background: #ffffff; border: 1px solid #cbd5e1; color: #334155; padding: 5px 10px; border-radius: 4px; font-size: 0.775rem; cursor: pointer; }
+.btn-page:hover:not(:disabled) { background: #f8fafc; }
 .btn-page:disabled { opacity: 0.4; cursor: not-allowed; }
 
 /* Integration Card */
-.integration-card { background: #1e293b; border: 1px solid #334155; border-radius: 12px; padding: 22px; }
-.int-title { font-size: 1.1rem; font-weight: 700; color: #fff; margin-bottom: 4px; }
-.int-desc { font-size: 0.85rem; color: #94a3b8; margin-bottom: 18px; }
+.integration-card {
+  background: #ffffff;
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  padding: 22px;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.04);
+}
+.int-title { font-size: 1.1rem; font-weight: 700; color: #0f172a; margin: 0 0 4px 0; }
+.int-desc { font-size: 0.85rem; color: #64748b; margin: 0 0 18px 0; }
 .lang-pills { display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; }
-.lang-btn { background: #0f172a; border: 1px solid #334155; color: #94a3b8; padding: 6px 14px; border-radius: 6px; font-size: 0.825rem; font-weight: 600; cursor: pointer; }
-.lang-btn.active { background: rgba(59, 130, 246, 0.2); border-color: #3b82f6; color: #60a5fa; }
-.code-wrapper { background: #090d16; border: 1px solid #334155; border-radius: 8px; overflow: hidden; }
-.code-top { display: flex; justify-content: space-between; align-items: center; padding: 8px 14px; background: #0f172a; border-bottom: 1px solid #334155; }
-.code-lang { font-size: 0.75rem; font-weight: 700; color: #64748b; }
-.copy-btn { background: transparent; border: 1px solid #334155; color: #cbd5e1; padding: 4px 10px; border-radius: 4px; font-size: 0.75rem; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; }
+.lang-btn { background: #f8fafc; border: 1px solid #cbd5e1; color: #475569; padding: 6px 14px; border-radius: 6px; font-size: 0.825rem; font-weight: 600; cursor: pointer; }
+.lang-btn.active { background: #eff6ff; border-color: #3b82f6; color: #1d4ed8; }
+.code-wrapper { background: #0f172a; border: 1px solid #334155; border-radius: 8px; overflow: hidden; }
+.code-top { display: flex; justify-content: space-between; align-items: center; padding: 8px 14px; background: #1e293b; border-bottom: 1px solid #334155; }
+.code-lang { font-size: 0.75rem; font-weight: 700; color: #94a3b8; }
+.copy-btn { background: transparent; border: 1px solid #475569; color: #cbd5e1; padding: 4px 10px; border-radius: 4px; font-size: 0.75rem; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; }
 .copy-btn:hover { background: #334155; color: #fff; }
-.code-block { padding: 16px; color: #e2e8f0; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 0.85rem; line-height: 1.5; overflow-x: auto; }
+.code-block { padding: 16px; color: #e2e8f0; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 0.85rem; line-height: 1.5; overflow-x: auto; margin: 0; }
 
 /* Leaderboard Modal */
-.modal-backdrop { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.75); display: flex; align-items: center; justify-content: center; z-index: 999; padding: 20px; }
-.modal-card { background: #1e293b; border: 1px solid #334155; border-radius: 12px; width: 100%; max-width: 680px; box-shadow: 0 20px 40px rgba(0,0,0,0.6); overflow: hidden; }
-.modal-header { display: flex; justify-content: space-between; align-items: center; padding: 16px 20px; border-bottom: 1px solid #334155; background: #0f172a; }
-.modal-title { font-size: 1.1rem; font-weight: 700; color: #fff; }
-.modal-close { background: transparent; border: none; color: #94a3b8; font-size: 1.2rem; cursor: pointer; }
+.modal-backdrop { position: fixed; inset: 0; background: rgba(15, 23, 42, 0.6); backdrop-filter: blur(2px); display: flex; align-items: center; justify-content: center; z-index: 999; padding: 20px; }
+.modal-card { background: #ffffff; border: 1px solid #e2e8f0; border-radius: 12px; width: 100%; max-width: 680px; box-shadow: 0 20px 40px rgba(0,0,0,0.15); overflow: hidden; }
+.modal-header { display: flex; justify-content: space-between; align-items: center; padding: 16px 20px; border-bottom: 1px solid #e2e8f0; background: #f8fafc; }
+.modal-title { font-size: 1.1rem; font-weight: 700; color: #0f172a; margin: 0; }
+.modal-close { background: transparent; border: none; color: #64748b; font-size: 1.2rem; cursor: pointer; }
 .modal-body { padding: 20px; }
-.modal-desc { font-size: 0.85rem; color: #94a3b8; margin-bottom: 16px; line-height: 1.5; }
+.modal-desc { font-size: 0.85rem; color: #64748b; margin-bottom: 16px; line-height: 1.5; }
 .leaderboard-table { width: 100%; border-collapse: collapse; font-size: 0.85rem; text-align: left; }
-.leaderboard-table th { background: #0f172a; color: #94a3b8; padding: 8px 12px; font-size: 0.75rem; text-transform: uppercase; border-bottom: 1px solid #334155; }
-.leaderboard-table td { padding: 10px 12px; border-bottom: 1px solid rgba(255,255,255,0.05); }
-.leaderboard-table tr.row-winner { background: rgba(16, 185, 129, 0.1); }
-.model-name { font-size: 0.875rem; color: #fff; display: flex; align-items: center; gap: 6px; }
+.leaderboard-table th { background: #f8fafc; color: #64748b; padding: 8px 12px; font-size: 0.75rem; text-transform: uppercase; border-bottom: 1px solid #e2e8f0; }
+.leaderboard-table td { padding: 10px 12px; border-bottom: 1px solid #f1f5f9; color: #1e293b; }
+.leaderboard-table tr.row-winner { background: #f0fdf4; }
+.model-name { font-size: 0.875rem; color: #0f172a; display: flex; align-items: center; gap: 6px; }
 .model-desc { font-size: 0.725rem; color: #64748b; margin-top: 2px; }
 </style>
