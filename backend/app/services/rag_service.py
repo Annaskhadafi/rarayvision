@@ -74,18 +74,29 @@ def get_fastembed_model():
     return _fastembed_instance
 
 
+def is_rerank_enabled() -> bool:
+    """Checks if reranker is enabled via environment variable ENABLE_RERANK (default: true)."""
+    val = os.getenv("ENABLE_RERANK", "true").strip().lower()
+    return val in ["true", "1", "yes", "on", "enabled"]
+
+
 def get_reranker_model():
     global _fastembed_reranker_instance
+    if not is_rerank_enabled():
+        return None
+
     if _fastembed_reranker_instance is None:
         try:
             from fastembed.rerank.cross_encoder import TextCrossEncoder
-            # Xenova/ms-marco-MiniLM-L-6-v2 is ultra-fast (~80MB ONNX), free & accurate
-            model_name = os.getenv("RERANKER_MODEL", "Xenova/ms-marco-MiniLM-L-6-v2")
+            # Xenova/ms-marco-MiniLM-L-6-v2 is ultra-fast (~80MB ONNX), free, reliable & accurate for local execution
+            env_model = os.getenv("RERANKER_MODEL", "Xenova/ms-marco-MiniLM-L-6-v2").strip()
+            # If env_model is a cloud-only model (e.g. cohere/rerank-v3.5, nvidia/...), use local default Xenova
+            local_model_name = "Xenova/ms-marco-MiniLM-L-6-v2" if any(x in env_model.lower() for x in ["cohere/", "nvidia/", "openrouter"]) else env_model
             threads = min(4, os.cpu_count() or 2)
-            _fastembed_reranker_instance = TextCrossEncoder(model_name, threads=threads)
-            logger.info(f"[RagService] FastEmbed Cross-Encoder Reranker initialized ({model_name}, {threads} threads).")
+            _fastembed_reranker_instance = TextCrossEncoder(local_model_name, threads=threads)
+            logger.info(f"[RagService] FastEmbed Local Cross-Encoder Reranker initialized ({local_model_name}, {threads} threads).")
         except Exception as e:
-            logger.error(f"[RagService] Failed to load FastEmbed Reranker: {e}")
+            logger.error(f"[RagService] Failed to load FastEmbed Local Reranker: {e}")
             _fastembed_reranker_instance = False
     return _fastembed_reranker_instance
 
@@ -260,33 +271,93 @@ class RagService:
         gemini_key = os.getenv("GEMINI_API_KEY", "")
         openrouter_key = os.getenv("OPENROUTER_API_KEY", "")
         groq_model = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+        openrouter_model = os.getenv("OPENROUTER_MODEL", "google/gemini-3.7-flash")
+        openrouter_emb_model = os.getenv("OPENROUTER_EMBEDDING_MODEL", "qwen/qwen3-embedding-8b")
 
-        active_llm = f"Groq LPU ({groq_model})" if groq_key else ("OpenRouter" if openrouter_key else "Google Gemini")
+        active_llm = f"OpenRouter ({openrouter_model})" if openrouter_key else (f"Groq LPU ({groq_model})" if groq_key else "Google Gemini")
         reranker_model = os.getenv("RERANKER_MODEL", "Xenova/ms-marco-MiniLM-L-6-v2")
         reranker_active = bool(get_reranker_model())
 
         return {
-            "default_provider": "local_fastembed",
+            "default_provider": "local_fastembed (auto-switches to OpenRouter for large files)",
             "model_name": "BAAI/bge-small-en-v1.5",
-            "vector_dimension": 384,
-            "pricing": "100% Free & Offline",
+            "openrouter_embedding_model": openrouter_emb_model,
+            "pricing": "100% Free & Offline / OpenRouter Cloud",
             "reranker_model": reranker_model,
             "reranker_enabled": reranker_active,
             "active_llm": active_llm,
+            "openrouter_configured": bool(openrouter_key),
             "groq_configured": bool(groq_key),
             "gemini_configured": bool(gemini_key),
-            "openrouter_configured": bool(openrouter_key),
             "vector_dimensions": 384
         }
 
     @classmethod
-    def generate_embeddings(cls, texts: List[str]) -> List[List[float]]:
+    def generate_embeddings_openrouter(cls, texts: List[str], model: str = "qwen/qwen3-embedding-8b") -> Optional[List[List[float]]]:
+        """
+        Generates vector embeddings via OpenRouter Embeddings API with batching.
+        Default model: qwen/qwen3-embedding-8b
+        """
+        openrouter_key = os.getenv("OPENROUTER_API_KEY", "").strip()
+        if not openrouter_key or not texts:
+            return None
+
+        session = get_http_session()
+        all_embs = []
+        batch_size = 32
+
+        for i in range(0, len(texts), batch_size):
+            batch_slice = texts[i:i + batch_size]
+            try:
+                resp = session.post(
+                    "https://openrouter.ai/api/v1/embeddings",
+                    headers={
+                        "Authorization": f"Bearer {openrouter_key}",
+                        "Content-Type": "application/json",
+                        "HTTP-Referer": "https://vision.chitrapratama.com",
+                        "X-Title": "Hero Assistant RAG"
+                    },
+                    json={
+                        "model": model,
+                        "input": batch_slice
+                    },
+                    timeout=45
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    items = data.get("data", [])
+                    items_sorted = sorted(items, key=lambda x: x.get("index", 0))
+                    for item in items_sorted:
+                        emb = item.get("embedding", [])
+                        all_embs.append([float(x) for x in emb])
+                else:
+                    logger.warning(f"[RagService] OpenRouter embeddings error {resp.status_code}: {resp.text[:300]}")
+                    return None
+            except Exception as e:
+                logger.error(f"[RagService] OpenRouter embeddings exception: {e}")
+                return None
+
+        return all_embs
+
+    @classmethod
+    def generate_embeddings(cls, texts: List[str], force_openrouter: bool = False, is_large: bool = False) -> List[List[float]]:
         """
         Generates vector embeddings for a list of text strings with safe batching.
-        Defaults to high-speed local FastEmbed ONNX (100% free, 384-d).
+        Uses OpenRouter (qwen/qwen3-embedding-8b) if large file or configured, otherwise local FastEmbed ONNX (384-d).
         """
         if not texts:
             return []
+
+        openrouter_key = os.getenv("OPENROUTER_API_KEY", "").strip()
+        openrouter_emb_model = os.getenv("OPENROUTER_EMBEDDING_MODEL", "qwen/qwen3-embedding-8b").strip()
+
+        # Try OpenRouter if requested, large file, or configured as primary
+        if openrouter_key and (force_openrouter or is_large or os.getenv("EMBEDDING_PROVIDER", "").lower() == "openrouter"):
+            logger.info(f"[RagService] Generating embeddings via OpenRouter ({openrouter_emb_model}) for {len(texts)} chunks...")
+            or_embs = cls.generate_embeddings_openrouter(texts, model=openrouter_emb_model)
+            if or_embs and len(or_embs) == len(texts):
+                return or_embs
+            logger.warning("[RagService] OpenRouter embedding fallback to local FastEmbed ONNX.")
 
         model = get_fastembed_model()
         if model:
@@ -309,10 +380,20 @@ class RagService:
         return [[0.0] * 384 for _ in texts]
 
     @classmethod
-    def generate_single_embedding(cls, text: str) -> List[float]:
+    def generate_single_embedding(cls, text: str, model_name: Optional[str] = None) -> List[float]:
         """Generates embedding vector for a single query string with minimal latency."""
         if not text:
             return [0.0] * 384
+
+        openrouter_key = os.getenv("OPENROUTER_API_KEY", "").strip()
+        openrouter_emb_model = os.getenv("OPENROUTER_EMBEDDING_MODEL", "qwen/qwen3-embedding-8b").strip()
+
+        # If model matches OpenRouter or active provider is OpenRouter
+        if (model_name and "qwen" in model_name.lower()) or (openrouter_key and os.getenv("EMBEDDING_PROVIDER", "").lower() == "openrouter"):
+            or_embs = cls.generate_embeddings_openrouter([text], model=model_name or openrouter_emb_model)
+            if or_embs and len(or_embs) > 0 and len(or_embs[0]) > 0:
+                return or_embs[0]
+
         model = get_fastembed_model()
         if model:
             try:
@@ -500,9 +581,21 @@ class RagService:
                 "token_estimate": len(markdown_text.split()) if markdown_text else 0
             }]
 
-        # 3. Generate Vector Embeddings in Batch
+        # 3. Generate Vector Embeddings in Batch (Auto-detect large file for OpenRouter)
         chunk_texts = [c["content"] for c in chunk_dicts]
-        embeddings = cls.generate_embeddings(chunk_texts)
+        is_large_file = (len(markdown_text) > 15000) or (len(chunk_dicts) > 12) or (len(file_bytes) > 60000)
+        openrouter_key = os.getenv("OPENROUTER_API_KEY", "").strip()
+        openrouter_emb_model = os.getenv("OPENROUTER_EMBEDDING_MODEL", "qwen/qwen3-embedding-8b").strip()
+
+        used_embedding_model = "BAAI/bge-small-en-v1.5"
+        if openrouter_key and (is_large_file or os.getenv("EMBEDDING_PROVIDER", "").lower() == "openrouter"):
+            embeddings = cls.generate_embeddings(chunk_texts, force_openrouter=True)
+            if embeddings and len(embeddings) == len(chunk_dicts):
+                used_embedding_model = openrouter_emb_model
+            else:
+                embeddings = cls.generate_embeddings(chunk_texts)
+        else:
+            embeddings = cls.generate_embeddings(chunk_texts)
 
         # 4. Save Document & Chunks in DB
         doc_record = RagDocument(
@@ -515,10 +608,11 @@ class RagService:
             word_count=conv_res.get("metrics", {}).get("words", 0),
             total_chunks=len(chunk_dicts),
             engine_used=conv_res.get("engine", "anydoc"),
-            embedding_model="BAAI/bge-small-en-v1.5",
+            embedding_model=used_embedding_model,
             extra_meta={
                 "ocr_applied": conv_res.get("ocr_applied", False),
-                "s3_stored_filename": conv_res.get("storage", {}).get("stored_filename")
+                "s3_stored_filename": conv_res.get("storage", {}).get("stored_filename"),
+                "is_large_file": is_large_file
             }
         )
         db.add(doc_record)
@@ -552,7 +646,7 @@ class RagService:
             "char_count": conv_res.get("metrics", {}).get("characters", 0),
             "word_count": conv_res.get("metrics", {}).get("words", 0),
             "processing_time_ms": elapsed_ms,
-            "embedding_model": "BAAI/bge-small-en-v1.5",
+            "embedding_model": used_embedding_model,
             "preview_markdown": markdown_text[:500] + ("..." if len(markdown_text) > 500 else "")
         }
 
@@ -587,13 +681,21 @@ class RagService:
             q = db.query(
                 RagDocumentChunk.id, RagDocumentChunk.document_id, RagDocumentChunk.chunk_index,
                 RagDocumentChunk.heading, RagDocumentChunk.content, RagDocumentChunk.embedding,
-                RagDocument.filename, RagDocument.s3_url, RagDocument.format
+                RagDocument.filename, RagDocument.s3_url, RagDocument.format, RagDocument.embedding_model
             ).join(RagDocument, RagDocumentChunk.document_id == RagDocument.id)
             rows = q.all()
+
+            first_valid_emb = next((r.embedding for r in rows if r.embedding and isinstance(r.embedding, list) and len(r.embedding) > 0), None)
+            dim = len(first_valid_emb) if first_valid_emb else 384
+            dominant_model = "BAAI/bge-small-en-v1.5"
 
             items = []
             emb_list = []
             for r in rows:
+                if r.embedding and isinstance(r.embedding, list) and len(r.embedding) > 0:
+                    if r.embedding_model and "qwen" in str(r.embedding_model).lower():
+                        dominant_model = r.embedding_model
+
                 items.append({
                     "chunk_id": r.id,
                     "document_id": r.document_id,
@@ -608,22 +710,24 @@ class RagService:
                     "is_memory": False
                 })
                 emb = r.embedding
-                emb_list.append(emb if emb and len(emb) == 384 else [0.0] * 384)
+                emb_list.append(emb if emb and isinstance(emb, list) and len(emb) == dim else [0.0] * dim)
 
             if items:
                 emb_matrix = np.array(emb_list, dtype=np.float32)
                 row_norms = np.linalg.norm(emb_matrix, axis=1)
                 row_norms[row_norms == 0] = 1e-9
             else:
-                emb_matrix = np.empty((0, 384), dtype=np.float32)
+                emb_matrix = np.empty((0, dim), dtype=np.float32)
                 row_norms = np.empty((0,), dtype=np.float32)
 
             _chunk_cache = {
                 "items": items,
                 "matrix": emb_matrix,
-                "norms": row_norms
+                "norms": row_norms,
+                "dim": dim,
+                "dominant_model": dominant_model
             }
-            logger.info(f"[RagService] In-memory chunk cache built: {len(items)} chunks.")
+            logger.info(f"[RagService] In-memory chunk cache built: {len(items)} chunks (dim: {dim}, model: {dominant_model}).")
             return _chunk_cache
 
     @classmethod
@@ -682,6 +786,55 @@ class RagService:
             return _memory_facts_cache
 
     @classmethod
+    def rerank_chunks_openrouter(
+        cls,
+        query: str,
+        candidate_texts: List[str],
+        model: str = "cohere/rerank-v3.5"
+    ) -> Optional[List[float]]:
+        """
+        Invokes OpenRouter /api/v1/rerank endpoint (Cohere, NVIDIA, Qwen, etc.).
+        Returns list of normalized relevance scores [0.0 - 1.0] matching candidate_texts ordering.
+        """
+        openrouter_key = os.getenv("OPENROUTER_API_KEY", "").strip()
+        if not openrouter_key or not candidate_texts:
+            return None
+
+        session = get_http_session()
+        try:
+            resp = session.post(
+                "https://openrouter.ai/api/v1/rerank",
+                headers={
+                    "Authorization": f"Bearer {openrouter_key}",
+                    "Content-Type": "application/json",
+                    "HTTP-Referer": "https://vision.chitrapratama.com",
+                    "X-Title": "Hero Assistant RAG"
+                },
+                json={
+                    "model": model,
+                    "query": query,
+                    "documents": candidate_texts
+                },
+                timeout=25
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                results = data.get("results", [])
+                scores = [0.0] * len(candidate_texts)
+                for item in results:
+                    idx = item.get("index", 0)
+                    score = float(item.get("relevance_score", 0.0))
+                    if 0 <= idx < len(scores):
+                        scores[idx] = score
+                return scores
+            else:
+                logger.warning(f"[RagService] OpenRouter rerank error {resp.status_code}: {resp.text[:300]}")
+                return None
+        except Exception as e:
+            logger.error(f"[RagService] OpenRouter rerank exception: {e}")
+            return None
+
+    @classmethod
     def rerank_chunks(
         cls,
         query: str,
@@ -689,15 +842,10 @@ class RagService:
         top_k: int = 4
     ) -> List[Dict[str, Any]]:
         """
-        Applies ONNX Cross-Encoder Reranking to candidate chunks for maximum retrieval precision.
-        Computes deep semantic interaction scores between query and document text.
-        Transforms raw logits into normalized confidence scores [0.0 - 1.0] using Sigmoid.
+        Applies Cross-Encoder Reranking to candidate chunks for maximum retrieval precision.
+        Supports both OpenRouter Reranker API (e.g. cohere/rerank-v3.5) and local FastEmbed ONNX.
         """
         if not chunks or not query:
-            return chunks[:top_k]
-
-        reranker = get_reranker_model()
-        if not reranker:
             return chunks[:top_k]
 
         try:
@@ -713,13 +861,37 @@ class RagService:
                 else:
                     candidate_texts.append(content)
 
-            raw_scores = list(reranker.rerank(query, candidate_texts))
+            # 1. Try OpenRouter Reranker if configured
+            openrouter_key = os.getenv("OPENROUTER_API_KEY", "").strip()
+            reranker_provider = os.getenv("RERANKER_PROVIDER", "").strip().lower()
+            reranker_model = os.getenv("RERANKER_MODEL", "Xenova/ms-marco-MiniLM-L-6-v2").strip()
+
+            is_openrouter_reranker = bool(openrouter_key) and (
+                reranker_provider == "openrouter" or
+                any(prefix in reranker_model.lower() for prefix in ["cohere/", "nvidia/", "qwen/", "jina/"])
+            )
+
+            raw_scores = None
+            if is_openrouter_reranker:
+                target_or_model = reranker_model if ("/" in reranker_model and "xenova" not in reranker_model.lower()) else "cohere/rerank-v3.5"
+                logger.info(f"[RagService] Executing OpenRouter Rerank with model '{target_or_model}'...")
+                raw_scores = cls.rerank_chunks_openrouter(query, candidate_texts, model=target_or_model)
+
+            # 2. Fallback to Local FastEmbed Cross-Encoder ONNX
+            if raw_scores is None:
+                reranker = get_reranker_model()
+                if not reranker:
+                    return chunks[:top_k]
+                raw_scores = list(reranker.rerank(query, candidate_texts))
 
             reranked = []
             for idx, c in enumerate(chunks):
                 raw_score = float(raw_scores[idx]) if idx < len(raw_scores) else 0.0
-                # Numerically stable sigmoid: 1 / (1 + exp(-x))
-                if raw_score >= 0:
+                # If score is already normalized [0.0 - 1.0] (from OpenRouter)
+                if is_openrouter_reranker and 0.0 <= raw_score <= 1.0:
+                    norm_score = raw_score
+                elif raw_score >= 0:
+                    # Numerically stable sigmoid: 1 / (1 + exp(-x))
                     norm_score = float(1.0 / (1.0 + np.exp(-raw_score)))
                 else:
                     z = float(np.exp(raw_score))
@@ -763,10 +935,13 @@ class RagService:
             return []
 
         expanded_query = expand_bilingual_query(query)
-        query_vec = cls.generate_single_embedding(expanded_query)
+        cached_doc_data = cls._get_cached_chunks(db)
+        dominant_model = cached_doc_data.get("dominant_model")
+        query_vec = cls.generate_single_embedding(expanded_query, model_name=dominant_model)
 
-        # Retrieve wider candidate pool for cross-encoder reranking
-        candidate_k = max(top_k * 3, 15) if enable_rerank else top_k
+        # Check global ENABLE_RERANK env setting as well as parameter
+        effective_rerank = enable_rerank and is_rerank_enabled()
+        candidate_k = max(top_k * 3, 15) if effective_rerank else top_k
         candidates = cls._similarity_search(
             db=db,
             query=query,
@@ -776,7 +951,7 @@ class RagService:
             expanded_query=expanded_query
         )
 
-        if not candidates or not enable_rerank:
+        if not candidates or not effective_rerank:
             return candidates[:top_k]
 
         return cls.rerank_chunks(query, candidates, top_k=top_k)
@@ -821,7 +996,7 @@ class RagService:
                 sub_matrix = doc_matrix[indices]
                 sub_norms = doc_norms[indices]
             else:
-                sub_matrix = np.empty((0, 384), dtype=np.float32)
+                sub_matrix = np.empty((0, doc_matrix.shape[1] if doc_matrix.ndim > 1 else 384), dtype=np.float32)
                 sub_norms = np.empty((0,), dtype=np.float32)
         elif document_id == "memory":
             items = list(mem_items)
@@ -830,8 +1005,19 @@ class RagService:
         else:
             items = list(doc_items) + list(mem_items)
             if len(doc_items) > 0 and len(mem_items) > 0:
-                sub_matrix = np.vstack([doc_matrix, mem_matrix])
-                sub_norms = np.concatenate([doc_norms, mem_norms])
+                if doc_matrix.shape[1] == mem_matrix.shape[1]:
+                    sub_matrix = np.vstack([doc_matrix, mem_matrix])
+                    sub_norms = np.concatenate([doc_norms, mem_norms])
+                elif doc_matrix.shape[1] > mem_matrix.shape[1]:
+                    pad_width = doc_matrix.shape[1] - mem_matrix.shape[1]
+                    padded_mem = np.pad(mem_matrix, ((0, 0), (0, pad_width)), mode='constant')
+                    sub_matrix = np.vstack([doc_matrix, padded_mem])
+                    sub_norms = np.concatenate([doc_norms, mem_norms])
+                else:
+                    pad_width = mem_matrix.shape[1] - doc_matrix.shape[1]
+                    padded_doc = np.pad(doc_matrix, ((0, 0), (0, pad_width)), mode='constant')
+                    sub_matrix = np.vstack([padded_doc, mem_matrix])
+                    sub_norms = np.concatenate([doc_norms, mem_norms])
             elif len(doc_items) > 0:
                 sub_matrix = doc_matrix
                 sub_norms = doc_norms
@@ -849,6 +1035,12 @@ class RagService:
             norm_q = 1e-9
 
         q_norm_arr = q_arr / norm_q
+        if sub_matrix.shape[1] != q_norm_arr.shape[0]:
+            if sub_matrix.shape[1] > q_norm_arr.shape[0]:
+                q_norm_arr = np.pad(q_norm_arr, (0, sub_matrix.shape[1] - q_norm_arr.shape[0]), mode='constant')
+            else:
+                q_norm_arr = q_norm_arr[:sub_matrix.shape[1]]
+
         dense_sims = (sub_matrix @ q_norm_arr) / sub_norms
         dense_sims = np.clip(dense_sims, 0.0, 1.0)
 
@@ -1519,16 +1711,47 @@ Pertanyaan Pengguna:
         """
         Invokes LLM with full conversation messages list with persistent connection pooling.
         Priority:
-        1. Groq (Ultra-fast LPU: ~300-600ms latency)
-        2. Google Gemini API (Gemini 2.0 Flash: ~800ms)
-        3. OpenRouter Fallback
+        1. OpenRouter (if OPENROUTER_API_KEY is configured, default: google/gemini-3.7-flash)
+        2. Groq LPU (if GROQ_API_KEY is configured, default: llama-3.3-70b-versatile)
+        3. Google Gemini Direct API (Gemini 2.0 Flash)
         """
         session = get_http_session()
 
-        # 1. Groq (Ultra-Fast LPU Engine)
-        groq_key = os.getenv("GROQ_API_KEY", "").strip()
-        groq_model = os.getenv("GROQ_MODEL", "qwen/qwen3.6-27b").strip()
+        openrouter_key = os.getenv("OPENROUTER_API_KEY", "").strip()
+        openrouter_model = os.getenv("OPENROUTER_MODEL", "google/gemini-3.7-flash").strip()
 
+        groq_key = os.getenv("GROQ_API_KEY", "").strip()
+        groq_model = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile").strip()
+
+        # 1. OpenRouter (Configured with google/gemini-3.7-flash)
+        if openrouter_key:
+            try:
+                resp = session.post(
+                    "https://openrouter.ai/api/v1/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {openrouter_key}",
+                        "Content-Type": "application/json",
+                        "HTTP-Referer": "https://vision.chitrapratama.com",
+                        "X-Title": "Hero Assistant RAG"
+                    },
+                    json={
+                        "model": openrouter_model,
+                        "messages": messages,
+                        "temperature": 0.2,
+                        "max_tokens": 2048
+                    },
+                    timeout=25
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    content = data["choices"][0]["message"]["content"]
+                    return RagService._clean_llm_response(content)
+                else:
+                    logger.warning(f"[RagService] OpenRouter ({openrouter_model}) error {resp.status_code}: {resp.text[:300]}")
+            except Exception as e:
+                logger.error(f"[RagService] OpenRouter call exception: {e}")
+
+        # 2. Groq (Ultra-Fast LPU Engine)
         if groq_key:
             try:
                 payload = {
@@ -1548,7 +1771,7 @@ Pertanyaan Pengguna:
                         "Content-Type": "application/json"
                     },
                     json=payload,
-                    timeout=25
+                    timeout=20
                 )
                 if resp.status_code == 200:
                     data = resp.json()
@@ -1559,37 +1782,7 @@ Pertanyaan Pengguna:
             except Exception as e:
                 logger.error(f"[RagService] Groq call exception: {e}")
 
-        # 2. OpenRouter Fallback
-        openrouter_key = os.getenv("OPENROUTER_API_KEY", "").strip()
-        openrouter_model = os.getenv("OPENROUTER_MODEL", "google/gemma-4-26b-a4b-it:free").strip()
-        if openrouter_key:
-            try:
-                resp = session.post(
-                    "https://openrouter.ai/api/v1/chat/completions",
-                    headers={
-                        "Authorization": f"Bearer {openrouter_key}",
-                        "Content-Type": "application/json",
-                        "HTTP-Referer": "https://vision.chitrapratama.com",
-                        "X-Title": "Hero Assistant RAG"
-                    },
-                    json={
-                        "model": openrouter_model,
-                        "messages": messages,
-                        "temperature": 0.3,
-                        "max_tokens": 2048
-                    },
-                    timeout=30
-                )
-                if resp.status_code == 200:
-                    data = resp.json()
-                    content = data["choices"][0]["message"]["content"]
-                    return RagService._clean_llm_response(content)
-                else:
-                    logger.warning(f"[RagService] OpenRouter error {resp.status_code}: {resp.text[:300]}")
-            except Exception as e:
-                logger.error(f"[RagService] OpenRouter call exception: {e}")
-
-        # 3. Google Gemini Fallback
+        # 3. Google Gemini Direct Fallback
         gemini_key = os.getenv("GEMINI_API_KEY", "").strip()
         if gemini_key:
             try:
@@ -1607,7 +1800,7 @@ Pertanyaan Pengguna:
 
         logger.error("[RagService] All LLM providers failed. Returning fallback message.")
         return (
-            "⚠️ **Catatan Sistem:** Semua LLM provider (Groq, OpenRouter, Gemini) gagal merespons. "
+            "⚠️ **Catatan Sistem:** Semua LLM provider (OpenRouter, Groq, Gemini) gagal merespons. "
             "Periksa log backend untuk detail error.\n\n"
             "Potongan dokumen yang relevan dari pgvector tetap tersedia di panel sumber di bawah."
         )
