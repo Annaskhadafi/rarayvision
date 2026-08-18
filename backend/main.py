@@ -358,15 +358,17 @@ def _prewarm_rag_cache():
     time.sleep(2) # Give DB engine 2s to complete connection pool setup
     try:
         from backend.app.database.database import SessionLocal
-        from backend.app.services.rag_service import RagService, get_fastembed_model
+        from backend.app.services.rag_service import RagService, get_fastembed_model, get_reranker_model
         # 1. Preload FastEmbed ONNX model in RAM
         get_fastembed_model()
-        # 2. Preload chunk embeddings & memory facts into RAM
+        # 2. Preload Reranker model in RAM
+        get_reranker_model()
+        # 3. Preload chunk embeddings & memory facts into RAM
         db = SessionLocal()
         try:
             RagService._get_cached_chunks(db)
             RagService._get_cached_memory_facts(db)
-            print("[RagWarmup] RAG in-memory chunk cache and FastEmbed engine pre-warmed successfully.")
+            print("[RagWarmup] RAG in-memory chunk cache, FastEmbed engine, and Reranker pre-warmed successfully.")
         finally:
             db.close()
     except Exception as e:

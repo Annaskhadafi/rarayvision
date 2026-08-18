@@ -1710,12 +1710,11 @@ Pertanyaan Pengguna:
     def _call_llm_messages(messages: List[Dict[str, str]]) -> str:
         """
         Invokes LLM with full conversation messages list with persistent connection pooling.
-        Priority:
-        1. OpenRouter (if OPENROUTER_API_KEY is configured, default: google/gemini-3.7-flash)
-        2. Groq LPU (if GROQ_API_KEY is configured, default: llama-3.3-70b-versatile)
-        3. Google Gemini Direct API (Gemini 2.0 Flash)
+        Priority is determined by LLM_PROVIDER (default: openrouter -> groq -> gemini).
         """
         session = get_http_session()
+
+        llm_provider = os.getenv("LLM_PROVIDER", "openrouter").strip().lower()
 
         openrouter_key = os.getenv("OPENROUTER_API_KEY", "").strip()
         openrouter_model = os.getenv("OPENROUTER_MODEL", "google/gemini-3.7-flash").strip()
@@ -1723,8 +1722,11 @@ Pertanyaan Pengguna:
         groq_key = os.getenv("GROQ_API_KEY", "").strip()
         groq_model = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile").strip()
 
-        # 1. OpenRouter (Configured with google/gemini-3.7-flash)
-        if openrouter_key:
+        gemini_key = os.getenv("GEMINI_API_KEY", "").strip()
+
+        def try_openrouter():
+            if not openrouter_key:
+                return None
             try:
                 resp = session.post(
                     "https://openrouter.ai/api/v1/chat/completions",
@@ -1750,9 +1752,11 @@ Pertanyaan Pengguna:
                     logger.warning(f"[RagService] OpenRouter ({openrouter_model}) error {resp.status_code}: {resp.text[:300]}")
             except Exception as e:
                 logger.error(f"[RagService] OpenRouter call exception: {e}")
+            return None
 
-        # 2. Groq (Ultra-Fast LPU Engine)
-        if groq_key:
+        def try_groq():
+            if not groq_key:
+                return None
             try:
                 payload = {
                     "model": groq_model,
@@ -1781,10 +1785,11 @@ Pertanyaan Pengguna:
                     logger.warning(f"[RagService] Groq error {resp.status_code}: {resp.text[:300]}")
             except Exception as e:
                 logger.error(f"[RagService] Groq call exception: {e}")
+            return None
 
-        # 3. Google Gemini Direct Fallback
-        gemini_key = os.getenv("GEMINI_API_KEY", "").strip()
-        if gemini_key:
+        def try_gemini():
+            if not gemini_key:
+                return None
             try:
                 from google import genai
                 client = genai.Client(api_key=gemini_key)
@@ -1797,6 +1802,20 @@ Pertanyaan Pengguna:
                     return RagService._clean_llm_response(response.text)
             except Exception as e:
                 logger.error(f"[RagService] Gemini call exception: {e}")
+            return None
+
+        # Execute providers based on LLM_PROVIDER preference
+        if llm_provider == "groq":
+            providers = [try_groq, try_openrouter, try_gemini]
+        elif llm_provider == "gemini":
+            providers = [try_gemini, try_openrouter, try_groq]
+        else:
+            providers = [try_openrouter, try_groq, try_gemini]
+
+        for p in providers:
+            res = p()
+            if res:
+                return res
 
         logger.error("[RagService] All LLM providers failed. Returning fallback message.")
         return (
