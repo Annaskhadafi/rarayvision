@@ -1564,32 +1564,21 @@ class RagService:
 
         combined_context = "\n\n---\n\n".join(context_parts) if context_parts else "Tidak ada dokumen yang relevan ditemukan di basis pengetahuan."
 
-        # 7. Formulate System Prompt & Multi-Turn Message History
+        # 7. Formulate Universal System Prompt & Multi-Turn Message History
         system_instruction = custom_system_prompt or (
-            "Anda adalah Hero Assistant, asisten AI resmi yang cerdas, komprehensif, dan profesional dalam bidang rekayasa teknis, spesifikasi ban (OTR / Earthmover / Radial / Bias), dan standar operasional keselamatan.\n\n"
+            "Anda adalah Hero Assistant, asisten AI resmi yang cerdas, komprehensif, dan profesional dalam menganalisis dokumen perusahaan, Kebijakan K3 (Keselamatan dan Kesehatan Kerja), SOP operasional, pedoman manajemen, spesifikasi teknis, dan data database.\n\n"
             "ATURAN WAJIB FORMAT & AKURASI JAWABAN (STRICT RULES):\n"
-            "1. BAHASA & PEMAHAMAN DWIBAHASA (CODE-MIXING):\n"
-            "   - Pengguna sering bertanya menggunakan campuran Bahasa Indonesia dan istilah teknis Bahasa Inggris (misal: 'cold pressure', 'payload', 'inflation', 'rim width', 'load capacity', 'tread depth').\n"
-            "   - Anda WAJIB memahami kueri campuran tersebut dan mencocokkannya dengan data pada Konteks Dokumen Pengetahuan (yang mungkin berbahasa Inggris).\n"
-            "   - Sampaikan seluruh jawaban akhir dalam Bahasa Indonesia yang baku, terstruktur, komprehensif, dan profesional. Nama merek/model, kode ukuran (contoh: 27.00R49), kode TRA (contoh: E-4, L-5), dan simbol satuan tetap ditulis dalam format standar aslinya.\n"
-            "2. AKURASI TINGGI PADA DATA SPESIFIKASI & TEKANAN ANGIN (PRESSURE):\n"
-            "   - Teliti setiap kolom pada tabel Markdown dalam konteks secara presisi.\n"
-            "   - Bedakan dengan tegas antara satuan Tekanan (Bar vs PSI vs kPa), Ukuran Rim (inch), Kapasitas Beban (kg vs lbs), dan Kecepatan (km/h).\n"
-            "   - Jangan pernah tertukar antara nilai Tekanan dalam Bar (misal: 7.00 bar) dengan nilai dalam PSI (misal: 102 psi) atau ukuran velg/rim.\n"
-            "   - Jika terdapat rekomendasi 'Cold Inflation Pressure' (tekanan dingin) atau variasi tekanan berdasarkan beban (payload) / aplikasi kerja (haulage vs loading), sebutkan secara terperinci.\n"
-            "3. WAJIB TABEL MARKDOWN UNTUK DATA SPESIFIKASI/TABULAR:\n"
-            "   - Jika jawaban memuat data spesifikasi ban, ukuran, tekanan angin, beban muatan, kecepatan, dimensi, atau perbandingan tipe ban, ANDA WAJIB MENYAJIKANNYA DALAM TABEL MARKDOWN LENGKAP & RAPI:\n"
-            "     | Model / Tipe | Ukuran Ban | Star / PR | Rim Width | Cold Pressure (Bar) | Cold Pressure (PSI) | Max Load (kg) |\n"
-            "     | :--- | :--- | :--- | :--- | :--- | :--- | :--- |\n"
-            "     | ... | ... | ... | ... | ... | ... | ... |\n"
-            "   - Untuk prosedur teknis, langkah keselamatan (SOP), atau pembongkaran/pemasangan, gunakan poin-poin bertahap (numbered/bullet points) yang rapi, berurutan, dan jelas.\n"
-            "4. PRIORITAS MEMORI & KOREKSI PENGGUNA (TERTINGGI):\n"
-            "   - Jika terdapat bagian '[Memori & Aturan Khusus yang Dipelajari dari Pengguna]' dalam konteks, Anda WAJIB memprioritaskan informasi tersebut di atas dokumen standar. Jangan pernah mengabaikan memori atau koreksi ini.\n"
-            "5. JANGAN PREMATUR MENYATAKAN 'TIDAK TAHU':\n"
-            "   - Jika tabel atau cuplikan teks di dalam Konteks memuat data model/ukuran/spesifikasi yang ditanyakan, Anda WAJIB menganalisis dan menjawabnya secara lengkap dari data tersebut.\n"
-            "   - Hanya nyatakan informasi belum tercatat jika memang tidak ada data relevan sama sekali di dalam dokumen maupun memori.\n"
-            "6. HANYA JAWABAN AKHIR (NO META-THOUGHTS / NO INTERNAL CHECKLIST):\n"
-            "   - Langsung berikan penjelasan dan jawaban akhir yang bersih, informatif, dan mudah dipahami tanpa menyertakan catatan evaluasi aturan internal atau proses berpikir mentah."
+            "1. ANALISIS MENYELURUH DARI DOKUMEN (GROUNDED ANSWERING):\n"
+            "   - Baca dan pahami seluruh teks dalam Konteks Dokumen Pengetahuan (Markdown) di bawah.\n"
+            "   - Jawab pertanyaan pengguna secara akurat, lengkap, dan detail berlandaskan isi dokumen yang terlampir.\n"
+            "   - Jika pertanyaan mengenai Kebijakan K3 atau peraturan perusahaan, sebutkan poin-poin komitmen, sasaran, tujuan, dan instruksi yang tertulis pada dokumen tersebut secara jelas dan terstruktur.\n"
+            "2. STRUKTUR & BAHASA JAWABAN:\n"
+            "   - Sampaikan seluruh jawaban dalam Bahasa Indonesia yang baku, terstruktur, rapi, dan mudah dipahami.\n"
+            "   - Gunakan format poin-poin (bullet / numbered list) atau tabel Markdown untuk data kebijakan, langkah-langkah, atau spesifikasi teknis.\n"
+            "3. PRIORITAS MEMORI & KOREKSI PENGGUNA:\n"
+            "   - Jika terdapat bagian '[Memori & Aturan Khusus yang Dipelajari dari Pengguna]' dalam konteks, prioritaskan informasi tersebut.\n"
+            "4. LANGSUNG BERIKAN JAWABAN AKHIR (NO META-THOUGHTS):\n"
+            "   - Langsung berikan penjelasan dan jawaban akhir yang bersih, informatif, dan mudah dipahami."
         )
 
         current_prompt = f"""Konteks Dokumen & Memori Pengetahuan (Markdown):
@@ -1644,8 +1633,6 @@ Pertanyaan Pengguna:
         RedisService.save_chat_turn(session_id, "user", query)
         RedisService.save_chat_turn(session_id, "assistant", answer, sources=sources)
 
-        # Chat history is persisted in RagChatMessage/Redis; long-term memory is only saved on user feedback/correction
-
         result = {
             "query": query,
             "answer": answer,
@@ -1667,36 +1654,27 @@ Pertanyaan Pengguna:
     @staticmethod
     def _clean_llm_response(text: str) -> str:
         """
-        Sanitizes LLM output to remove XML reasoning/thought tags, meta-reasoning,
-        and constraint check checklists (e.g. 'Check against Constraints', 'Self-Correction').
+        Sanitizes LLM output to remove XML reasoning/thought tags and clean whitespace.
         """
         if not text:
             return ""
 
-        cleaned = text
-        # 1. Remove XML reasoning/thought tags (<think>...</think>, <thought>...</thought>)
+        cleaned = text.strip()
+        # 1. If output contains closing </think> or </thought>, extract the final answer after it
         if re.search(r'</(?:think|thought)>', cleaned, flags=re.IGNORECASE):
             parts = re.split(r'</(?:think|thought)>', cleaned, flags=re.IGNORECASE)
-            cleaned = parts[-1].strip()
-        else:
-            cleaned = re.sub(r'<(?:think|thought)>[\s\S]*$', '', cleaned, flags=re.IGNORECASE).strip()
+            after = parts[-1].strip()
+            if after:
+                cleaned = after
 
-        # 2. Remove meta-reasoning and constraint check blocks
-        constraint_patterns = [
-            r'(?i)\n*(?:(?:\d+[\.\)]\s*)?(?:Check\s+(?:against\s+)?Constraints?|Constraint\s+Check|Self-[Cc]orrection(?:/Refinement)?|Refinement\s+during\s+thought|Thinking\s+Process|Thought\s+Process|Proses\s+Berpikir|Evaluasi\s+Batasan)[\s\S]*)$',
-            r'(?i)^\s*-\s*(?:Language|Efficient\s*&\s*direct|Bullet\s*points/table|Based\s*on\s*context|Citation|Matches\s*all\s*constraints|Self-Correction).*$\n?',
-            r'(?i)^Here\'s a thinking process:[\s\S]*?\n(?=[A-Z0-9#|•\-])',
-        ]
-        for pattern in constraint_patterns:
-            cleaned = re.sub(pattern, '', cleaned, flags=re.MULTILINE)
+        # 2. Strip leading <think> or <thought> tags
+        cleaned = re.sub(r'^<(?:think|thought)>[\s\S]*?</(?:think|thought)>', '', cleaned, flags=re.IGNORECASE).strip()
+        cleaned = re.sub(r'^(?:<(?:think|thought)>)+', '', cleaned, flags=re.IGNORECASE).strip()
 
         # 3. Clean up excessive whitespace/newlines
         cleaned = re.sub(r'\n{3,}', '\n\n', cleaned).strip()
-        
-        if not cleaned:
-            return "Informasi spesifik mengenai pertanyaan tersebut tidak ditemukan dalam basis pengetahuan dokumen."
 
-        return cleaned
+        return cleaned if cleaned else text.strip()
 
     @staticmethod
     def _call_llm(system_prompt: str, user_prompt: str) -> str:
@@ -1728,6 +1706,19 @@ Pertanyaan Pengguna:
             if not openrouter_key:
                 return None
             try:
+                payload = {
+                    "model": openrouter_model,
+                    "messages": messages,
+                    "temperature": 0.2,
+                    "max_tokens": 4096,
+                }
+                # For Gemini 3.7 Flash and reasoning models on OpenRouter, exclude thought tokens to eliminate long thinking latency (<2s response)
+                if any(x in openrouter_model.lower() for x in ["gemini-3.7", "flash", "reasoning", "deepseek", "qwq"]):
+                    payload["reasoning"] = {
+                        "max_tokens": 0,
+                        "exclude": True
+                    }
+
                 resp = session.post(
                     "https://openrouter.ai/api/v1/chat/completions",
                     headers={
@@ -1736,18 +1727,15 @@ Pertanyaan Pengguna:
                         "HTTP-Referer": "https://vision.chitrapratama.com",
                         "X-Title": "Hero Assistant RAG"
                     },
-                    json={
-                        "model": openrouter_model,
-                        "messages": messages,
-                        "temperature": 0.2,
-                        "max_tokens": 2048
-                    },
+                    json=payload,
                     timeout=25
                 )
                 if resp.status_code == 200:
                     data = resp.json()
                     content = data["choices"][0]["message"]["content"]
-                    return RagService._clean_llm_response(content)
+                    cleaned = RagService._clean_llm_response(content)
+                    if cleaned:
+                        return cleaned
                 else:
                     logger.warning(f"[RagService] OpenRouter ({openrouter_model}) error {resp.status_code}: {resp.text[:300]}")
             except Exception as e:
@@ -1762,7 +1750,7 @@ Pertanyaan Pengguna:
                     "model": groq_model,
                     "messages": messages,
                     "temperature": 0.2,
-                    "max_tokens": 2048,
+                    "max_tokens": 4096,
                 }
                 groq_reasoning_models = ["deepseek", "qwq", "r1"]
                 if any(rm in groq_model.lower() for rm in groq_reasoning_models):
@@ -1780,7 +1768,9 @@ Pertanyaan Pengguna:
                 if resp.status_code == 200:
                     data = resp.json()
                     content = data["choices"][0]["message"]["content"]
-                    return RagService._clean_llm_response(content)
+                    cleaned = RagService._clean_llm_response(content)
+                    if cleaned:
+                        return cleaned
                 else:
                     logger.warning(f"[RagService] Groq error {resp.status_code}: {resp.text[:300]}")
             except Exception as e:
