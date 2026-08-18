@@ -5,7 +5,6 @@ import { authService } from './services/authService'
 import { apiKeyService } from './services/apiKeyService'
 import AppHeader from './components/AppHeader.vue'
 import AppSidebar from './components/AppSidebar.vue'
-import AppFooter from './components/AppFooter.vue'
 
 const isSidebarCollapsed = ref(localStorage.getItem('sidebar_collapsed') === 'true')
 
@@ -39,7 +38,6 @@ onMounted(async () => {
       <main class="content">
         <RouterView />
       </main>
-      <AppFooter v-if="['/', '/dashboard'].includes($route.path)" />
     </div>
   </div>
 </template>
