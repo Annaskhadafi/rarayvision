@@ -207,6 +207,7 @@ async def hero_recognize_face(
 async def hero_verify_face(
     request: Request,
     employee_id: str = Form(...),
+    employee_sn: str = Form(None),
     file: UploadFile = File(...),
     current_user: db_models.User = Depends(get_current_user),
     db_session: Session = Depends(db.get_db)
@@ -218,7 +219,18 @@ async def hero_verify_face(
     from backend.app.services.ml_service import process_register_logic
     import json
     
-    face_id = f"emp-{employee_id}"
+    # Generate candidate ID list to match database records (e.g., '71261', 'emp-71261', 'emp-1215', etc.)
+    emp_str = str(employee_id).strip()
+    candidate_ids = [
+        emp_str,
+        f"emp-{emp_str}",
+        emp_str.replace("emp-", "")
+    ]
+    if employee_sn and str(employee_sn).strip():
+        sn_str = str(employee_sn).strip()
+        candidate_ids.extend([sn_str, f"emp-{sn_str}", sn_str.replace("emp-", "")])
+    
+    candidate_ids = list(dict.fromkeys(candidate_ids))
     
     try:
         contents = await file.read()
@@ -229,10 +241,10 @@ async def hero_verify_face(
         if img is None:
             return {"status": "error", "message": "Invalid or corrupted image"}
 
-        # Get stored embedding for this employee
+        # Get stored embedding for this employee across all candidate aliases
         stored_face = db_session.query(db_models.Face).filter(
             db_models.Face.user_id == current_user.id,
-            db_models.Face.face_id == face_id
+            db_models.Face.face_id.in_(candidate_ids)
         ).first()
 
         if not stored_face:
@@ -264,12 +276,13 @@ async def hero_verify_face(
 
         if verified:
             base_url = str(request.base_url).rstrip("/") if request else ""
-            auto_harvest_face_on_match(img, current_user.id, face_id, base_url)
+            auto_harvest_face_on_match(img, current_user.id, stored_face.face_id, base_url)
 
         return {
             "status": "success",
             "verified": verified,
             "employee_id": employee_id,
+            "face_id": stored_face.face_id,
             "confidence": round(similarity, 4),
             "threshold": THRESHOLD,
         }
@@ -290,10 +303,16 @@ async def hero_face_status(
     current_user: db_models.User = Depends(get_current_user),
     db_session: Session = Depends(db.get_db)
 ):
-    face_id = f"emp-{employee_id}"
+    emp_str = str(employee_id).strip()
+    candidate_ids = list(dict.fromkeys([
+        emp_str,
+        f"emp-{emp_str}",
+        emp_str.replace("emp-", "")
+    ]))
+
     face = db_session.query(db_models.Face).filter(
         db_models.Face.user_id == current_user.id,
-        db_models.Face.face_id == face_id
+        db_models.Face.face_id.in_(candidate_ids)
     ).first()
 
     if not face:
@@ -303,7 +322,7 @@ async def hero_face_status(
         "status": "success",
         "registered": True,
         "employee_id": employee_id,
-        "face_id": face_id,
+        "face_id": face.face_id,
         "registered_at": face.created_at.isoformat() if face.created_at else None
     }
 
@@ -321,9 +340,16 @@ async def hero_unregister_face(
     db_session: Session = Depends(db.get_db)
 ):
     from backend.app.services.ml_service import delete_face_from_db
-    face_id = f"emp-{employee_id}"
+    emp_str = str(employee_id).strip()
+    candidate_ids = list(dict.fromkeys([
+        emp_str,
+        f"emp-{emp_str}",
+        emp_str.replace("emp-", "")
+    ]))
+    
     try:
-        delete_face_from_db(db_session, current_user.id, face_id)
-        return {"status": "success", "message": f"Face for employee {employee_id} deleted", "face_id": face_id}
+        for cid in candidate_ids:
+            delete_face_from_db(db_session, current_user.id, cid)
+        return {"status": "success", "message": f"Face for employee {employee_id} deleted"}
     except Exception as e:
         return {"status": "error", "message": str(e)}

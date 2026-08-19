@@ -78,11 +78,11 @@ def get_face_app(mode: Optional[str] = None):
             if target_mode == 'v2':
                 # CPU Turbo: only run detection and recognition modules (skips 106-point landmark, 3D mesh, and age/gender for ultra-fast CPU inference)
                 app = FaceAnalysis(name=model_name, allowed_modules=['detection', 'recognition'], providers=available_providers)
-                app.prepare(ctx_id=0, det_size=(320, 320))
+                app.prepare(ctx_id=0, det_size=(320, 320), det_thresh=0.4)
             else:
                 # Standard V1
                 app = FaceAnalysis(name=model_name, providers=available_providers)
-                app.prepare(ctx_id=0, det_size=(640, 640))
+                app.prepare(ctx_id=0, det_size=(640, 640), det_thresh=0.4)
             _face_engines[target_mode] = app
             print(f"[+] InsightFace Engine {target_mode.upper()} ({model_name}) loaded successfully!")
         except Exception as e:
