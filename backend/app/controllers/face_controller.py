@@ -22,11 +22,65 @@ from backend.app.services.ml_service import (
     get_tenant_faces,
     save_face_to_db,
     delete_face_from_db,
-    thread_pool
+    thread_pool,
+    get_global_engine_mode,
+    set_global_engine_mode,
+    benchmark_engines_comparison
 )
 from backend.app.schemas.schemas import FeedbackRequest
 
 router = APIRouter(prefix="/api/v1")
+
+def _extract_engine_mode(request: Request, engine: str = None) -> str:
+    if engine and engine.lower() in ["v1", "v2"]:
+        return engine.lower()
+    header_val = request.headers.get("X-Engine-Mode")
+    if header_val and header_val.lower() in ["v1", "v2"]:
+        return header_val.lower()
+    return get_global_engine_mode()
+
+@router.get("/system/engine-mode", tags=["System"])
+async def get_engine_mode_endpoint():
+    mode = get_global_engine_mode()
+    return {
+        "status": "success",
+        "engine_mode": mode,
+        "description": "Engine V2 (CPU Turbo - Buffalo_S & INT8)" if mode == "v2" else "Engine V1 (Standard - Buffalo_L & FP32)"
+    }
+
+@router.post("/system/engine-mode", tags=["System"])
+async def set_engine_mode_endpoint(payload: dict):
+    target_mode = payload.get("engine_mode", "v1").lower()
+    if target_mode not in ["v1", "v2"]:
+        raise HTTPException(status_code=400, detail="Invalid engine_mode. Must be 'v1' or 'v2'.")
+    set_global_engine_mode(target_mode)
+    return {
+        "status": "success",
+        "engine_mode": target_mode,
+        "message": f"Global Face Engine switched to {target_mode.upper()}"
+    }
+
+@router.post(
+    "/faces/benchmark",
+    tags=["Benchmark"],
+    summary="Benchmark Engine V1 vs Engine V2 on an image",
+    description="Runs detection, embedding, and anti-spoofing using both V1 (Standard) and V2 (CPU Turbo) engines and compares latency and similarity."
+)
+async def benchmark_face_endpoint(file: UploadFile = File(...)):
+    try:
+        contents = await file.read()
+        if len(contents) > 10 * 1024 * 1024:
+            return {"status": "error", "message": "File size exceeds limit"}
+        nparr = np.frombuffer(contents, np.uint8)
+        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        if img is None:
+            return {"status": "error", "message": "Invalid or corrupted image"}
+
+        loop = asyncio.get_running_loop()
+        result = await loop.run_in_executor(thread_pool, benchmark_engines_comparison, img)
+        return result
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
 
 @router.post(
     "/faces/liveness",
@@ -43,7 +97,7 @@ Supported detections:
 - Replay attacks
 """
 )
-async def check_liveness_endpoint(file: UploadFile = File(...)):
+async def check_liveness_endpoint(request: Request, file: UploadFile = File(...), engine: str = None):
     try:
         contents = await file.read()
         if len(contents) > 5 * 1024 * 1024:
@@ -52,8 +106,9 @@ async def check_liveness_endpoint(file: UploadFile = File(...)):
         img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
         if img is None: return {"status": "error", "message": "Invalid or corrupted image"}
         
+        mode = _extract_engine_mode(request, engine)
         loop = asyncio.get_running_loop()
-        result = await loop.run_in_executor(thread_pool, process_liveness_only, img)
+        result = await loop.run_in_executor(thread_pool, process_liveness_only, img, mode)
         return result
     except Exception as e:
         return {"status": "error", "message": str(e)}
@@ -69,8 +124,10 @@ using ArcFace similarity matching.
 """
 )
 async def compare_face_endpoint(
+    request: Request,
     user_id: str = Form(None),
     file: UploadFile = File(...),
+    engine: str = None,
     current_user: db_models.User = Depends(get_current_user),
     db_session: Session = Depends(db.get_db)
 ):
@@ -82,9 +139,10 @@ async def compare_face_endpoint(
         img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
         if img is None: return {"status": "error", "message": "Invalid or corrupted image"}
 
+        mode = _extract_engine_mode(request, engine)
         tenant_faces = get_tenant_faces(db_session, current_user.id)
         loop = asyncio.get_running_loop()
-        result = await loop.run_in_executor(thread_pool, process_compare_logic, img, user_id, tenant_faces)
+        result = await loop.run_in_executor(thread_pool, process_compare_logic, img, user_id, tenant_faces, mode)
         return result
     except Exception as e:
         return {"status": "error", "message": str(e)}
@@ -103,7 +161,7 @@ Extract:
 - Age estimation
 """
 )
-async def extract_face_endpoint(file: UploadFile = File(...)):
+async def extract_face_endpoint(request: Request, file: UploadFile = File(...), engine: str = None):
     try:
         contents = await file.read()
         if len(contents) > 5 * 1024 * 1024:
@@ -112,8 +170,9 @@ async def extract_face_endpoint(file: UploadFile = File(...)):
         img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
         if img is None: return {"status": "error", "message": "Invalid or corrupted image"}
         
+        mode = _extract_engine_mode(request, engine)
         loop = asyncio.get_running_loop()
-        result = await loop.run_in_executor(thread_pool, lambda: process_register_logic(img, check_spoof=False))
+        result = await loop.run_in_executor(thread_pool, lambda: process_register_logic(img, check_spoof=False, engine_mode=mode))
         return result
     except Exception as e:
         return {"status": "error", "message": str(e)}
@@ -502,7 +561,14 @@ Real-time face recognition supporting multiple modes:
 **Note:** This endpoint is exclusively designed to process real-time live streaming frames directly from a camera. It does NOT support processing raw image file uploads.
 """
 )
-async def recognize_live_endpoint(file: UploadFile = File(...), mode: str = Form("identify"), current_user: db_models.User = Depends(get_current_user), db_session: Session = Depends(db.get_db)):
+async def recognize_live_endpoint(
+    request: Request,
+    file: UploadFile = File(...),
+    mode: str = Form("identify"),
+    engine: str = None,
+    current_user: db_models.User = Depends(get_current_user),
+    db_session: Session = Depends(db.get_db)
+):
     try:
         contents = await file.read()
         if len(contents) > 5 * 1024 * 1024:
@@ -512,12 +578,14 @@ async def recognize_live_endpoint(file: UploadFile = File(...), mode: str = Form
         if img is None:
             return {"status": "error", "message": "Invalid or corrupted image"}
 
+        engine_mode = _extract_engine_mode(request, engine)
         loop = asyncio.get_running_loop()
         tenant_faces = get_tenant_faces(db_session, current_user.id)
-        result = await loop.run_in_executor(thread_pool, process_recognize_live, img, tenant_faces, mode)
+        result = await loop.run_in_executor(thread_pool, process_recognize_live, img, tenant_faces, mode, engine_mode)
         return result
     except Exception as e:
         return {"status": "error", "message": str(e)}
+
 @router.post(
     "/faces/recognize",
     tags=["Recognition"],
@@ -527,7 +595,13 @@ Perform 1:N face identification using ArcFace embeddings
 powered by Buffalo-L (InsightFace).
 """
 )
-async def recognize_endpoint(file: UploadFile = File(...), current_user: db_models.User = Depends(get_current_user), db_session: Session = Depends(db.get_db)):
+async def recognize_endpoint(
+    request: Request,
+    file: UploadFile = File(...),
+    engine: str = None,
+    current_user: db_models.User = Depends(get_current_user),
+    db_session: Session = Depends(db.get_db)
+):
     try:
         contents = await file.read()
         if len(contents) > 5 * 1024 * 1024:
@@ -536,9 +610,10 @@ async def recognize_endpoint(file: UploadFile = File(...), current_user: db_mode
         img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
         if img is None: return {"status": "error", "message": "Invalid or corrupted image"}
         
+        engine_mode = _extract_engine_mode(request, engine)
         loop = asyncio.get_running_loop()
         tenant_faces = get_tenant_faces(db_session, current_user.id)
-        result = await loop.run_in_executor(thread_pool, process_recognize_logic, img, tenant_faces)
+        result = await loop.run_in_executor(thread_pool, process_recognize_logic, img, tenant_faces, engine_mode)
         return result
     except Exception as e:
         return {"status": "error", "message": str(e)}
@@ -552,7 +627,13 @@ Perform 1:N face identification for **multiple faces** present in an uploaded ra
 This endpoint returns an array of recognized faces along with their bounding boxes.
 """
 )
-async def recognize_multi_endpoint(file: UploadFile = File(...), current_user: db_models.User = Depends(get_current_user), db_session: Session = Depends(db.get_db)):
+async def recognize_multi_endpoint(
+    request: Request,
+    file: UploadFile = File(...),
+    engine: str = None,
+    current_user: db_models.User = Depends(get_current_user),
+    db_session: Session = Depends(db.get_db)
+):
     try:
         contents = await file.read()
         if len(contents) > 5 * 1024 * 1024:
@@ -561,9 +642,10 @@ async def recognize_multi_endpoint(file: UploadFile = File(...), current_user: d
         img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
         if img is None: return {"status": "error", "message": "Invalid or corrupted image"}
         
+        engine_mode = _extract_engine_mode(request, engine)
         loop = asyncio.get_running_loop()
         tenant_faces = get_tenant_faces(db_session, current_user.id)
-        result = await loop.run_in_executor(thread_pool, process_recognize_multi, img, tenant_faces)
+        result = await loop.run_in_executor(thread_pool, process_recognize_multi, img, tenant_faces, engine_mode)
         return result
     except Exception as e:
         return {"status": "error", "message": str(e)}
@@ -577,7 +659,13 @@ Perform 1:N face identification for **multiple faces** present in a live streami
 **Note:** This endpoint is exclusively designed for live camera feeds, returning an array of recognized faces.
 """
 )
-async def recognize_live_multi_endpoint(file: UploadFile = File(...), current_user: db_models.User = Depends(get_current_user), db_session: Session = Depends(db.get_db)):
+async def recognize_live_multi_endpoint(
+    request: Request,
+    file: UploadFile = File(...),
+    engine: str = None,
+    current_user: db_models.User = Depends(get_current_user),
+    db_session: Session = Depends(db.get_db)
+):
     try:
         contents = await file.read()
         if len(contents) > 5 * 1024 * 1024:
@@ -587,9 +675,10 @@ async def recognize_live_multi_endpoint(file: UploadFile = File(...), current_us
         if img is None:
             return {"status": "error", "message": "Invalid or corrupted image"}
 
+        engine_mode = _extract_engine_mode(request, engine)
         loop = asyncio.get_running_loop()
         tenant_faces = get_tenant_faces(db_session, current_user.id)
-        result = await loop.run_in_executor(thread_pool, process_recognize_multi, img, tenant_faces)
+        result = await loop.run_in_executor(thread_pool, process_recognize_multi, img, tenant_faces, engine_mode)
         return result
     except Exception as e:
         return {"status": "error", "message": str(e)}

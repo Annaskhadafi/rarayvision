@@ -19,11 +19,19 @@ from insightface.app import FaceAnalysis
 import onnxruntime as ort
 import json
 import base64
+import time
+from typing import Optional, Dict, Any, List
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
 from backend.app.database import database as db
 from backend.app.database import models as db_models
-from backend.app.core.config import ANTI_SPOOF_MODEL_PATH, EMOTION_MODEL_PATH
+from backend.app.core.config import (
+    ANTI_SPOOF_MODEL_PATH,
+    ANTI_SPOOF_INT8_MODEL_PATH,
+    EMOTION_MODEL_PATH,
+    EMOTION_INT8_MODEL_PATH,
+    DEFAULT_FACE_ENGINE_MODE
+)
 import uuid
 import requests
 
@@ -41,38 +49,81 @@ if 'CUDAExecutionProvider' in ort.get_available_providers():
 else:
     print("[i] No GPU detected. Running ML models on CPU (1 thread per worker).")
 
-# --- 1. LOAD MODEL DETEKSI WAJAH (InsightFace) ---
-print("[*] Loading InsightFace Models...")
+# --- DUAL-ENGINE ARCHITECTURE STATE ---
+_active_engine_mode = DEFAULT_FACE_ENGINE_MODE if DEFAULT_FACE_ENGINE_MODE in ["v1", "v2"] else "v1"
+_face_engines: Dict[str, Any] = {"v1": None, "v2": None}
+_spoof_sessions: Dict[str, Any] = {"v1": None, "v2": None}
+_emotion_sessions: Dict[str, Any] = {"v1": None, "v2": None}
+
+def set_global_engine_mode(mode: str) -> str:
+    global _active_engine_mode
+    if mode in ["v1", "v2"]:
+        _active_engine_mode = mode
+        print(f"[Engine] Global Face Engine switched to: {_active_engine_mode.upper()}")
+        # Pre-warm target engine
+        get_face_app(_active_engine_mode)
+        get_spoof_session(_active_engine_mode)
+    return _active_engine_mode
+
+def get_global_engine_mode() -> str:
+    return _active_engine_mode
+
+def get_face_app(mode: Optional[str] = None):
+    target_mode = mode if mode in ["v1", "v2"] else _active_engine_mode
+    if _face_engines[target_mode] is None:
+        model_name = 'buffalo_l' if target_mode == 'v1' else 'buffalo_s'
+        print(f"[*] Initializing InsightFace Engine {target_mode.upper()} ({model_name})...")
+        try:
+            app = FaceAnalysis(name=model_name, providers=available_providers)
+            app.prepare(ctx_id=0, det_size=(640, 640))
+            _face_engines[target_mode] = app
+            print(f"[+] InsightFace Engine {target_mode.upper()} ({model_name}) loaded successfully!")
+        except Exception as e:
+            print(f"[-] Failed to load InsightFace Engine {target_mode.upper()} ({model_name}): {e}")
+            if target_mode != "v1" and _face_engines.get("v1") is not None:
+                return _face_engines["v1"]
+    return _face_engines[target_mode]
+
+def get_spoof_session(mode: Optional[str] = None):
+    target_mode = mode if mode in ["v1", "v2"] else _active_engine_mode
+    if _spoof_sessions[target_mode] is None:
+        path = ANTI_SPOOF_MODEL_PATH if target_mode == "v1" else ANTI_SPOOF_INT8_MODEL_PATH
+        if not os.path.exists(path) and target_mode == "v2":
+            path = ANTI_SPOOF_MODEL_PATH
+        if os.path.exists(path):
+            try:
+                _spoof_sessions[target_mode] = ort.InferenceSession(path, sess_options=ort_session_options, providers=available_providers)
+                print(f"[+] Anti-Spoofing session {target_mode.upper()} loaded from {os.path.basename(path)}!")
+            except Exception as e:
+                print(f"[-] Error loading Anti-Spoofing session {target_mode.upper()}: {e}")
+    return _spoof_sessions[target_mode]
+
+def get_emotion_session(mode: Optional[str] = None):
+    target_mode = mode if mode in ["v1", "v2"] else _active_engine_mode
+    if _emotion_sessions[target_mode] is None:
+        path = EMOTION_MODEL_PATH if target_mode == "v1" else EMOTION_INT8_MODEL_PATH
+        if not os.path.exists(path) and target_mode == "v2":
+            path = EMOTION_MODEL_PATH
+        if os.path.exists(path):
+            try:
+                _emotion_sessions[target_mode] = ort.InferenceSession(path, sess_options=ort_session_options, providers=available_providers)
+                print(f"[+] Emotion session {target_mode.upper()} loaded from {os.path.basename(path)}!")
+            except Exception as e:
+                print(f"[-] Error loading Emotion session {target_mode.upper()}: {e}")
+    return _emotion_sessions[target_mode]
+
+# Preload the default active engine on startup
+print(f"[*] Preloading Default Face Engine ({_active_engine_mode.upper()})...")
 try:
-    face_app = FaceAnalysis(name='buffalo_l', providers=available_providers)
-    face_app.prepare(ctx_id=0, det_size=(640, 640))
-    print("[+] InsightFace loaded successfully!")
+    get_face_app(_active_engine_mode)
+    get_spoof_session(_active_engine_mode)
 except Exception as e:
-    print(f"[-] Failed to load InsightFace: {e}")
+    print(f"[-] Preload warning: {e}")
 
-# --- 2. LOAD MODEL ANTI-SPOOFING & EMOTION (ONNX) ---
-spoof_session = None
-emotion_session = None
-
-print(f"[*] Loading Anti-Spoofing Model ({ANTI_SPOOF_MODEL_PATH})...")
-if os.path.exists(ANTI_SPOOF_MODEL_PATH):
-    try:
-        spoof_session = ort.InferenceSession(ANTI_SPOOF_MODEL_PATH, sess_options=ort_session_options, providers=available_providers)
-        print(f"[+] Anti-Spoofing ONNX loaded successfully!")
-    except Exception as e:
-        print(f"[-] Error saat load ONNX: {e}")
-else:
-    print(f"[!] PERINGATAN: File {ANTI_SPOOF_MODEL_PATH} TIDAK DITEMUKAN! Fitur Liveness akan menggunakan fallback sederhana.")
-
-print(f"[*] Loading Emotion Model ({EMOTION_MODEL_PATH})...")
-if os.path.exists(EMOTION_MODEL_PATH):
-    try:
-        emotion_session = ort.InferenceSession(EMOTION_MODEL_PATH, sess_options=ort_session_options, providers=available_providers)
-        print("[+] Emotion ONNX loaded successfully!")
-    except Exception as e:
-        print(f"[-] Error saat load Emotion Model: {e}")
-else:
-    print(f"[!] PERINGATAN: File {EMOTION_MODEL_PATH} TIDAK DITEMUKAN!")
+# Backward-compatibility alias
+face_app = get_face_app("v1")
+spoof_session = get_spoof_session("v1")
+emotion_session = get_emotion_session("v1")
 
 # Thread Pool untuk memproses gambar di background (diatur ke 2 worker untuk mencegah CPU 100%)
 thread_pool = ThreadPoolExecutor(max_workers=2)
@@ -203,9 +254,10 @@ def crop_face_for_spoof(img, bbox, kps=None, scale=2.7):
             
     return cropped
 
-def check_liveness(img, bbox, kps=None):
+def check_liveness(img, bbox, kps=None, engine_mode: Optional[str] = None):
     """Main liveness verification function — model: MiniFASNetV2 (80x80, 3-class)"""
-    if spoof_session:
+    session = get_spoof_session(engine_mode)
+    if session:
         try:
             # Scale 2.7 adalah standar MiniFASNet
             face_roi = crop_face_for_spoof(img, bbox, kps=kps, scale=2.7)
@@ -220,14 +272,13 @@ def check_liveness(img, bbox, kps=None):
             # HWC -> CHW -> NCHW
             face_roi_bgr = np.expand_dims(face_roi_bgr.transpose(2, 0, 1), axis=0)
 
-            input_name = spoof_session.get_inputs()[0].name
-            outputs = spoof_session.run(None, {input_name: face_roi_bgr})
+            input_name = session.get_inputs()[0].name
+            outputs = session.run(None, {input_name: face_roi_bgr})
 
             prediction = outputs[0]
             # Softmax
             exp_pred = np.exp(prediction - np.max(prediction, axis=1, keepdims=True))
             probs = exp_pred / np.sum(exp_pred, axis=1, keepdims=True)
-            print(f"DEBUG PROBS: {probs[0]}")
             # index 1 = Real, index 0/2 = Spoof
             real_score = float(probs[0][1])
             is_real = real_score > 0.55
@@ -266,20 +317,20 @@ def compute_similarity(embed1, embed2):
 
 # ================= LOGIC FUNCTIONS (THREAD SAFE) =================
 
-def process_image_sync(img):
+def process_image_sync(img, engine_mode: Optional[str] = None):
     """Logic untuk Socket.IO /analyze-face (General Analysis)"""
-    faces = face_app.get(img)
+    active_app = get_face_app(engine_mode)
+    faces = active_app.get(img) if active_app else []
     
     # --- VALIDASI JUMLAH WAJAH ---
     if len(faces) > 1:
-        # Kembalikan list kosong atau status khusus agar frontend tidak bingung
-        # Di sini kita return list kosong agar tidak ada kotak hijau yang digambar
         return [] 
         
     results = []
+    current_mode = engine_mode or _active_engine_mode
     
     for face in faces:
-        liveness_score, is_real = check_liveness(img, face.bbox, kps=face.kps)
+        liveness_score, is_real = check_liveness(img, face.bbox, kps=face.kps, engine_mode=current_mode)
         gender = "Laki-laki" if face.gender == 1 else "Perempuan"
         
         raw_age = int(getattr(face, "age", 0)) if getattr(face, "age", 0) is not None and getattr(face, "age", 0) != -1 else 0
@@ -297,14 +348,16 @@ def process_image_sync(img):
             "liveness": {
                 "score": liveness_score,
                 "is_real": is_real,
-                "method": "MiniFASNetV2" if spoof_session else "Laplacian"
+                "method": "MiniFASNetV2" if get_spoof_session(current_mode) else "Laplacian"
             }
         })
     return results
 
-def process_liveness_only(img):
+def process_liveness_only(img, engine_mode: Optional[str] = None):
     """Logic untuk Endpoint /check-liveness"""
-    faces = face_app.get(img)
+    start_t = time.perf_counter()
+    active_app = get_face_app(engine_mode)
+    faces = active_app.get(img) if active_app else []
     
     if len(faces) == 0:
         return {"status": "error", "message": "Face not detected"}
@@ -315,18 +368,22 @@ def process_liveness_only(img):
     
     # Process only one face (faces[0])
     face = faces[0]
-    
-    score, is_real = check_liveness(img, face.bbox, kps=face.kps)
+    current_mode = engine_mode or _active_engine_mode
+    score, is_real = check_liveness(img, face.bbox, kps=face.kps, engine_mode=current_mode)
+    latency_ms = round((time.perf_counter() - start_t) * 1000, 2)
     
     return {
         "status": "success",
         "is_real": is_real,
-        "score": score
+        "score": score,
+        "engine_mode": current_mode,
+        "latency_ms": latency_ms
     }
 
-def process_register_live(img, check_spoof=True):
+def process_register_live(img, check_spoof=True, engine_mode: Optional[str] = None):
     """Register dari live camera"""
-    faces = face_app.get(img)
+    active_app = get_face_app(engine_mode)
+    faces = active_app.get(img) if active_app else []
     
     if len(faces) == 0:
         return {"status": "error", "message": "Face not detected"}
@@ -336,9 +393,10 @@ def process_register_live(img, check_spoof=True):
     
     face = faces[0]
     score = 1.0
+    current_mode = engine_mode or _active_engine_mode
     
     if check_spoof:
-        score, is_real = check_liveness(img, face.bbox, kps=face.kps)
+        score, is_real = check_liveness(img, face.bbox, kps=face.kps, engine_mode=current_mode)
         if not is_real:
             return {
                 "status": "error",
@@ -348,12 +406,14 @@ def process_register_live(img, check_spoof=True):
     return {
         "status": "success",
         "embedding": face.embedding.tolist(),
-        "liveness_score": score
+        "liveness_score": score,
+        "engine_mode": current_mode
     }
 
-def process_register_logic(img, check_spoof=True):
+def process_register_logic(img, check_spoof=True, engine_mode: Optional[str] = None):
     """Logic untuk Endpoint /extract-face (Register)"""
-    faces = face_app.get(img)
+    active_app = get_face_app(engine_mode)
+    faces = active_app.get(img) if active_app else []
     
     if len(faces) == 0:
         return {"status": "error", "message": "Face not detected in the image"}
@@ -363,26 +423,30 @@ def process_register_logic(img, check_spoof=True):
     
     face = faces[0]
     score = 1.0
+    current_mode = engine_mode or _active_engine_mode
 
     # Liveness check opsional
     if check_spoof:
-        score, is_real = check_liveness(img, face.bbox, kps=face.kps)
+        score, is_real = check_liveness(img, face.bbox, kps=face.kps, engine_mode=current_mode)
         if not is_real:
             return {"status": "error", "message": "Spoof face or screen detected"}
 
     return {
         "status": "success",
         "embedding": face.embedding.tolist(),
-        "liveness_score": score
+        "liveness_score": score,
+        "engine_mode": current_mode
     }
 
-def process_compare_logic(img, user_id, tenant_faces):
+def process_compare_logic(img, user_id, tenant_faces, engine_mode: Optional[str] = None):
     """Logic for /compare-face endpoint (1:1 verification)"""
+    start_t = time.perf_counter()
     if not user_id:
         user_id = "face_" + uuid.uuid4().hex[:8]
     known_faces_db = tenant_faces
     
-    faces = face_app.get(img)
+    active_app = get_face_app(engine_mode)
+    faces = active_app.get(img) if active_app else []
     
     if len(faces) == 0:
         return {"status": "error", "message": "Face not detected"}
@@ -392,11 +456,6 @@ def process_compare_logic(img, user_id, tenant_faces):
         return {"status": "error", "message": "Multiple faces detected. Please ensure only one face is visible."}
     
     target_face = faces[0]
-    
-    # Liveness check disabled as requested
-    # score_liveness, is_real = check_liveness(img, target_face.bbox, kps=target_face.kps)
-    # if not is_real:
-    #     return {"status": "error", "message": "Spoof face detected"}
 
     # 1. Search in RAM
     user_data = next((u for u in known_faces_db if str(u["id"]) == str(user_id)), None)
@@ -410,28 +469,34 @@ def process_compare_logic(img, user_id, tenant_faces):
 
     # 3. Bandingkan
     similarity = compute_similarity(target_face.embedding, target_embedding_db)
-    
     THRESHOLD = 0.45 
+    latency_ms = round((time.perf_counter() - start_t) * 1000, 2)
+    current_mode = engine_mode or _active_engine_mode
     
     if similarity > THRESHOLD:
         return {
             "status": "success",
             "match": True,
             "similarity": float(similarity),
-            "message": "Face matched"
+            "message": "Face matched",
+            "engine_mode": current_mode,
+            "latency_ms": latency_ms
         }
     else:
         return {
             "status": "success",
             "match": False,
             "similarity": float(similarity),
-            "message": "Face did not match"
+            "message": "Face did not match",
+            "engine_mode": current_mode,
+            "latency_ms": latency_ms
         }
 
-def process_recognize_live(img, tenant_faces, mode="identify"):
-    cv2.imwrite("/tmp/last_live_frame.jpg", img)
+def process_recognize_live(img, tenant_faces, mode="identify", engine_mode: Optional[str] = None):
     """Logic for /recognize-live endpoint supporting multi-mode (identify, analyze, liveness)"""
-    faces = face_app.get(img)
+    start_t = time.perf_counter()
+    active_app = get_face_app(engine_mode)
+    faces = active_app.get(img) if active_app else []
     if len(faces) == 0:
         return {"status": "error", "message": "Face not detected"}
 
@@ -440,7 +505,8 @@ def process_recognize_live(img, tenant_faces, mode="identify"):
 
     target_face = faces[0]
     bbox = target_face.bbox.astype(int).tolist()
-    landmarks = target_face.kps.astype(int).tolist()
+    landmarks = target_face.kps.astype(int).tolist() if hasattr(target_face, "kps") and target_face.kps is not None else []
+    current_mode = engine_mode or _active_engine_mode
     
     base_data = {"bbox": bbox, "landmarks": landmarks}
 
@@ -457,6 +523,8 @@ def process_recognize_live(img, tenant_faces, mode="identify"):
         return {
             "status": "success",
             "mode": mode,
+            "engine_mode": current_mode,
+            "latency_ms": round((time.perf_counter() - start_t) * 1000, 2),
             "data": {
                 **base_data,
                 "age": max(1, calibrated_age),
@@ -465,10 +533,12 @@ def process_recognize_live(img, tenant_faces, mode="identify"):
         }
         
     if mode == "liveness":
-        real_score, is_real = check_liveness(img, target_face.bbox, kps=target_face.kps)
+        real_score, is_real = check_liveness(img, target_face.bbox, kps=target_face.kps, engine_mode=current_mode)
         return {
             "status": "success",
             "mode": mode,
+            "engine_mode": current_mode,
+            "latency_ms": round((time.perf_counter() - start_t) * 1000, 2),
             "data": {
                 **base_data,
                 "liveness_score": float(real_score),
@@ -477,11 +547,13 @@ def process_recognize_live(img, tenant_faces, mode="identify"):
         }
 
     if mode == "liveness_identify":
-        real_score, is_real = check_liveness(img, target_face.bbox, kps=target_face.kps)
+        real_score, is_real = check_liveness(img, target_face.bbox, kps=target_face.kps, engine_mode=current_mode)
         if not is_real:
             return {
                 "status": "success",
                 "mode": mode,
+                "engine_mode": current_mode,
+                "latency_ms": round((time.perf_counter() - start_t) * 1000, 2),
                 "data": {
                     **base_data,
                     "liveness_score": float(real_score),
@@ -505,6 +577,8 @@ def process_recognize_live(img, tenant_faces, mode="identify"):
         if best_score > 0.50:
             return {
                 "status": "success", "match": True, "mode": mode,
+                "engine_mode": current_mode,
+                "latency_ms": round((time.perf_counter() - start_t) * 1000, 2),
                 "data": {
                     **base_data,
                     "liveness_score": float(real_score),
@@ -517,6 +591,8 @@ def process_recognize_live(img, tenant_faces, mode="identify"):
         else:
             return {
                 "status": "success", "match": False, "mode": mode,
+                "engine_mode": current_mode,
+                "latency_ms": round((time.perf_counter() - start_t) * 1000, 2),
                 "data": {
                     **base_data,
                     "liveness_score": float(real_score),
@@ -527,11 +603,11 @@ def process_recognize_live(img, tenant_faces, mode="identify"):
                 }
             }
 
-        
     if mode == "emotion":
         emotion_result = "Unknown"
         emotion_score = 0.0
-        if emotion_session:
+        active_emotion_sess = get_emotion_session(current_mode)
+        if active_emotion_sess:
             x1, y1, x2, y2 = target_face.bbox.astype(int)
             raw_face_roi = img[y1:y2, x1:x2]
             if raw_face_roi.size > 0:
@@ -540,7 +616,7 @@ def process_recognize_live(img, tenant_faces, mode="identify"):
                 input_data = np.expand_dims(np.expand_dims(resized_face, axis=0), axis=0).astype(np.float32)
                 
                 try:
-                    outputs = emotion_session.run(None, {emotion_session.get_inputs()[0].name: input_data})
+                    outputs = active_emotion_sess.run(None, {active_emotion_sess.get_inputs()[0].name: input_data})
                     logits = outputs[0][0]
                     exp_pred = np.exp(logits - np.max(logits))
                     probs = exp_pred / np.sum(exp_pred)
@@ -555,6 +631,8 @@ def process_recognize_live(img, tenant_faces, mode="identify"):
         return {
             "status": "success",
             "mode": mode,
+            "engine_mode": current_mode,
+            "latency_ms": round((time.perf_counter() - start_t) * 1000, 2),
             "data": {
                 **base_data,
                 "emotion": emotion_result,
@@ -572,7 +650,7 @@ def process_recognize_live(img, tenant_faces, mode="identify"):
         if raw_face_roi.size > 0:
             gray_face = cv2.cvtColor(raw_face_roi, cv2.COLOR_BGR2GRAY)
             
-            # Deteksi kacamata menggunakan edge density pada area mata (lebih akurat daripada Haar Cascade)
+            # Deteksi kacamata menggunakan edge density pada area mata
             h, w = gray_face.shape
             eyes_roi = gray_face[int(h*0.2):int(h*0.55), :]
             if eyes_roi.size > 0:
@@ -581,20 +659,16 @@ def process_recognize_live(img, tenant_faces, mode="identify"):
                 density = np.sum(edges > 0) / edges.size
                 glasses_detected = bool(density > 0.05)
             
-            # Heuristik sederhana deteksi masker menggunakan deteksi senyum/mulut
-            # Jika hidung dan mulut tertutup, cascade smile/mulut biasanya gagal mendeteksi
             smile_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_smile.xml')
-            
-            # Cek di bagian bawah wajah saja
             lower_face = gray_face[int(h/2):h, 0:w]
             smiles = smile_cascade.detectMultiScale(lower_face, scaleFactor=1.2, minNeighbors=3)
-            
-            # Jika tidak ada mulut/senyum yang terdeteksi di bagian bawah wajah, kita asumsikan pakai masker
             mask_detected = bool(len(smiles) == 0)
 
         return {
             "status": "success",
             "mode": mode,
+            "engine_mode": current_mode,
+            "latency_ms": round((time.perf_counter() - start_t) * 1000, 2),
             "data": {
                 **base_data,
                 "glasses": glasses_detected,
@@ -603,7 +677,6 @@ def process_recognize_live(img, tenant_faces, mode="identify"):
         }
 
     # Default to identify mode
-
     target_embedding = target_face.embedding
     best_score = 0
     best_match = None
@@ -617,6 +690,8 @@ def process_recognize_live(img, tenant_faces, mode="identify"):
     if best_score > 0.50:
         return {
             "status": "success", "match": True, "mode": mode,
+            "engine_mode": current_mode,
+            "latency_ms": round((time.perf_counter() - start_t) * 1000, 2),
             "data": {
                 "id": best_match['id'], 
                 "name": best_match['name'], 
@@ -629,14 +704,17 @@ def process_recognize_live(img, tenant_faces, mode="identify"):
             "status": "success", 
             "match": False, 
             "mode": mode,
+            "engine_mode": current_mode,
+            "latency_ms": round((time.perf_counter() - start_t) * 1000, 2),
             "message": "Face not recognized",
             "data": base_data
         }
 
-def process_recognize_logic(img, tenant_faces):
+def process_recognize_logic(img, tenant_faces, engine_mode: Optional[str] = None):
     """Logic for /recognize endpoint (1:N identification)"""
-
-    faces = face_app.get(img)
+    start_t = time.perf_counter()
+    active_app = get_face_app(engine_mode)
+    faces = active_app.get(img) if active_app else []
     if len(faces) == 0:
         return {"status": "error", "message": "Face not detected"}
     
@@ -645,12 +723,6 @@ def process_recognize_logic(img, tenant_faces):
         return {"status": "error", "message": "Multiple faces detected."}
     
     target_face = faces[0]
-    # Liveness check disabled as requested
-    # score, is_real = check_liveness(img, target_face.bbox)
-    # 
-    # if not is_real:
-    #     return {"status": "error", "message": "Spoof face detected"}
-
     target_embedding = target_face.embedding
     best_score = 0
     best_match = None
@@ -661,18 +733,27 @@ def process_recognize_logic(img, tenant_faces):
             best_score = sim
             best_match = user
             
+    current_mode = engine_mode or _active_engine_mode
+    latency_ms = round((time.perf_counter() - start_t) * 1000, 2)
     if best_score > 0.50:
         return {
             "status": "success", "match": True,
-            "data": { "id": best_match['id'], "name": best_match['name'], "similarity": float(best_score) }
+            "data": { "id": best_match['id'], "name": best_match['name'], "similarity": float(best_score) },
+            "engine_mode": current_mode,
+            "latency_ms": latency_ms
         }
     else:
-        return { "status": "success", "match": False, "message": "Face not recognized" }
+        return { 
+            "status": "success", "match": False, "message": "Face not recognized",
+            "engine_mode": current_mode,
+            "latency_ms": latency_ms
+        }
 
-def process_recognize_multi(img, tenant_faces):
+def process_recognize_multi(img, tenant_faces, engine_mode: Optional[str] = None):
     """Logic for /recognize-multi and /recognize-live-multi endpoint (multi-face identification)"""
-
-    faces = face_app.get(img)
+    start_t = time.perf_counter()
+    active_app = get_face_app(engine_mode)
+    faces = active_app.get(img) if active_app else []
     if len(faces) == 0:
         return {"status": "error", "message": "Face not detected"}
     
@@ -680,7 +761,7 @@ def process_recognize_multi(img, tenant_faces):
 
     for target_face in faces:
         bbox = target_face.bbox.astype(int).tolist()
-        landmarks = target_face.kps.astype(int).tolist()
+        landmarks = target_face.kps.astype(int).tolist() if hasattr(target_face, "kps") and target_face.kps is not None else []
         target_embedding = target_face.embedding
         
         base_data = {"bbox": bbox, "landmarks": landmarks}
@@ -711,15 +792,19 @@ def process_recognize_multi(img, tenant_faces):
                 "data": base_data
             })
 
+    current_mode = engine_mode or _active_engine_mode
     return {
         "status": "success",
         "mode": "identify_multi",
+        "engine_mode": current_mode,
+        "latency_ms": round((time.perf_counter() - start_t) * 1000, 2),
         "faces": results
     }
 
-def process_global_face_login(img, db_session):
+def process_global_face_login(img, db_session, engine_mode: Optional[str] = None):
     """Logic for global face login"""
-    faces = face_app.get(img)
+    active_app = get_face_app(engine_mode)
+    faces = active_app.get(img) if active_app else []
     if len(faces) == 0:
         return {"status": "error", "message": "Face not detected"}
     
@@ -728,13 +813,13 @@ def process_global_face_login(img, db_session):
     
     target_face = faces[0]
     target_embedding = target_face.embedding
+    current_mode = engine_mode or _active_engine_mode
     
     # --- CHECK LIVENESS ---
-    liveness_score, is_real = check_liveness(img, target_face.bbox, kps=target_face.kps)
+    liveness_score, is_real = check_liveness(img, target_face.bbox, kps=target_face.kps, engine_mode=current_mode)
     if not is_real:
         return {"status": "error", "message": f"Wajah palsu terdeteksi! (Spoof Score: {100 - (liveness_score*100):.1f}%)"}
     
-    # Get all faces in the database that are for login (marked by name)
     all_faces = db_session.query(db_models.Face).filter(db_models.Face.name == 'Face Login Profile').all()
     best_score = 0
     best_match = None
@@ -751,7 +836,6 @@ def process_global_face_login(img, db_session):
             continue
             
     if best_score > 0.50 and best_match:
-        # Get the User associated with this face
         user = db_session.query(db_models.User).filter(db_models.User.id == best_match.user_id).first()
         if user:
             return {
@@ -759,10 +843,118 @@ def process_global_face_login(img, db_session):
                 "match": True,
                 "user_id": user.id,
                 "email": user.email,
-                "similarity": float(best_score)
+                "similarity": float(best_score),
+                "engine_mode": current_mode
             }
         
     return { "status": "success", "match": False, "message": "Face not recognized or user not found" }
+
+def benchmark_engines_comparison(img):
+    """Runs single image through both V1 (Standard) and V2 (CPU Turbo) engines and compares latency & accuracy."""
+    img = _optimize_input_image(img)
+    if img is None:
+        return {"status": "error", "message": "Invalid image"}
+
+    # --- BENCHMARK V1 (Standard buffalo_l + FP32) ---
+    t0 = time.perf_counter()
+    app_v1 = get_face_app("v1")
+    faces_v1 = app_v1.get(img) if app_v1 else []
+    t_det_v1 = (time.perf_counter() - t0) * 1000
+
+    v1_face_data = None
+    v1_emb = None
+    if faces_v1 and len(faces_v1) > 0:
+        face1 = faces_v1[0]
+        v1_emb = face1.embedding
+        t_live_0 = time.perf_counter()
+        score_v1, is_real_v1 = check_liveness(img, face1.bbox, kps=face1.kps, engine_mode="v1")
+        t_live_v1 = (time.perf_counter() - t_live_0) * 1000
+        v1_face_data = {
+            "bbox": face1.bbox.astype(int).tolist(),
+            "landmarks": face1.kps.astype(int).tolist() if hasattr(face1, "kps") and face1.kps is not None else [],
+            "liveness_score": round(score_v1, 4),
+            "is_real": is_real_v1,
+            "det_latency_ms": round(t_det_v1, 2),
+            "liveness_latency_ms": round(t_live_v1, 2),
+            "total_latency_ms": round(t_det_v1 + t_live_v1, 2)
+        }
+    else:
+        v1_face_data = {
+            "detected": False,
+            "total_latency_ms": round(t_det_v1, 2)
+        }
+
+    # --- BENCHMARK V2 (CPU Turbo buffalo_s + INT8) ---
+    t0_v2 = time.perf_counter()
+    app_v2 = get_face_app("v2")
+    faces_v2 = app_v2.get(img) if app_v2 else []
+    t_det_v2 = (time.perf_counter() - t0_v2) * 1000
+
+    v2_face_data = None
+    v2_emb = None
+    if faces_v2 and len(faces_v2) > 0:
+        face2 = faces_v2[0]
+        v2_emb = face2.embedding
+        t_live_0 = time.perf_counter()
+        score_v2, is_real_v2 = check_liveness(img, face2.bbox, kps=face2.kps, engine_mode="v2")
+        t_live_v2 = (time.perf_counter() - t_live_0) * 1000
+        v2_face_data = {
+            "bbox": face2.bbox.astype(int).tolist(),
+            "landmarks": face2.kps.astype(int).tolist() if hasattr(face2, "kps") and face2.kps is not None else [],
+            "liveness_score": round(score_v2, 4),
+            "is_real": is_real_v2,
+            "det_latency_ms": round(t_det_v2, 2),
+            "liveness_latency_ms": round(t_live_v2, 2),
+            "total_latency_ms": round(t_det_v2 + t_live_v2, 2)
+        }
+    else:
+        v2_face_data = {
+            "detected": False,
+            "total_latency_ms": round(t_det_v2, 2)
+        }
+
+    # Compute similarity between V1 and V2 embeddings if both detected
+    embedding_agreement = 0.0
+    if v1_emb is not None and v2_emb is not None:
+        try:
+            embedding_agreement = round(float(compute_similarity(v1_emb, v2_emb)), 4)
+        except Exception:
+            embedding_agreement = 0.0
+
+    speedup_ratio = 1.0
+    v1_tot = v1_face_data.get("total_latency_ms", 0)
+    v2_tot = v2_face_data.get("total_latency_ms", 0)
+    if v1_tot > 0 and v2_tot > 0:
+        speedup_ratio = round(v1_tot / max(v2_tot, 0.1), 2)
+
+    latency_reduction = 0.0
+    if v1_tot > 0 and v2_tot > 0:
+        latency_reduction = round((1 - (v2_tot / max(v1_tot, 0.1))) * 100, 1)
+
+    return {
+        "status": "success",
+        "timestamp": datetime.utcnow().isoformat(),
+        "v1_standard": {
+            "name": "Engine V1 (Standard - Buffalo_L & FP32)",
+            "model_detection": "SCRFD-10G (ResNet50)",
+            "model_recognition": "ArcFace ResNet50 (FP32)",
+            "model_antispoof": "MiniFASNetV2 (FP32)",
+            "data": v1_face_data
+        },
+        "v2_cpu_turbo": {
+            "name": "Engine V2 (CPU Turbo - Buffalo_S & INT8)",
+            "model_detection": "SCRFD-500M / 2.5G",
+            "model_recognition": "MobileFaceNet / ResNet (INT8)",
+            "model_antispoof": "MiniFASNetV2 (INT8 Quantized)",
+            "data": v2_face_data
+        },
+        "comparison": {
+            "embedding_similarity": embedding_agreement,
+            "speedup_ratio": f"{speedup_ratio}x faster on CPU",
+            "latency_reduction_percent": latency_reduction
+        }
+    }
+
 
 # ================= REST API ENDPOINTS =================
 

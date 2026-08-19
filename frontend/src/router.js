@@ -72,6 +72,11 @@ const routes = [
     meta: { requiresAuth: true }
   },
   {
+    path: '/engine-benchmark',
+    component: () => import('./views/EngineBenchmarkView.vue'),
+    meta: { requiresAuth: true }
+  },
+  {
     path: '/settings',
     component: () => import('./views/SettingsView.vue'),
     meta: { requiresAuth: true }

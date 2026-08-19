@@ -24,6 +24,46 @@ const profileError = ref('')
 const storeImagesValue = ref(false)
 const editStoreImagesValue = ref(false)
 
+// AI Face Engine Configuration
+const currentEngineMode = ref('v1')
+const isUpdatingEngine = ref(false)
+const engineUpdateMsg = ref('')
+
+const fetchEngineMode = async () => {
+  try {
+    const res = await fetch(`${API_BASE_URL}/api/v1/system/engine-mode`, { headers: authHeaders() })
+    const data = await res.json()
+    if (res.ok && data.status === 'success') {
+      currentEngineMode.value = data.engine_mode || 'v1'
+    }
+  } catch (e) {
+    console.error('Failed to fetch engine mode', e)
+  }
+}
+
+const updateEngineMode = async (mode) => {
+  if (currentEngineMode.value === mode) return
+  isUpdatingEngine.value = true
+  engineUpdateMsg.value = ''
+  try {
+    const res = await fetch(`${API_BASE_URL}/api/v1/system/engine-mode`, {
+      method: 'POST',
+      headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ engine_mode: mode })
+    })
+    const data = await res.json()
+    if (res.ok && data.status === 'success') {
+      currentEngineMode.value = data.engine_mode
+      engineUpdateMsg.value = `Engine berhasil diubah ke ${mode === 'v2' ? 'Engine V2 (CPU Turbo)' : 'Engine V1 (Standard)'}!`
+      setTimeout(() => { engineUpdateMsg.value = '' }, 3500)
+    }
+  } catch (e) {
+    engineUpdateMsg.value = `Gagal mengubah engine: ${e.message}`
+  } finally {
+    isUpdatingEngine.value = false
+  }
+}
+
 // Password
 const isEditingPassword = ref(false)
 const currentPasswordValue = ref('')
@@ -183,6 +223,7 @@ const checkRegistrationStatus = async () => {
 onMounted(() => {
   fetchProfile()
   checkRegistrationStatus()
+  fetchEngineMode()
 })
 
 const startCamera = async () => {
@@ -360,6 +401,74 @@ onUnmounted(() => {
       <div>
         <p class="eyebrow">Account</p>
         <h2>Settings</h2>
+      </div>
+    </div>
+
+    <!-- AI Face Engine Configuration Card -->
+    <div class="card" style="margin-top: 24px; border: 1px solid rgba(56, 189, 248, 0.25);">
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; flex-wrap: wrap; gap: 8px;">
+        <div>
+          <h3 style="margin: 0; display: flex; align-items: center; gap: 8px;">
+            <span>⚡</span> AI Face Engine Mode (Dual-Engine)
+          </h3>
+          <p style="font-size: 13px; color: var(--text-secondary, #94a3b8); margin-top: 4px;">
+            Ganti arsitektur engine model secara global tanpa mengubah API atau restart server.
+          </p>
+        </div>
+        <router-link to="/engine-benchmark" class="primary-btn" style="text-decoration: none; padding: 6px 14px; font-size: 13px; display: inline-flex; align-items: center; gap: 6px;">
+          <span>⚡</span> Benchmark Lab (V1 vs V2)
+        </router-link>
+      </div>
+
+      <div v-if="engineUpdateMsg" class="inline-success" style="margin-bottom: 12px;">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path><polyline points="22 4 12 14.01 9 11.01"></polyline></svg>
+        {{ engineUpdateMsg }}
+      </div>
+
+      <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 14px; margin-top: 12px;">
+        <!-- Option 1: V1 Standard -->
+        <div 
+          @click="updateEngineMode('v1')"
+          :style="{
+            padding: '16px',
+            borderRadius: '10px',
+            cursor: 'pointer',
+            border: currentEngineMode === 'v1' ? '2px solid #3b82f6' : '1px solid rgba(255,255,255,0.08)',
+            background: currentEngineMode === 'v1' ? 'rgba(59, 130, 246, 0.08)' : 'rgba(0,0,0,0.2)',
+            transition: 'all 0.2s ease'
+          }"
+        >
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+            <strong style="font-size: 14px; color: #60a5fa;">🛡️ Engine V1 (Standard)</strong>
+            <span v-if="currentEngineMode === 'v1'" style="font-size: 11px; background: #3b82f6; color: white; padding: 2px 8px; border-radius: 12px; font-weight: 600;">ACTIVE</span>
+          </div>
+          <p style="font-size: 12px; color: var(--text-secondary, #94a3b8); margin: 0; line-height: 1.4;">
+            <strong>InsightFace Buffalo_L</strong> + <strong>ONNX FP32</strong>.<br>
+            Akurasi maksimal dan resolusi penuh untuk server ber-GPU / high spec.
+          </p>
+        </div>
+
+        <!-- Option 2: V2 CPU Turbo -->
+        <div 
+          @click="updateEngineMode('v2')"
+          :style="{
+            padding: '16px',
+            borderRadius: '10px',
+            cursor: 'pointer',
+            border: currentEngineMode === 'v2' ? '2px solid #10b981' : '1px solid rgba(255,255,255,0.08)',
+            background: currentEngineMode === 'v2' ? 'rgba(16, 185, 129, 0.08)' : 'rgba(0,0,0,0.2)',
+            transition: 'all 0.2s ease'
+          }"
+        >
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+            <strong style="font-size: 14px; color: #34d399;">🚀 Engine V2 (CPU Turbo)</strong>
+            <span v-if="currentEngineMode === 'v2'" style="font-size: 11px; background: #10b981; color: white; padding: 2px 8px; border-radius: 12px; font-weight: 600;">ACTIVE</span>
+          </div>
+          <p style="font-size: 12px; color: var(--text-secondary, #94a3b8); margin: 0; line-height: 1.4;">
+            <strong>InsightFace Buffalo_S</strong> + <strong>ONNX INT8 Quantized</strong>.<br>
+            Sangat ringan di RAM, latensi 3x–5x lebih cepat, ideal untuk VPS tanpa GPU.
+          </p>
+        </div>
       </div>
     </div>
 
