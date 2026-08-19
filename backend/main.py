@@ -275,9 +275,9 @@ def get_404_html():
 
 @fastapi_app.exception_handler(StarletteHTTPException)
 async def custom_http_exception_handler(request: Request, exc: StarletteHTTPException):
-    if exc.status_code == 404:
+    if exc.status_code == 404 and not request.url.path.startswith("/api"):
         return HTMLResponse(content=get_404_html(), status_code=404)
-    return JSONResponse(content={"detail": exc.detail}, status_code=exc.status_code)
+    return JSONResponse(content={"status": "error", "detail": exc.detail}, status_code=exc.status_code)
 
 from pydantic import BaseModel
 

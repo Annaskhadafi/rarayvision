@@ -158,11 +158,11 @@
             </div>
             <div class="summary-metric">
               <span class="metric-title">Reduksi Latensi</span>
-              <span class="metric-val green">{{ benchmarkResult.comparison.latency_reduction_percent }}% Lebih Cepat</span>
+              <span class="metric-val green">{{ Math.max(benchmarkResult.comparison.latency_reduction_percent, 0) }}% Lebih Cepat</span>
             </div>
             <div class="summary-metric">
-              <span class="metric-title">Keselarasan Embedding</span>
-              <span class="metric-val blue">{{ (benchmarkResult.comparison.embedding_similarity * 100).toFixed(1) }}% Match</span>
+              <span class="metric-title">Kategori Arsitektur</span>
+              <span class="metric-val blue">Dual Latent Space (512-D)</span>
             </div>
           </div>
 

@@ -20,6 +20,7 @@ import onnxruntime as ort
 import json
 import base64
 import time
+import threading
 from typing import Optional, Dict, Any, List
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
@@ -74,8 +75,14 @@ def get_face_app(mode: Optional[str] = None):
         model_name = 'buffalo_l' if target_mode == 'v1' else 'buffalo_s'
         print(f"[*] Initializing InsightFace Engine {target_mode.upper()} ({model_name})...")
         try:
-            app = FaceAnalysis(name=model_name, providers=available_providers)
-            app.prepare(ctx_id=0, det_size=(640, 640))
+            if target_mode == 'v2':
+                # CPU Turbo: only run detection and recognition modules (skips 106-point landmark, 3D mesh, and age/gender for ultra-fast CPU inference)
+                app = FaceAnalysis(name=model_name, allowed_modules=['detection', 'recognition'], providers=available_providers)
+                app.prepare(ctx_id=0, det_size=(320, 320))
+            else:
+                # Standard V1
+                app = FaceAnalysis(name=model_name, providers=available_providers)
+                app.prepare(ctx_id=0, det_size=(640, 640))
             _face_engines[target_mode] = app
             print(f"[+] InsightFace Engine {target_mode.upper()} ({model_name}) loaded successfully!")
         except Exception as e:
@@ -112,13 +119,18 @@ def get_emotion_session(mode: Optional[str] = None):
                 print(f"[-] Error loading Emotion session {target_mode.upper()}: {e}")
     return _emotion_sessions[target_mode]
 
-# Preload the default active engine on startup
-print(f"[*] Preloading Default Face Engine ({_active_engine_mode.upper()})...")
-try:
-    get_face_app(_active_engine_mode)
-    get_spoof_session(_active_engine_mode)
-except Exception as e:
-    print(f"[-] Preload warning: {e}")
+# Preload both engines in RAM to eliminate cold-start latency
+def _preload_engines_async():
+    try:
+        get_face_app("v1")
+        get_spoof_session("v1")
+        get_face_app("v2")
+        get_spoof_session("v2")
+        print("[+] Dual Face Engines (V1 & V2) pre-warmed in memory!")
+    except Exception as e:
+        print(f"[-] Preload warning: {e}")
+
+threading.Thread(target=_preload_engines_async, daemon=True).start()
 
 # Backward-compatibility alias
 face_app = get_face_app("v1")
@@ -855,9 +867,14 @@ def benchmark_engines_comparison(img):
     if img is None:
         return {"status": "error", "message": "Invalid image"}
 
+    # Ensure both models and sessions are active in RAM before timing
+    app_v1 = get_face_app("v1")
+    app_v2 = get_face_app("v2")
+    _ = get_spoof_session("v1")
+    _ = get_spoof_session("v2")
+
     # --- BENCHMARK V1 (Standard buffalo_l + FP32) ---
     t0 = time.perf_counter()
-    app_v1 = get_face_app("v1")
     faces_v1 = app_v1.get(img) if app_v1 else []
     t_det_v1 = (time.perf_counter() - t0) * 1000
 
@@ -886,7 +903,6 @@ def benchmark_engines_comparison(img):
 
     # --- BENCHMARK V2 (CPU Turbo buffalo_s + INT8) ---
     t0_v2 = time.perf_counter()
-    app_v2 = get_face_app("v2")
     faces_v2 = app_v2.get(img) if app_v2 else []
     t_det_v2 = (time.perf_counter() - t0_v2) * 1000
 

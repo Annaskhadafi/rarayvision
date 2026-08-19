@@ -130,8 +130,14 @@ const saveProfile = async () => {
         store_images: editStoreImagesValue.value
       })
     })
-    const data = await res.json()
-    if (res.ok && data.status === 'success') {
+    let data = null
+    try {
+      data = await res.json()
+    } catch {
+      data = null
+    }
+
+    if (res.ok && data && data.status === 'success') {
       userName.value = data.user.name
       userEmail.value = data.user.email
       storeImagesValue.value = data.user.store_images
@@ -139,10 +145,10 @@ const saveProfile = async () => {
       profileSuccess.value = 'Profile updated successfully!'
       setTimeout(() => { profileSuccess.value = '' }, 3000)
     } else {
-      profileError.value = data.detail || 'Failed to update profile.'
+      profileError.value = (data && (data.detail || data.message)) || `Server error (${res.status} ${res.statusText}). Pastikan backend server aktif.`
     }
   } catch (e) {
-    profileError.value = `Error: ${e.message}`
+    profileError.value = `Gagal menghubungi server: ${e.message}`
   } finally {
     isSavingProfile.value = false
   }
@@ -184,17 +190,23 @@ const savePassword = async () => {
         new_password: newPasswordValue.value 
       })
     })
-    const data = await res.json()
-    if (res.ok && data.status === 'success') {
+    let data = null
+    try {
+      data = await res.json()
+    } catch {
+      data = null
+    }
+
+    if (res.ok && data && data.status === 'success') {
       hasPassword.value = true
       isEditingPassword.value = false
       passwordSuccess.value = 'Password updated successfully!'
       setTimeout(() => { passwordSuccess.value = '' }, 3000)
     } else {
-      passwordError.value = data.detail || 'Failed to update password.'
+      passwordError.value = (data && (data.detail || data.message)) || `Server error (${res.status} ${res.statusText}). Pastikan backend server aktif.`
     }
   } catch (e) {
-    passwordError.value = `Error: ${e.message}`
+    passwordError.value = `Gagal menghubungi server: ${e.message}`
   } finally {
     isSavingPassword.value = false
   }
