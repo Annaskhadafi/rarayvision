@@ -15,6 +15,7 @@ from backend.app.services.ml_service import (
     process_recognize_live,
     get_tenant_faces,
     save_face_to_db,
+    auto_harvest_face_on_match,
     thread_pool
 )
 
@@ -117,6 +118,7 @@ async def hero_register_face(
     summary="Recognize a face for HERO attendance — returns matched employee_id"
 )
 async def hero_recognize_face(
+    request: Request,
     file: UploadFile = File(...),
     current_user: db_models.User = Depends(get_current_user),
     db_session: Session = Depends(db.get_db)
@@ -173,6 +175,10 @@ async def hero_recognize_face(
                 "message": "Face not matched to any registered employee"
             }
 
+        # Auto-harvest physical image and V2 embedding in background
+        base_url = str(request.base_url).rstrip("/") if request else ""
+        auto_harvest_face_on_match(img, current_user.id, recognized_id, base_url)
+
         # Extract employee_id from face_id ("emp-123" -> "123")
         employee_id = None
         if str(recognized_id).startswith("emp-"):
@@ -181,7 +187,6 @@ async def hero_recognize_face(
         return {
             "status": "success",
             "recognized": True,
-
             "face_id": recognized_id,
             "employee_id": employee_id,
             "employee_name": name,
@@ -200,6 +205,7 @@ async def hero_recognize_face(
     summary="Verify a face against a specific employee (1:1 check)"
 )
 async def hero_verify_face(
+    request: Request,
     employee_id: str = Form(...),
     file: UploadFile = File(...),
     current_user: db_models.User = Depends(get_current_user),
@@ -255,6 +261,10 @@ async def hero_verify_face(
 
         THRESHOLD = 0.45
         verified = similarity >= THRESHOLD and similarity < 1.0  # < 1.0 to reject replay
+
+        if verified:
+            base_url = str(request.base_url).rstrip("/") if request else ""
+            auto_harvest_face_on_match(img, current_user.id, face_id, base_url)
 
         return {
             "status": "success",

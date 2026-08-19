@@ -49,6 +49,19 @@ except Exception as _e:
 # Create DB Tables
 Base.metadata.create_all(bind=engine)
 
+# Ensure embedding_v2 column exists in faces table
+try:
+    with engine.connect() as _conn:
+        from sqlalchemy import text
+        try:
+            _conn.execute(text("ALTER TABLE faces ADD COLUMN embedding_v2 TEXT;"))
+            _conn.commit()
+            print("[DB] Added embedding_v2 column to faces table.")
+        except Exception:
+            pass
+except Exception:
+    pass
+
 def create_default_admin():
     from backend.app.database.database import SessionLocal
     from backend.app.database.models import User

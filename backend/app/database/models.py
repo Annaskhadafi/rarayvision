@@ -44,6 +44,7 @@ class Face(Base):
     face_id = Column(String(100), index=True, nullable=False)
     name = Column(String(255), nullable=False)
     embedding = Column(Text, nullable=False)
+    embedding_v2 = Column(Text, nullable=True)
     image_url = Column(String(500), nullable=True)
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
 

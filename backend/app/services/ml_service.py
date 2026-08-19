@@ -153,20 +153,85 @@ def _optimize_input_image(img, max_dim=1280):
     return img
 
 # --- DATABASE WAJAH ---
-def get_tenant_faces(db_session, user_id):
+def get_tenant_faces(db_session, user_id, engine_mode: Optional[str] = None):
+    mode = engine_mode or _active_engine_mode
     faces = db_session.query(db_models.Face).filter(db_models.Face.user_id == user_id).all()
     result = []
     for row in faces:
         try:
-            emb_list = json.loads(row.embedding)
+            # If active engine is V2 and embedding_v2 exists, load V2 embedding
+            if mode == "v2" and getattr(row, "embedding_v2", None):
+                emb_list = json.loads(row.embedding_v2)
+            else:
+                emb_list = json.loads(row.embedding)
             result.append({
                 "id": row.face_id,
                 "name": row.name,
-                "embedding": np.array(emb_list, dtype=np.float32)
+                "embedding": np.array(emb_list, dtype=np.float32),
+                "has_v2": bool(getattr(row, "embedding_v2", None)),
+                "has_image": bool(row.image_url)
             })
         except Exception as e:
             print(f"Error load face {row.face_id}: {e}")
     return result
+
+def auto_harvest_face_on_match(img, user_id: int, face_id: str, base_url: str = ""):
+    """
+    Background Worker (Non-Blocking):
+    When an existing user successfully checks in / logs in / recognizes via Engine V1:
+    1. Saves physical photo to uploads/faces/{user_id}_{face_id}.jpg if image_url is missing.
+    2. Runs Engine V2 (buffalo_s) to extract embedding_v2 if missing.
+    3. Silently updates database without slowing down the API response.
+    """
+    if img is None or not user_id or not face_id:
+        return
+
+    img_copy = img.copy()
+
+    def _worker():
+        try:
+            from backend.app.database.database import SessionLocal
+            db_session = SessionLocal()
+            try:
+                face = db_session.query(db_models.Face).filter(
+                    db_models.Face.user_id == user_id,
+                    db_models.Face.face_id == str(face_id)
+                ).first()
+                if not face:
+                    return
+
+                changed = False
+                uploads_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "uploads", "faces")
+                os.makedirs(uploads_dir, exist_ok=True)
+                filename = f"{user_id}_{face_id}.jpg"
+                file_path = os.path.join(uploads_dir, filename)
+
+                # 1. Auto-save physical image if not already saved
+                if not face.image_url or not os.path.exists(file_path):
+                    cv2.imwrite(file_path, img_copy)
+                    clean_base = base_url.rstrip("/") if base_url else ""
+                    face.image_url = f"{clean_base}/api/v1/uploads/faces/{filename}" if clean_base else f"/api/v1/uploads/faces/{filename}"
+                    changed = True
+
+                # 2. Auto-extract Engine V2 embedding if not already extracted
+                if not getattr(face, "embedding_v2", None):
+                    app_v2 = get_face_app("v2")
+                    if app_v2:
+                        faces_v2 = app_v2.get(img_copy)
+                        if faces_v2 and len(faces_v2) > 0:
+                            v2_emb = np.array(faces_v2[0].embedding, dtype=np.float32)
+                            face.embedding_v2 = json.dumps(v2_emb.tolist())
+                            changed = True
+
+                if changed:
+                    db_session.commit()
+                    print(f"[AutoHarvest] Auto-migrated face '{face_id}' for User #{user_id} (Photo + V2 Embedding saved).")
+            finally:
+                db_session.close()
+        except Exception as ex:
+            print(f"[AutoHarvest] Note: {ex}")
+
+    threading.Thread(target=_worker, daemon=True).start()
 
 def save_face_to_db(db_session, user_id, face_id, name, embedding, image_url=None):
     emb_json = json.dumps(np.array(embedding, dtype=np.float32).tolist())

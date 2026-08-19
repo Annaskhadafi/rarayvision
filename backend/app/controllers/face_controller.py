@@ -25,7 +25,8 @@ from backend.app.services.ml_service import (
     thread_pool,
     get_global_engine_mode,
     set_global_engine_mode,
-    benchmark_engines_comparison
+    benchmark_engines_comparison,
+    auto_harvest_face_on_match
 )
 from backend.app.schemas.schemas import FeedbackRequest
 
