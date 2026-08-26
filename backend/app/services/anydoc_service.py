@@ -243,6 +243,13 @@ class AnyDocService:
             logger.error(f"[AnyDocService] Error during document conversion: {convert_err}", exc_info=True)
             raise ValueError(f"Failed to convert '{filename}': {str(convert_err)}")
 
+        # Extract and insert embedded images for PDF documents
+        if ext == "pdf" and markdown_output:
+            try:
+                markdown_output = cls.insert_images_into_markdown(file_bytes, markdown_output)
+            except Exception as extract_err:
+                logger.error(f"[AnyDocService] Image extraction failed: {extract_err}", exc_info=True)
+
         elapsed_ms = round((time.perf_counter() - start_time) * 1000, 2)
         char_count = len(markdown_output)
         word_count = len(markdown_output.split()) if markdown_output else 0
@@ -291,3 +298,123 @@ class AnyDocService:
 
         ocr_result, _ = ocr_engine(img_np)
         return format_ocr_to_markdown(ocr_result)
+
+    @classmethod
+    def insert_images_into_markdown(cls, file_bytes: bytes, markdown_text: str) -> str:
+        """
+        Scans PDF pages using pypdfium2, extracts embedded images (resolution >= 150x150),
+        saves them locally, and inserts Markdown image links at the corresponding page locations.
+        """
+        import pypdfium2 as pdfium
+        from pypdfium2.raw import FPDF_PAGEOBJ_IMAGE
+        import uuid
+        import re
+        from PIL import Image
+
+        try:
+            pdf_doc = pdfium.PdfDocument(file_bytes)
+        except Exception as e:
+            logger.warning(f"[AnyDocService] Could not open PDF with pypdfium2 for image extraction: {e}")
+            return markdown_text
+
+        total_pages = len(pdf_doc)
+        page_images = {}
+        has_extracted_any = False
+
+        # Get uploads directory
+        backend_dir = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+        uploads_dir = os.path.join(backend_dir, "uploads")
+        os.makedirs(uploads_dir, exist_ok=True)
+
+        for page_idx in range(total_pages):
+            page_num = page_idx + 1
+            page = pdf_doc[page_idx]
+            img_list = []
+            img_count = 0
+
+            try:
+                # Retrieve FPDF image objects
+                for obj in page.get_objects(filter=[FPDF_PAGEOBJ_IMAGE]):
+                    if isinstance(obj, pdfium.PdfImage):
+                        try:
+                            bitmap = obj.get_bitmap()
+                            width = bitmap.width
+                            height = bitmap.height
+
+                            # Minimum resolution check (150x150 px)
+                            if width >= 150 and height >= 150:
+                                pil_image = bitmap.to_pil()
+                                unique_img_id = uuid.uuid4().hex[:10]
+                                img_filename = f"extracted_{unique_img_id}_p{page_num}_{img_count}.png"
+                                img_path = os.path.join(uploads_dir, img_filename)
+                                pil_image.save(img_path, format="PNG")
+
+                                # Upload to S3 if configured
+                                s3_url = None
+                                try:
+                                    with open(img_path, "rb") as img_f:
+                                        img_bytes = img_f.read()
+                                    from app.services.s3_service import upload_file_to_s3
+                                    s3_url = upload_file_to_s3(img_bytes, img_filename, content_type="image/png")
+                                except Exception:
+                                    try:
+                                        from backend.app.services.s3_service import upload_file_to_s3
+                                        s3_url = upload_file_to_s3(img_bytes, img_filename, content_type="image/png")
+                                    except Exception:
+                                        pass
+
+                                img_url = s3_url or f"/api/v1/uploads/{img_filename}"
+                                img_list.append(f"![Diagram Halaman {page_num} - Gambar {img_count+1}]({img_url})")
+                                img_count += 1
+                                has_extracted_any = True
+                        except Exception as img_err:
+                            logger.debug(f"[AnyDocService] Object image extraction failed: {img_err}")
+            except Exception as page_err:
+                logger.warning(f"[AnyDocService] Error scanning page {page_num} images: {page_err}")
+
+            if img_list:
+                page_images[page_num] = img_list
+
+        pdf_doc.close()
+
+        if not has_extracted_any:
+            return markdown_text
+
+        modified_markdown = markdown_text
+
+        # Insert page image links near page indicators or headers
+        for page_num, img_tags in page_images.items():
+            tags_str = "\n\n" + "\n".join(img_tags) + "\n\n"
+
+            # Look for standard comments: <!-- Page X ... -->
+            pattern = rf"(<!--\s*Page\s*{page_num}(?:\s+\([^)]+\))?\s*-->)"
+            match = re.search(pattern, modified_markdown, re.IGNORECASE)
+
+            if match:
+                marker = match.group(1)
+                modified_markdown = re.sub(
+                    re.escape(marker),
+                    f"{marker}{tags_str}",
+                    modified_markdown,
+                    count=1,
+                    flags=re.IGNORECASE
+                )
+            else:
+                # Look for header markers: "Page X" or "Halaman X"
+                text_pattern = rf"(^|\n)(Page\s*{page_num}\b|Halaman\s*{page_num}\b)"
+                text_match = re.search(text_pattern, modified_markdown, re.IGNORECASE)
+                if text_match:
+                    matched_text = text_match.group(2)
+                    modified_markdown = re.sub(
+                        re.escape(matched_text),
+                        f"{matched_text}{tags_str}",
+                        modified_markdown,
+                        count=1,
+                        flags=re.IGNORECASE
+                    )
+                else:
+                    # Fallback: append to the end
+                    page_header = f"\n\n### Diagram Referensi Halaman {page_num}\n"
+                    modified_markdown += page_header + "\n".join(img_tags)
+
+        return modified_markdown

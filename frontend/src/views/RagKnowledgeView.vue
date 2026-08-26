@@ -961,6 +961,12 @@ const formatMarkdown = (text) => {
   html = html.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
   html = html.replace(/\*(.*?)\*/g, '<em>$1</em>')
 
+  // Images: ![alt](url) -> <img>
+  html = html.replace(/!\[(.*?)\]\((.*?)\)/g, '<img class="chat-image" src="$2" alt="$1" style="max-width: 100%; max-height: 350px; border-radius: 8px; margin: 12px 0; display: block; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);" />')
+
+  // Links: [text](url) -> <a>
+  html = html.replace(/\[(.*?)\]\((.*?)\)/g, '<a class="chat-link" href="$2" target="_blank" style="color: #3b82f6; text-decoration: underline;">$1</a>')
+
   // Bullet points
   html = html.replace(/^\s*[\-\*]\s+(.*$)/gim, '<li class="chat-li">$1</li>')
   html = html.replace(/(<li class="chat-li">[\s\S]*?<\/li>)/g, '<ul class="chat-ul">$1</ul>')

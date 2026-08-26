@@ -1578,7 +1578,9 @@ class RagService:
             "3. PRIORITAS MEMORI & KOREKSI PENGGUNA:\n"
             "   - Jika terdapat bagian '[Memori & Aturan Khusus yang Dipelajari dari Pengguna]' dalam konteks, prioritaskan informasi tersebut.\n"
             "4. LANGSUNG BERIKAN JAWABAN AKHIR (NO META-THOUGHTS):\n"
-            "   - Langsung berikan penjelasan dan jawaban akhir yang bersih, informatif, dan mudah dipahami."
+            "   - Langsung berikan penjelasan dan jawaban akhir yang bersih, informatif, dan mudah dipahami.\n"
+            "5. REFERENSI GAMBAR (MARKDOWN IMAGES):\n"
+            "   - Jika dalam teks dokumen referensi (konteks) terdapat tautan gambar markdown seperti `![alt](url)`, sertakan tag gambar tersebut secara utuh di posisi yang sesuai di dalam jawaban akhir Anda untuk membantu visualisasi (misalnya setelah menjelaskan grafik, diagram, atau ilustrasi tersebut)."
         )
 
         current_prompt = f"""Konteks Dokumen & Memori Pengetahuan (Markdown):
