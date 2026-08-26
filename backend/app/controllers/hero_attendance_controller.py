@@ -16,6 +16,7 @@ from backend.app.services.ml_service import (
     get_tenant_faces,
     save_face_to_db,
     auto_harvest_face_on_match,
+    load_db_face_config,
     thread_pool
 )
 
@@ -271,7 +272,8 @@ async def hero_verify_face(
         norm_stored = float(np.linalg.norm(stored_embedding))
         similarity = dot / (norm_live * norm_stored) if norm_live > 0 and norm_stored > 0 else 0.0
 
-        THRESHOLD = 0.45
+        cfg = load_db_face_config(db_session)
+        THRESHOLD = cfg["threshold"]
         verified = similarity >= THRESHOLD and similarity < 1.0  # < 1.0 to reject replay
 
         if verified:

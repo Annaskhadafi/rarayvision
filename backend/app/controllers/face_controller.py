@@ -26,7 +26,8 @@ from backend.app.services.ml_service import (
     get_global_engine_mode,
     set_global_engine_mode,
     benchmark_engines_comparison,
-    auto_harvest_face_on_match
+    auto_harvest_face_on_match,
+    load_db_face_config
 )
 from backend.app.schemas.schemas import FeedbackRequest
 
@@ -60,6 +61,84 @@ async def set_engine_mode_endpoint(payload: dict):
         "engine_mode": target_mode,
         "message": f"Global Face Engine switched to {target_mode.upper()}"
     }
+
+@router.get("/system/face-config", tags=["System"])
+async def get_face_config_endpoint(db_session: Session = Depends(db.get_db)):
+    try:
+        config = db_session.query(db_models.CVConfig).filter(
+            db_models.CVConfig.module == "face",
+            db_models.CVConfig.is_active == True
+        ).first()
+        if not config:
+            config = db_models.CVConfig(
+                module="face",
+                confidence=0.40,
+                iou_threshold=0.55,
+                model_name="v1",
+                extra_params=json.dumps({
+                    "check_liveness": True,
+                    "laplacian_threshold": 0.35
+                })
+            )
+            db_session.add(config)
+            db_session.commit()
+            db_session.refresh(config)
+        
+        extra = json.loads(config.extra_params) if config.extra_params else {}
+        return {
+            "status": "success",
+            "threshold": config.confidence,
+            "engine_mode": config.model_name,
+            "liveness_threshold": config.iou_threshold,
+            "check_liveness": extra.get("check_liveness", True),
+            "laplacian_threshold": extra.get("laplacian_threshold", 0.35)
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/system/face-config", tags=["System"])
+async def update_face_config_endpoint(payload: dict, db_session: Session = Depends(db.get_db)):
+    try:
+        config = db_session.query(db_models.CVConfig).filter(
+            db_models.CVConfig.module == "face",
+            db_models.CVConfig.is_active == True
+        ).first()
+        if not config:
+            config = db_models.CVConfig(module="face")
+            db_session.add(config)
+        
+        if "threshold" in payload:
+            config.confidence = float(payload["threshold"])
+        if "engine_mode" in payload:
+            mode = payload["engine_mode"].lower()
+            if mode in ["v1", "v2"]:
+                config.model_name = mode
+                set_global_engine_mode(mode)
+        if "liveness_threshold" in payload:
+            config.iou_threshold = float(payload["liveness_threshold"])
+            
+        extra = json.loads(config.extra_params) if config.extra_params else {}
+        if "check_liveness" in payload:
+            extra["check_liveness"] = bool(payload["check_liveness"])
+        if "laplacian_threshold" in payload:
+            extra["laplacian_threshold"] = float(payload["laplacian_threshold"])
+            
+        config.extra_params = json.dumps(extra)
+        db_session.commit()
+        
+        return {
+            "status": "success",
+            "message": "Configuration updated successfully",
+            "config": {
+                "threshold": config.confidence,
+                "engine_mode": config.model_name,
+                "liveness_threshold": config.iou_threshold,
+                "check_liveness": extra.get("check_liveness", True),
+                "laplacian_threshold": extra.get("laplacian_threshold", 0.35)
+            }
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @router.post(
     "/faces/benchmark",

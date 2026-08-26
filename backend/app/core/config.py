@@ -46,3 +46,6 @@ EMOTION_INT8_MODEL_PATH = os.path.join(BASE_DIR, "ml_models", "emotion-ferplus-8
 
 # Face Engine Mode: "v1" (buffalo_l + FP32) or "v2" (buffalo_s + INT8 CPU Turbo)
 DEFAULT_FACE_ENGINE_MODE = os.getenv("FACE_ENGINE_MODE", "v1").lower()
+
+# Face recognition similarity matching threshold (default 0.40 to allow 0.45-0.48 scores to pass successfully)
+FACE_RECOGNITION_THRESHOLD = float(os.getenv("FACE_RECOGNITION_THRESHOLD", "0.40"))

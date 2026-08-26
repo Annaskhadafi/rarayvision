@@ -24,43 +24,59 @@ const profileError = ref('')
 const storeImagesValue = ref(false)
 const editStoreImagesValue = ref(false)
 
-// AI Face Engine Configuration
+// AI Face Biometric Configuration
 const currentEngineMode = ref('v1')
-const isUpdatingEngine = ref(false)
-const engineUpdateMsg = ref('')
+const faceThreshold = ref(0.40)
+const checkLiveness = ref(true)
+const livenessThreshold = ref(0.55)
+const laplacianThreshold = ref(0.35)
+const isUpdatingConfig = ref(false)
+const configUpdateMsg = ref('')
+const configErrorMsg = ref('')
 
-const fetchEngineMode = async () => {
+const fetchFaceConfig = async () => {
   try {
-    const res = await fetch(`${API_BASE_URL}/api/v1/system/engine-mode`, { headers: authHeaders() })
+    const res = await fetch(`${API_BASE_URL}/api/v1/system/face-config`, { headers: authHeaders() })
     const data = await res.json()
     if (res.ok && data.status === 'success') {
       currentEngineMode.value = data.engine_mode || 'v1'
+      faceThreshold.value = data.threshold || 0.40
+      checkLiveness.value = data.check_liveness !== undefined ? data.check_liveness : true
+      livenessThreshold.value = data.liveness_threshold || 0.55
+      laplacianThreshold.value = data.laplacian_threshold || 0.35
     }
   } catch (e) {
-    console.error('Failed to fetch engine mode', e)
+    console.error('Failed to fetch face config', e)
   }
 }
 
-const updateEngineMode = async (mode) => {
-  if (currentEngineMode.value === mode) return
-  isUpdatingEngine.value = true
-  engineUpdateMsg.value = ''
+const updateFaceConfig = async (payload) => {
+  isUpdatingConfig.value = true
+  configUpdateMsg.value = ''
+  configErrorMsg.value = ''
   try {
-    const res = await fetch(`${API_BASE_URL}/api/v1/system/engine-mode`, {
+    const res = await fetch(`${API_BASE_URL}/api/v1/system/face-config`, {
       method: 'POST',
       headers: { ...authHeaders(), 'Content-Type': 'application/json' },
-      body: JSON.stringify({ engine_mode: mode })
+      body: JSON.stringify(payload)
     })
     const data = await res.json()
     if (res.ok && data.status === 'success') {
-      currentEngineMode.value = data.engine_mode
-      engineUpdateMsg.value = `Engine berhasil diubah ke ${mode === 'v2' ? 'Engine V2 (CPU Turbo)' : 'Engine V1 (Standard)'}!`
-      setTimeout(() => { engineUpdateMsg.value = '' }, 3500)
+      const cfg = data.config
+      currentEngineMode.value = cfg.engine_mode
+      faceThreshold.value = cfg.threshold
+      checkLiveness.value = cfg.check_liveness
+      livenessThreshold.value = cfg.liveness_threshold
+      laplacianThreshold.value = cfg.laplacian_threshold
+      configUpdateMsg.value = 'Konfigurasi biometrik wajah berhasil diperbarui!'
+      setTimeout(() => { configUpdateMsg.value = '' }, 3500)
+    } else {
+      configErrorMsg.value = `Gagal menyimpan: ${data.detail || data.message || 'Server error'}`
     }
   } catch (e) {
-    engineUpdateMsg.value = `Gagal mengubah engine: ${e.message}`
+    configErrorMsg.value = `Gagal menghubungi server: ${e.message}`
   } finally {
-    isUpdatingEngine.value = false
+    isUpdatingConfig.value = false
   }
 }
 
@@ -235,7 +251,7 @@ const checkRegistrationStatus = async () => {
 onMounted(() => {
   fetchProfile()
   checkRegistrationStatus()
-  fetchEngineMode()
+  fetchFaceConfig()
 })
 
 const startCamera = async () => {
@@ -416,71 +432,169 @@ onUnmounted(() => {
       </div>
     </div>
 
-    <!-- AI Face Engine Configuration Card -->
+    <!-- AI Face Biometric & Liveness Configuration Card -->
     <div class="card" style="margin-top: 24px; border: 1px solid rgba(56, 189, 248, 0.25);">
-      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; flex-wrap: wrap; gap: 8px;">
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; flex-wrap: wrap; gap: 8px;">
         <div>
           <h3 style="margin: 0; display: flex; align-items: center; gap: 8px;">
-            <span>⚡</span> AI Face Engine Mode (Dual-Engine)
+            <span>⚡</span> AI Face Biometric & Liveness Settings
           </h3>
           <p style="font-size: 13px; color: var(--text-secondary, #94a3b8); margin-top: 4px;">
-            Ganti arsitektur engine model secara global tanpa mengubah API atau restart server.
+            Konfigurasi sensitivitas deteksi wajah, anti-spoofing (liveness), dan arsitektur mesin secara langsung.
           </p>
         </div>
-        <router-link to="/engine-benchmark" class="primary-btn" style="text-decoration: none; padding: 6px 14px; font-size: 13px; display: inline-flex; align-items: center; gap: 6px;">
-          <span>⚡</span> Benchmark Lab (V1 vs V2)
+        <router-link to="/tester" class="primary-btn" style="text-decoration: none; padding: 6px 14px; font-size: 13px; display: inline-flex; align-items: center; gap: 6px; background: #2563eb;">
+          <span>🧪</span> Go to Test Lab
         </router-link>
       </div>
 
-      <div v-if="engineUpdateMsg" class="inline-success" style="margin-bottom: 12px;">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path><polyline points="22 4 12 14.01 9 11.01"></polyline></svg>
-        {{ engineUpdateMsg }}
+      <!-- Success and Error banners -->
+      <div v-if="configUpdateMsg" class="inline-success" style="margin-bottom: 16px; background: #f0fdf4; border: 1px solid #bbf7d0; padding: 10px 14px; border-radius: 8px; color: #166534; display: flex;">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="margin-right: 6px; margin-top: 2px;"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path><polyline points="22 4 12 14.01 9 11.01"></polyline></svg>
+        {{ configUpdateMsg }}
+      </div>
+      <div v-if="configErrorMsg" class="inline-error" style="margin-bottom: 16px; background: #fef2f2; border: 1px solid #fca5a5; padding: 10px 14px; border-radius: 8px; color: #b91c1c; display: flex;">
+        {{ configErrorMsg }}
       </div>
 
-      <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 14px; margin-top: 12px;">
-        <!-- Option 1: V1 Standard -->
-        <div 
-          @click="updateEngineMode('v1')"
-          :style="{
-            padding: '16px',
-            borderRadius: '10px',
-            cursor: 'pointer',
-            border: currentEngineMode === 'v1' ? '2px solid #3b82f6' : '1px solid rgba(255,255,255,0.08)',
-            background: currentEngineMode === 'v1' ? 'rgba(59, 130, 246, 0.08)' : 'rgba(0,0,0,0.2)',
-            transition: 'all 0.2s ease'
-          }"
-        >
-          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
-            <strong style="font-size: 14px; color: #60a5fa;">🛡️ Engine V1 (Standard)</strong>
-            <span v-if="currentEngineMode === 'v1'" style="font-size: 11px; background: #3b82f6; color: white; padding: 2px 8px; border-radius: 12px; font-weight: 600;">ACTIVE</span>
+      <!-- Configuration Sections -->
+      <div style="display: flex; flex-direction: column; gap: 20px;">
+        
+        <!-- 1. Engine Selection -->
+        <div>
+          <label class="field-label" style="margin-bottom: 8px; color: #475569;">Active Face Engine Mode</label>
+          <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 14px;">
+            <!-- Option 1: V1 Standard -->
+            <div 
+              @click="updateFaceConfig({ engine_mode: 'v1' })"
+              :style="{
+                padding: '16px',
+                borderRadius: '10px',
+                cursor: 'pointer',
+                border: currentEngineMode === 'v1' ? '2px solid #3b82f6' : '1px solid rgba(0,0,0,0.08)',
+                background: currentEngineMode === 'v1' ? 'rgba(59, 130, 246, 0.05)' : 'rgba(0,0,0,0.01)',
+                transition: 'all 0.2s ease'
+              }"
+            >
+              <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                <strong style="font-size: 14px; color: #2563eb;">🛡️ Engine V1 (Standard)</strong>
+                <span v-if="currentEngineMode === 'v1'" style="font-size: 11px; background: #2563eb; color: white; padding: 2px 8px; border-radius: 12px; font-weight: 600;">ACTIVE</span>
+              </div>
+              <p style="font-size: 12px; color: #64748b; margin: 0; line-height: 1.4;">
+                InsightFace Buffalo_L + ONNX FP32. Akurasi maksimal dan deteksi detail.
+              </p>
+            </div>
+
+            <!-- Option 2: V2 CPU Turbo -->
+            <div 
+              @click="updateFaceConfig({ engine_mode: 'v2' })"
+              :style="{
+                padding: '16px',
+                borderRadius: '10px',
+                cursor: 'pointer',
+                border: currentEngineMode === 'v2' ? '2px solid #10b981' : '1px solid rgba(0,0,0,0.08)',
+                background: currentEngineMode === 'v2' ? 'rgba(16, 185, 129, 0.05)' : 'rgba(0,0,0,0.01)',
+                transition: 'all 0.2s ease'
+              }"
+            >
+              <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                <strong style="font-size: 14px; color: #059669;">🚀 Engine V2 (CPU Turbo)</strong>
+                <span v-if="currentEngineMode === 'v2'" style="font-size: 11px; background: #10b981; color: white; padding: 2px 8px; border-radius: 12px; font-weight: 600;">ACTIVE</span>
+              </div>
+              <p style="font-size: 12px; color: #64748b; margin: 0; line-height: 1.4;">
+                InsightFace Buffalo_S + ONNX INT8. Sangat ringan di RAM, latensi 3x–5x lebih cepat.
+              </p>
+            </div>
           </div>
-          <p style="font-size: 12px; color: var(--text-secondary, #94a3b8); margin: 0; line-height: 1.4;">
-            <strong>InsightFace Buffalo_L</strong> + <strong>ONNX FP32</strong>.<br>
-            Akurasi maksimal dan resolusi penuh untuk server ber-GPU / high spec.
-          </p>
         </div>
 
-        <!-- Option 2: V2 CPU Turbo -->
-        <div 
-          @click="updateEngineMode('v2')"
-          :style="{
-            padding: '16px',
-            borderRadius: '10px',
-            cursor: 'pointer',
-            border: currentEngineMode === 'v2' ? '2px solid #10b981' : '1px solid rgba(255,255,255,0.08)',
-            background: currentEngineMode === 'v2' ? 'rgba(16, 185, 129, 0.08)' : 'rgba(0,0,0,0.2)',
-            transition: 'all 0.2s ease'
-          }"
-        >
+        <!-- 2. Similarity Threshold Slider -->
+        <div style="padding: 16px; background: #f8fafc; border-radius: 10px; border: 1px solid #e2e8f0;">
           <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
-            <strong style="font-size: 14px; color: #34d399;">🚀 Engine V2 (CPU Turbo)</strong>
-            <span v-if="currentEngineMode === 'v2'" style="font-size: 11px; background: #10b981; color: white; padding: 2px 8px; border-radius: 12px; font-weight: 600;">ACTIVE</span>
+            <label class="field-label" style="margin: 0; color: #1e293b;">Face Similarity Threshold (Kemiripan Wajah)</label>
+            <span style="font-size: 15px; font-weight: 700; color: #2563eb; background: #dbeafe; padding: 2px 10px; border-radius: 6px;">{{ faceThreshold }} ({{ Math.round(faceThreshold * 100) }}%)</span>
           </div>
-          <p style="font-size: 12px; color: var(--text-secondary, #94a3b8); margin: 0; line-height: 1.4;">
-            <strong>InsightFace Buffalo_S</strong> + <strong>ONNX INT8 Quantized</strong>.<br>
-            Sangat ringan di RAM, latensi 3x–5x lebih cepat, ideal untuk VPS tanpa GPU.
+          <p style="font-size: 12px; color: #64748b; margin: 0 0 12px; line-height: 1.4;">
+            Nilai ambang batas kemiripan untuk menentukan kecocokan wajah. Nilai lebih rendah memudahkan login (mencegah kegagalan login akibat pencahayaan/sudut), nilai lebih tinggi meningkatkan keamanan. 
+            <span style="color: #16a34a; font-weight: 600;">Batas yang disarankan untuk Anda: 0.40 (agar kecocokan 0.45 - 0.48 tidak gagal login).</span>
           </p>
+          <div style="display: flex; align-items: center; gap: 12px;">
+            <span style="font-size: 12px; color: #94a3b8; font-weight: 500;">Sangat Mudah (0.20)</span>
+            <input 
+              type="range" 
+              min="0.20" 
+              max="0.80" 
+              step="0.01" 
+              v-model.number="faceThreshold" 
+              @change="updateFaceConfig({ threshold: faceThreshold })"
+              style="flex: 1; accent-color: #2563eb; cursor: pointer; height: 6px; background: #cbd5e1; border-radius: 3px;"
+            />
+            <span style="font-size: 12px; color: #94a3b8; font-weight: 500;">Sangat Ketat (0.80)</span>
+          </div>
         </div>
+
+        <!-- 3. Liveness / Anti-Spoofing Check Toggle -->
+        <div style="padding: 16px; background: #f8fafc; border-radius: 10px; border: 1px solid #e2e8f0;">
+          <div style="display: flex; align-items: center; justify-content: space-between;">
+            <div>
+              <label class="field-label" style="margin: 0 0 2px; color: #1e293b;">Liveness Detection (Anti-Spoofing)</label>
+              <p style="font-size: 12px; color: #64748b; margin: 0; line-height: 1.4;">
+                Verifikasi keaslian wajah untuk mencegah serangan spoofing menggunakan foto cetak atau layar HP.
+              </p>
+            </div>
+            <label style="position: relative; display: inline-block; width: 44px; height: 24px; flex-shrink: 0;">
+              <input type="checkbox" v-model="checkLiveness" @change="updateFaceConfig({ check_liveness: checkLiveness })" style="opacity: 0; width: 0; height: 0;">
+              <span :style="{
+                position: 'absolute', cursor: 'pointer', top: 0, left: 0, right: 0, bottom: 0,
+                backgroundColor: checkLiveness ? '#10b981' : '#cbd5e1',
+                transition: '.3s', borderRadius: '34px'
+              }">
+                <span :style="{
+                  position: 'absolute', height: '18px', width: '18px', left: '3px', bottom: '3px',
+                  backgroundColor: 'white', transition: '.3s', borderRadius: '50%',
+                  transform: checkLiveness ? 'translateX(20px)' : 'translateX(0)'
+                }"></span>
+              </span>
+            </label>
+          </div>
+
+          <!-- Liveness thresholds inputs, only visible if checkLiveness is active -->
+          <div v-if="checkLiveness" style="margin-top: 16px; padding-top: 16px; border-top: 1px dashed #e2e8f0; display: flex; flex-direction: column; gap: 14px;">
+            <!-- Model Liveness Threshold -->
+            <div>
+              <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+                <span style="font-size: 12px; font-weight: 600; color: #475569;">Ambang Batas Model Liveness (MiniFASNetV2)</span>
+                <span style="font-size: 13px; font-weight: 700; color: #10b981;">{{ livenessThreshold }}</span>
+              </div>
+              <input 
+                type="range" 
+                min="0.30" 
+                max="0.80" 
+                step="0.01" 
+                v-model.number="livenessThreshold" 
+                @change="updateFaceConfig({ liveness_threshold: livenessThreshold })"
+                style="width: 100%; accent-color: #10b981; cursor: pointer;"
+              />
+            </div>
+            <!-- Laplacian Fallback Threshold -->
+            <div>
+              <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+                <span style="font-size: 12px; font-weight: 600; color: #475569;">Fallback Laplacian Threshold (Deteksi Tekstur & Ketajaman)</span>
+                <span style="font-size: 13px; font-weight: 700; color: #10b981;">{{ laplacianThreshold }}</span>
+              </div>
+              <input 
+                type="range" 
+                min="0.20" 
+                max="0.60" 
+                step="0.01" 
+                v-model.number="laplacianThreshold" 
+                @change="updateFaceConfig({ laplacian_threshold: laplacianThreshold })"
+                style="width: 100%; accent-color: #10b981; cursor: pointer;"
+              />
+            </div>
+          </div>
+        </div>
+
       </div>
     </div>
 

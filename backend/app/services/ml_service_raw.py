@@ -545,7 +545,7 @@ def process_compare_logic(img, user_id, tenant_faces):
     # 3. Bandingkan
     similarity = compute_similarity(target_face.embedding, target_embedding_db)
     
-    THRESHOLD = 0.45 
+    THRESHOLD = 0.40 
     
     if similarity > THRESHOLD:
         return {
@@ -696,7 +696,7 @@ def process_recognize_live(img, tenant_faces, mode="identify"):
             best_score = sim
             best_match = user
 
-    if best_score > 0.50:
+    if best_score > 0.40:
         return {
             "status": "success", "match": True, "mode": mode,
             "data": {
@@ -743,7 +743,7 @@ def process_recognize_logic(img, tenant_faces):
             best_score = sim
             best_match = user
             
-    if best_score > 0.50:
+    if best_score > 0.40:
         return {
             "status": "success", "match": True,
             "data": { "id": best_match['id'], "name": best_match['name'], "similarity": float(best_score) }

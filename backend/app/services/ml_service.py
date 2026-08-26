@@ -31,7 +31,8 @@ from backend.app.core.config import (
     ANTI_SPOOF_INT8_MODEL_PATH,
     EMOTION_MODEL_PATH,
     EMOTION_INT8_MODEL_PATH,
-    DEFAULT_FACE_ENGINE_MODE
+    DEFAULT_FACE_ENGINE_MODE,
+    FACE_RECOGNITION_THRESHOLD
 )
 import uuid
 import requests
@@ -56,10 +57,61 @@ _face_engines: Dict[str, Any] = {"v1": None, "v2": None}
 _spoof_sessions: Dict[str, Any] = {"v1": None, "v2": None}
 _emotion_sessions: Dict[str, Any] = {"v1": None, "v2": None}
 
+_last_engine_check = 0.0
+_cached_db_engine_mode = None
+
+def load_db_face_config(db_session=None):
+    """Loads face config from database, falling back to ENV configs if not found or if database is not available."""
+    if db_session is None:
+        try:
+            from backend.app.database.database import SessionLocal
+            db_session = SessionLocal()
+            close_session = True
+        except Exception:
+            db_session = None
+            close_session = False
+    else:
+        close_session = False
+
+    threshold = FACE_RECOGNITION_THRESHOLD
+    engine_mode = _active_engine_mode
+    liveness_threshold = 0.55
+    check_liveness_flag = True
+    laplacian_threshold = 0.35
+
+    if db_session is not None:
+        try:
+            row = db_session.query(db_models.CVConfig).filter(
+                db_models.CVConfig.module == "face",
+                db_models.CVConfig.is_active == True
+            ).first()
+            if row:
+                threshold = row.confidence if row.confidence is not None else threshold
+                engine_mode = row.model_name or engine_mode
+                liveness_threshold = row.iou_threshold if row.iou_threshold is not None else liveness_threshold
+                extra = json.loads(row.extra_params) if row.extra_params else {}
+                check_liveness_flag = extra.get("check_liveness", check_liveness_flag)
+                laplacian_threshold = extra.get("laplacian_threshold", laplacian_threshold)
+        except Exception as e:
+            print(f"[Config] Error reading face config from DB: {e}")
+        finally:
+            if close_session:
+                db_session.close()
+
+    return {
+        "threshold": threshold,
+        "engine_mode": engine_mode,
+        "liveness_threshold": liveness_threshold,
+        "check_liveness": check_liveness_flag,
+        "laplacian_threshold": laplacian_threshold
+    }
+
 def set_global_engine_mode(mode: str) -> str:
-    global _active_engine_mode
+    global _active_engine_mode, _cached_db_engine_mode, _last_engine_check
     if mode in ["v1", "v2"]:
         _active_engine_mode = mode
+        _cached_db_engine_mode = mode
+        _last_engine_check = time.time()
         print(f"[Engine] Global Face Engine switched to: {_active_engine_mode.upper()}")
         # Pre-warm target engine
         get_face_app(_active_engine_mode)
@@ -67,6 +119,17 @@ def set_global_engine_mode(mode: str) -> str:
     return _active_engine_mode
 
 def get_global_engine_mode() -> str:
+    global _active_engine_mode, _last_engine_check, _cached_db_engine_mode
+    now = time.time()
+    if _cached_db_engine_mode is None or (now - _last_engine_check) > 10.0:
+        _last_engine_check = now
+        try:
+            cfg = load_db_face_config()
+            _cached_db_engine_mode = cfg["engine_mode"]
+            if _cached_db_engine_mode in ["v1", "v2"]:
+                _active_engine_mode = _cached_db_engine_mode
+        except Exception:
+            pass
     return _active_engine_mode
 
 def get_face_app(mode: Optional[str] = None):
@@ -331,8 +394,12 @@ def crop_face_for_spoof(img, bbox, kps=None, scale=2.7):
             
     return cropped
 
-def check_liveness(img, bbox, kps=None, engine_mode: Optional[str] = None):
+def check_liveness(img, bbox, kps=None, engine_mode: Optional[str] = None, db_session=None):
     """Main liveness verification function — model: MiniFASNetV2 (80x80, 3-class)"""
+    cfg = load_db_face_config(db_session)
+    if not cfg["check_liveness"]:
+        return 1.0, True
+
     session = get_spoof_session(engine_mode)
     if session:
         try:
@@ -358,7 +425,7 @@ def check_liveness(img, bbox, kps=None, engine_mode: Optional[str] = None):
             probs = exp_pred / np.sum(exp_pred, axis=1, keepdims=True)
             # index 1 = Real, index 0/2 = Spoof
             real_score = float(probs[0][1])
-            is_real = real_score > 0.55
+            is_real = real_score > cfg["liveness_threshold"]
             return real_score, is_real
         except Exception as e:
             print(f"Spoof Check Error: {e}")
@@ -384,7 +451,7 @@ def check_liveness(img, bbox, kps=None, engine_mode: Optional[str] = None):
             norm_sat = min(sat_std / 40.0, 1.0)
             combined = (norm_lap * 0.6 + norm_sat * 0.4)
             
-            is_real = combined > 0.35
+            is_real = combined > cfg["laplacian_threshold"]
             return float(combined), bool(is_real)
         except:
             return 0.0, False
@@ -546,7 +613,8 @@ def process_compare_logic(img, user_id, tenant_faces, engine_mode: Optional[str]
 
     # 3. Bandingkan
     similarity = compute_similarity(target_face.embedding, target_embedding_db)
-    THRESHOLD = 0.45 
+    cfg = load_db_face_config()
+    THRESHOLD = cfg["threshold"]
     latency_ms = round((time.perf_counter() - start_t) * 1000, 2)
     current_mode = engine_mode or _active_engine_mode
     
@@ -651,7 +719,8 @@ def process_recognize_live(img, tenant_faces, mode="identify", engine_mode: Opti
                 best_score = sim
                 best_match = user
 
-        if best_score > 0.50:
+        cfg = load_db_face_config()
+        if best_score > cfg["threshold"]:
             return {
                 "status": "success", "match": True, "mode": mode,
                 "engine_mode": current_mode,
@@ -764,7 +833,8 @@ def process_recognize_live(img, tenant_faces, mode="identify", engine_mode: Opti
             best_score = sim
             best_match = user
 
-    if best_score > 0.50:
+    cfg = load_db_face_config()
+    if best_score > cfg["threshold"]:
         return {
             "status": "success", "match": True, "mode": mode,
             "engine_mode": current_mode,
@@ -812,7 +882,8 @@ def process_recognize_logic(img, tenant_faces, engine_mode: Optional[str] = None
             
     current_mode = engine_mode or _active_engine_mode
     latency_ms = round((time.perf_counter() - start_t) * 1000, 2)
-    if best_score > 0.50:
+    cfg = load_db_face_config()
+    if best_score > cfg["threshold"]:
         return {
             "status": "success", "match": True,
             "data": { "id": best_match['id'], "name": best_match['name'], "similarity": float(best_score) },
@@ -852,7 +923,8 @@ def process_recognize_multi(img, tenant_faces, engine_mode: Optional[str] = None
                 best_score = sim
                 best_match = user
                 
-        if best_score > 0.50:
+        cfg = load_db_face_config()
+        if best_score > cfg["threshold"]:
             results.append({
                 "match": True,
                 "data": {
@@ -893,7 +965,7 @@ def process_global_face_login(img, db_session, engine_mode: Optional[str] = None
     current_mode = engine_mode or _active_engine_mode
     
     # --- CHECK LIVENESS ---
-    liveness_score, is_real = check_liveness(img, target_face.bbox, kps=target_face.kps, engine_mode=current_mode)
+    liveness_score, is_real = check_liveness(img, target_face.bbox, kps=target_face.kps, engine_mode=current_mode, db_session=db_session)
     if not is_real:
         return {"status": "error", "message": f"Wajah palsu terdeteksi! (Spoof Score: {100 - (liveness_score*100):.1f}%)"}
     
@@ -912,7 +984,8 @@ def process_global_face_login(img, db_session, engine_mode: Optional[str] = None
         except Exception as e:
             continue
             
-    if best_score > 0.50 and best_match:
+    cfg = load_db_face_config(db_session)
+    if best_score > cfg["threshold"] and best_match:
         user = db_session.query(db_models.User).filter(db_models.User.id == best_match.user_id).first()
         if user:
             return {
