@@ -106,6 +106,15 @@ const routes = [
   // HSE Safety Routes
   { path: '/hse', redirect: '/hse/playground' },
   {
+    path: '/hse/fall-detection',
+    component: () => import('./views/hse/FallDetectionView.vue'),
+    meta: { requiresAuth: true }
+  },
+  {
+    path: '/fall-detection',
+    redirect: '/hse/fall-detection'
+  },
+  {
     path: '/hse/playground',
     component: () => import('./views/hse/HSEPlaygroundView.vue'),
     meta: { requiresAuth: true }

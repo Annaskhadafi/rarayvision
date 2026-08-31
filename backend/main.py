@@ -248,7 +248,7 @@ async def filter_openapi_schema(request: Request, call_next):
             return JSONResponse(content=json.loads(body), status_code=response.status_code)
     return response
 
-from backend.app.controllers import auth_controller, api_key_controller, face_controller, tire_controller, inventory_controller, hse_controller, camera_controller, pdf_inspector_controller, anti_spoof_controller, anydoc_controller, rag_controller, rag_datasource_controller, automl_controller
+from backend.app.controllers import auth_controller, api_key_controller, face_controller, tire_controller, inventory_controller, hse_controller, camera_controller, pdf_inspector_controller, anti_spoof_controller, anydoc_controller, rag_controller, rag_datasource_controller, automl_controller, fall_detection_controller
 
 # Include Routers
 fastapi_app.include_router(auth_controller.router)
@@ -258,6 +258,7 @@ fastapi_app.include_router(hero_attendance_controller.router)
 fastapi_app.include_router(tire_controller.router)
 fastapi_app.include_router(inventory_controller.router)
 fastapi_app.include_router(hse_controller.router)
+fastapi_app.include_router(fall_detection_controller.router)
 fastapi_app.include_router(camera_controller.router)
 fastapi_app.include_router(pdf_inspector_controller.router)
 fastapi_app.include_router(anti_spoof_controller.router)
