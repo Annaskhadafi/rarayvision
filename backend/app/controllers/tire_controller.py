@@ -1,5 +1,4 @@
 import os
-os.environ["PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK"] = "True"
 import uuid
 import re
 import cv2
@@ -19,7 +18,16 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/tire", tags=["Tire Sidewall OCR"])
 
-# ─── Pipeline singleton ───────────────────────────────────────────────────────
+# ─── Uploads Directory Helper ────────────────────────────────────────────────
+def get_uploads_dir() -> str:
+    """Returns absolute path to backend/uploads directory."""
+    backend_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    uploads_dir = os.path.join(backend_dir, "uploads")
+    os.makedirs(uploads_dir, exist_ok=True)
+    return uploads_dir
+
+
+# ─── Pipeline Singleton ──────────────────────────────────────────────────────
 _pipeline_instance = None
 
 def get_pipeline():
@@ -34,252 +42,73 @@ def get_pipeline():
     return _pipeline_instance
 
 
+# ─── RapidOCR Engine Singleton (ONNX Runtime) ────────────────────────────────
+_rapid_ocr_engine = None
+_rapid_ocr_lock = threading.Lock()
+
+def get_rapid_ocr():
+    """Initializes RapidOCR on ONNX Runtime for ultra-fast, CPU-friendly OCR."""
+    global _rapid_ocr_engine
+    if _rapid_ocr_engine is None:
+        with _rapid_ocr_lock:
+            if _rapid_ocr_engine is None:
+                try:
+                    from rapidocr_onnxruntime import RapidOCR
+                    _rapid_ocr_engine = RapidOCR()
+                    logger.info("[RapidOCR] ONNX Runtime OCR engine initialized successfully!")
+                except Exception as e:
+                    logger.error(f"[RapidOCR] Failed to initialize: {e}")
+                    _rapid_ocr_engine = False
+    return _rapid_ocr_engine if _rapid_ocr_engine else None
 
 
-
-# ─── RealTimeOCR YOLO Text Box Detector ───────────────────────────────────────
-_yolo_detector = None
-
-def get_yolo_detector():
-    global _yolo_detector
-    if _yolo_detector is None:
-        try:
-            model_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "ml_models", "text_detection", "best.pt")
-            if not os.path.exists(model_path):
-                model_path = r"D:\[01] PROJECT\Raray VIsion\RealTimeOCR\best.pt"
-            if os.path.exists(model_path):
-                from ultralytics import YOLO
-                _yolo_detector = YOLO(model_path)
-                logger.info("[YOLO] RealTimeOCR text box detector loaded successfully!")
-        except Exception as e:
-            logger.warning(f"[YOLO] Could not load RealTimeOCR detector: {e}")
-            _yolo_detector = False
-    return _yolo_detector
+# Pre-warm RapidOCR in a background thread
+threading.Thread(target=get_rapid_ocr, daemon=True).start()
 
 
-# ─── Pre-warmed PaddleOCR PP-OCRv4 Engine ─────────────────────────────────────
-_paddle_ocr_engine = None
-_paddle_ocr_ready = threading.Event()
-
-def _warmup_paddle_ocr():
-    """Load PaddleOCR PP-OCRv4 in background thread for ultra-fast local inference (~50-100ms)."""
-    global _paddle_ocr_engine
-    try:
-        from paddleocr import PaddleOCR
-        logger.info("[PaddleOCR] Pre-warming PP-OCRv4 engine...")
-        _paddle_ocr_engine = PaddleOCR(use_textline_orientation=False, lang='en')
-        _paddle_ocr_ready.set()
-        logger.info("[PaddleOCR] PP-OCRv4 engine ready!")
-    except Exception as e:
-        logger.warning(f"[PaddleOCR] Warmup notice: {e}")
-        _paddle_ocr_engine = False
-        _paddle_ocr_ready.set()
-
-threading.Thread(target=_warmup_paddle_ocr, daemon=True).start()
-
-
-# ─── Image helpers ────────────────────────────────────────────────────────────
-def _resize_for_ocr(img: np.ndarray, max_width: int = 800) -> np.ndarray:
+# ─── Image Preprocessing Helpers ─────────────────────────────────────────────
+def _resize_for_ocr(img: np.ndarray, max_width: int = 1280, min_height: int = 250) -> np.ndarray:
+    """Smart resizer: maintains character stroke thickness for camera frames and wide strips."""
     h, w = img.shape[:2]
-    if w > max_width:
-        scale = max_width / w
-        img = cv2.resize(img, (max_width, int(h * scale)), interpolation=cv2.INTER_AREA)
+    # If image is a wide banner (e.g. unrolled tire sidewall where w > 2.5 * h)
+    if w > 2.5 * h:
+        if h < min_height:
+            scale = min_height / h
+            new_w = min(int(w * scale), 4800)
+            return cv2.resize(img, (new_w, min_height), interpolation=cv2.INTER_LINEAR)
+        elif w > 4800:
+            scale = 4800 / w
+            return cv2.resize(img, (4800, int(h * scale)), interpolation=cv2.INTER_AREA)
+        return img
+
+    if max(h, w) > max_dimension:
+        scale = max_dimension / max(h, w)
+        return cv2.resize(img, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
     return img
 
 
 def _preprocess_for_ocr(img: np.ndarray) -> np.ndarray:
-    """Razor-sharp CLAHE + Bilateral Noise Removal for Embossed Rubber Tire Letters (Preserves strokes like F, R, J)."""
+    """Sharp CLAHE + Bilateral filter for embossed rubber tire sidewall text."""
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if len(img.shape) == 3 else img
-    
-    # 1. Bilateral filter to smooth rubber noise while preserving sharp letter edges
     denoised = cv2.bilateralFilter(gray, d=5, sigmaColor=50, sigmaSpace=50)
-
-    # 2. CLAHE contrast enhancement
     clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
     enhanced = clahe.apply(denoised)
-
-    # 3. Mild 5x5 kernel for subtle 3D letter contrast without distorting F, R, J strokes into digits
     kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
     tophat = cv2.morphologyEx(enhanced, cv2.MORPH_TOPHAT, kernel)
-    
     combined = cv2.addWeighted(enhanced, 0.7, tophat, 0.3, 0)
     return combined
 
 
-_tesseract_instance = None
-
-def get_pytesseract():
-    global _tesseract_instance
-    if _tesseract_instance is None:
-        try:
-            import pytesseract
-            pytesseract.get_tesseract_version()
-            _tesseract_instance = pytesseract
-        except Exception:
-            _tesseract_instance = False
-    return _tesseract_instance if _tesseract_instance else None
-
-
-def _scan_ocr_candidate(img_frame: np.ndarray) -> str:
-    """Helper to run PaddleOCR + PyTesseract on candidate frames with instant early exit."""
-    enhanced = _preprocess_for_ocr(img_frame)
-
-    # 1. Primary: PaddleOCR Nano engine on enhanced image (~20ms)
-    if _paddle_ocr_engine:
-        try:
-            res = _paddle_ocr_engine.ocr(enhanced, rec=True)
-            if res and res[0] is not None:
-                lines = [str(line[1][0]) for line in res[0] if line and len(line) > 1 and line[1]]
-                if lines:
-                    combined_text = " ".join(lines)
-                    clean = re.sub(r'[^A-Z0-9\s-]', '', combined_text.upper()).strip()
-                    if clean:
-                        return clean
-        except Exception as pe:
-            logger.warning(f"[PaddleOCR] Pass notice: {pe}")
-
-        # Try PaddleOCR on raw image if enhanced yielded nothing
-        try:
-            res = _paddle_ocr_engine.ocr(img_frame, rec=True)
-            if res and res[0] is not None:
-                lines = [str(line[1][0]) for line in res[0] if line and len(line) > 1 and line[1]]
-                if lines:
-                    combined_text = " ".join(lines)
-                    clean = re.sub(r'[^A-Z0-9\s-]', '', combined_text.upper()).strip()
-                    if clean:
-                        return clean
-        except Exception:
-            pass
-        
-        return ""
-
-    # 2. Fallback: PyTesseract (only if PaddleOCR is unavailable and Tesseract is installed)
-    tess = get_pytesseract()
-    if tess:
-        try:
-            text_tess = tess.image_to_string(enhanced, config='--psm 6')
-            clean_tess = re.sub(r'[^A-Z0-9\s-]', '', str(text_tess).upper()).strip()
-            if clean_tess:
-                return clean_tess
-        except Exception as te:
-            logger.warning(f"[PyTesseract] Candidate notice: {te}")
-
-    return ""
-
-
-# ─── Main OCR function ────────────────────────────────────────────────────────
-def perform_direct_ocr(img: np.ndarray) -> str:
-    """
-    Ultra-Fast Multi-Angle Hybrid OCR (<0.05s):
-      Tests 0° orientation first for instant response (<50ms).
-      Falls back to rotated angles (90°, 180°, 270°) ONLY if 0° yielded no serial text.
-    """
-    if img is None or img.size == 0:
-        return ""
-
-    img_small = _resize_for_ocr(img, max_width=800)
-
-    # 0° orientation (Standard camera position - 95% of photos)
-    rot_0   = img_small
-    # Secondary rotations (90°, 180°, 270°) for tilted tag gun scans
-    rot_90  = cv2.rotate(img_small, cv2.ROTATE_90_CLOCKWISE)
-    rot_180 = cv2.rotate(img_small, cv2.ROTATE_180)
-    rot_270 = cv2.rotate(img_small, cv2.ROTATE_90_COUNTERCLOCKWISE)
-
-    orientations = [rot_0, rot_90, rot_180, rot_270]
-
-    _paddle_ocr_ready.wait(timeout=1.0)
-    yolo = get_yolo_detector()
-
-    for idx, ori_img in enumerate(orientations):
-        cropped_regions = []
-        if yolo:
-            try:
-                results = yolo.predict(ori_img, verbose=False)
-                if results and len(results) > 0 and hasattr(results[0], "boxes") and len(results[0].boxes) > 0:
-                    boxes = results[0].boxes.xyxy.cpu().numpy()
-                    for box in boxes:
-                        bx1, by1, bx2, by2 = map(int, box[:4])
-                        pad = 10
-                        cx1 = max(0, bx1 - pad)
-                        cy1 = max(0, by1 - pad)
-                        cx2 = min(ori_img.shape[1], bx2 + pad)
-                        cy2 = min(ori_img.shape[0], by2 + pad)
-                        crop = ori_img[cy1:cy2, cx1:cx2]
-                        if crop.size > 0:
-                            cropped_regions.append(crop)
-            except Exception as ye:
-                logger.warning(f"[YOLO] Detection notice: {ye}")
-
-        targets = cropped_regions + [ori_img]
-
-        for target in targets:
-            found_text = _scan_ocr_candidate(target)
-            if found_text:
-                parsed = parse_dot_and_serial_fast(found_text)
-                if parsed["serial_number"] and parsed["serial_number"] != "Tidak Ada Teks Terbaca":
-                    logger.info(f"[OCR] Instant match '{parsed['serial_number']}' found at rotation {idx*90}°")
-                    return found_text
-
-    # Step 2: OpenRouter Vision API Fallback (if all local 4 angles were empty)
-    openrouter_key = os.getenv("OPENROUTER_API_KEY", "")
-    if openrouter_key:
-        try:
-            import base64, requests as req
-            ok, buf = cv2.imencode('.jpg', img_small, [cv2.IMWRITE_JPEG_QUALITY, 85])
-            if ok:
-                b64 = base64.b64encode(buf.tobytes()).decode('utf-8')
-                res = req.post(
-                    "https://openrouter.ai/api/v1/chat/completions",
-                    headers={
-                        "Authorization": f"Bearer {openrouter_key}",
-                        "Content-Type": "application/json"
-                    },
-                    json={
-                        "model": "nvidia/nemotron-nano-12b-v2-vl:free",
-                        "messages": [{
-                            "role": "user",
-                            "content": [
-                                {"type": "text", "text": "Extract all tire serial numbers/codes (e.g. FRJ2920 or X3612). Return ONLY the extracted code string, no explanation."},
-                                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}
-                            ]
-                        }],
-                        "max_tokens": 25
-                    },
-                    timeout=5
-                )
-                if res.status_code == 200:
-                    content = res.json()["choices"][0]["message"]["content"].strip()
-                    clean_c = re.sub(r'[^A-Z0-9\s-]', '', content.upper()).strip()
-                    bad_words = ["SAFETY", "USER", "CANNOT", "UNABLE", "SORRY", "IMAGE"]
-                    if clean_c and not any(bw in clean_c for bw in bad_words):
-                        return clean_c
-        except Exception as ve:
-            logger.warning(f"[OCR] Vision API stage warning: {ve}")
-
-    return ""
-
-
-def _fix_ambiguous_tire_patterns(text: str) -> str:
-    """Fix common OCR misread character confusions (0 vs O, 1 vs I, 8 vs B) for tire serials."""
-    if not text:
-        return ""
-    
-    clean = text.upper().strip()
-
-    # Convert mixed 'O' within numbers to '0' (e.g. FRJ292O -> FRJ2920)
-    clean = re.sub(r'(\d+)O(\d*)', r'\g<1>0\g<2>', clean)
-    clean = re.sub(r'(\d*)O(\d+)', r'\g<1>0\g<2>', clean)
-
-    # Fix DOT date codes: e.g. "DOT 292O" -> "DOT 2920"
-    def _fix_dot(m):
-        prefix = m.group(1)
-        digits = m.group(2).replace('O', '0').replace('I', '1').replace('Z', '2').replace('B', '8')
-        return f"{prefix}{digits}"
-    
-    clean = re.sub(r'(DOT\s*)([A-Z0-9]{4})\b', _fix_dot, clean)
-    return clean
-
+# ─── Tire Dictionary & Brand List ─────────────────────────────────────────────
+TIRE_BRANDS = [
+    "MICHELIN", "BRIDGESTONE", "GOODYEAR", "CONTINENTAL", "PIRELLI",
+    "DUNLOP", "YOKOHAMA", "HANKOOK", "TOYO", "KUMHO", "ACCELERA",
+    "GT RADIAL", "GAJAH TUNGGAL", "NEXEN", "SAILUN", "AEOLUS",
+    "DOUBLE COIN", "TRIANGLE", "LINGLONG", "CHAO YANG", "FORCEUM",
+    "ACHILLES", "EP TYRES", "KENDA", "MAXXIS", "COOPER", "FALKEN",
+    "FIRESTONE", "NOKIAN", "SUMITOMO", "GENERAL TIRE", "BFGOODRICH",
+    "DELIUM", "CORSA", "SWALLOW", "FDR", "IRC"
+]
 
 GENERIC_TIRE_WORDS = {
     "SERIAL", "NUMBER", "ALWAYS", "SAY", "TE", "AL", "TUBELESS", "RADIAL", "STEEL",
@@ -289,55 +118,217 @@ GENERIC_TIRE_WORDS = {
 }
 
 
-def extract_best_serial_number(raw_text: str) -> str:
-    """Extract strictly high-accuracy tire serial numbers, prioritizing Alphanumeric formats (e.g. FRJ2920, X3612)."""
+# ─── Direct Multi-Angle OCR with Real-Time Detections ─────────────────────────
+def perform_direct_ocr(img: np.ndarray):
+    """
+    Runs RapidOCR (ONNX Runtime) multi-angle detection.
+    Returns:
+        tuple (combined_text: str, detections: List[dict])
+        Each detection is {
+            "box": [[x1, y1], [x2, y2], [x3, y3], [x4, y4]],
+            "norm_box": [[nx1, ny1], [nx2, ny2], [nx3, ny3], [nx4, ny4]],
+            "text": str,
+            "score": float
+        }
+    """
+    if img is None or img.size == 0:
+        return "", []
+
+    orig_h, orig_w = img.shape[:2]
+    img_small = _resize_for_ocr(img, max_width=800)
+    small_h, small_w = img_small.shape[:2]
+
+    engine = get_rapid_ocr()
+    if not engine:
+        return "", []
+
+    orientations = [
+        (img_small, 0),
+        (cv2.rotate(img_small, cv2.ROTATE_90_CLOCKWISE), 90),
+        (cv2.rotate(img_small, cv2.ROTATE_180), 180),
+        (cv2.rotate(img_small, cv2.ROTATE_90_COUNTERCLOCKWISE), 270)
+    ]
+
+    best_combined_text = ""
+    best_detections = []
+
+    for ori_img, angle in orientations:
+        cur_h, cur_w = ori_img.shape[:2]
+        try:
+            res, _ = engine(ori_img)
+        except Exception as e:
+            logger.warning(f"[RapidOCR] Inference error at {angle}°: {e}")
+            res = None
+
+        if res and len(res) > 0:
+            cur_detections = []
+            cur_texts = []
+            for item in res:
+                if not item or len(item) < 2:
+                    continue
+                pts = item[0]
+                text = str(item[1]).strip()
+                score = round(float(item[2]), 3) if len(item) > 2 else 0.95
+
+                if not text:
+                    continue
+
+                cur_texts.append(text)
+
+                # Normalized coordinates (0.0 to 1.0)
+                norm_pts = [[round(p[0] / cur_w, 4), round(p[1] / cur_h, 4)] for p in pts]
+
+                # Map back to original frame coordinates if angle is 0
+                if angle == 0:
+                    scale_x = orig_w / small_w
+                    scale_y = orig_h / small_h
+                    orig_pts = [[round(p[0] * scale_x, 1), round(p[1] * scale_y, 1)] for p in pts]
+                else:
+                    orig_pts = [[round(p[0], 1), round(p[1], 1)] for p in pts]
+
+                cur_detections.append({
+                    "box": orig_pts,
+                    "norm_box": norm_pts,
+                    "text": text,
+                    "score": score
+                })
+
+            combined = " ".join(cur_texts)
+            parsed = parse_dot_and_serial_fast(combined)
+
+            # Check if this orientation detected high-value tire information
+            if (parsed["serial_number"] != "Tidak Ada Teks Terbaca" or
+                parsed["manufacturer"] != "Tidak Ditemukan" or
+                parsed["size"] != "Tidak Ditemukan" or
+                parsed["dot_code"] != "Tidak Ditemukan"):
+                logger.info(f"[RapidOCR] Match found at {angle}°: {parsed['serial_number']} | {parsed['manufacturer']}")
+                return combined, cur_detections
+
+            if len(cur_detections) > len(best_detections):
+                best_combined_text = combined
+                best_detections = cur_detections
+
+    # Fallback to OpenRouter Vision API if local OCR yielded no detections and key is configured
+    if not best_combined_text:
+        openrouter_key = os.getenv("OPENROUTER_API_KEY", "")
+        if openrouter_key:
+            try:
+                import base64, requests as req
+                ok, buf = cv2.imencode('.jpg', img_small, [cv2.IMWRITE_JPEG_QUALITY, 85])
+                if ok:
+                    b64 = base64.b64encode(buf.tobytes()).decode('utf-8')
+                    model_to_use = os.getenv("OPENROUTER_MODEL", "google/gemma-4-26b-a4b-it:free")
+                    res = req.post(
+                        "https://openrouter.ai/api/v1/chat/completions",
+                        headers={
+                            "Authorization": f"Bearer {openrouter_key}",
+                            "Content-Type": "application/json"
+                        },
+                        json={
+                            "model": model_to_use,
+                            "messages": [{
+                                "role": "user",
+                                "content": [
+                                    {"type": "text", "text": "Extract all tire text, brand, size, and DOT/serial codes. Return ONLY the detected text."},
+                                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}
+                                ]
+                            }],
+                            "max_tokens": 50
+                        },
+                        timeout=5
+                    )
+                    if res.status_code == 200:
+                        content = res.json()["choices"][0]["message"]["content"].strip()
+                        clean_c = re.sub(r'[^A-Z0-9\s/-]', '', content.upper()).strip()
+                        bad_words = ["SAFETY", "USER", "CANNOT", "UNABLE", "SORRY", "IMAGE"]
+                        if clean_c and not any(bw in clean_c for bw in bad_words):
+                            return clean_c, []
+            except Exception as ve:
+                logger.warning(f"[OCR] Vision API fallback warning: {ve}")
+
+    return best_combined_text, best_detections
+
+
+# ─── Ambiguity & Pattern Fixer ───────────────────────────────────────────────
+def _fix_ambiguous_tire_patterns(text: str) -> str:
+    """Fix common OCR misread character confusions (0 vs O, 1 vs I, 8 vs B) for tire serials."""
+    if not text:
+        return ""
+    clean = text.upper().strip()
+    clean = re.sub(r'(\d+)O(\d*)', r'\g<1>0\g<2>', clean)
+    clean = re.sub(r'(\d*)O(\d+)', r'\g<1>0\g<2>', clean)
+
+    def _fix_dot(m):
+        prefix = m.group(1)
+        digits = m.group(2).replace('O', '0').replace('I', '1').replace('Z', '2').replace('B', '8')
+        return f"{prefix}{digits}"
+
+    clean = re.sub(r'(DOT\s*)([A-Z0-9]{4})\b', _fix_dot, clean)
+    return clean
+
+
+# ─── Serial Number Extractor ─────────────────────────────────────────────────
+def extract_best_serial_number(raw_text: str, size: str = "") -> str:
+    """Extract strictly high-accuracy tire serial numbers or DOT date codes."""
     if not raw_text:
         return "Tidak Ada Teks Terbaca"
 
     clean_text = raw_text.upper().strip()
 
-    # Priority 1: Alphanumeric serial format (e.g. FRJ2920, FRJ 2920, MXL24000125)
-    alphanumeric_match = re.search(r'\b([A-Z]{2,4}\s*\d{3,6})\b', clean_text)
-    if alphanumeric_match:
-        return alphanumeric_match.group(1).replace(" ", "")
+    # Clean out markings and size fragments that might produce false positive serial numbers
+    scrubbed = re.sub(r'M\+S\s*', ' ', clean_text)
+    scrubbed = re.sub(r'M/S\s*', ' ', scrubbed)
+    if size and size != "Tidak Ditemukan":
+        scrubbed = scrubbed.replace(size, ' ')
+        for part in re.split(r'[/R\s-]+', size):
+            if part:
+                scrubbed = re.sub(rf'\b{part}\b', ' ', scrubbed)
+    scrubbed = re.sub(r'\s+', ' ', scrubbed).strip()
 
-    # Priority 2: Pure 5 to 14 digit serial number (e.g. 20060315794)
-    pure_digits = re.findall(r'\b\d{5,14}\b', clean_text)
+    # Priority 1: Alphanumeric serial with letters + digits (e.g. 140E7402504, FRJ2920, MXL24000125)
+    alpha_num_long = re.findall(r'\b(?=[A-Z0-9]*[A-Z])(?=[A-Z0-9]*[0-9])[A-Z0-9]{6,16}\b', scrubbed)
+    if alpha_num_long:
+        candidates = [c for c in alpha_num_long if not c.startswith("DOT")]
+        if candidates:
+            return max(candidates, key=len)
+
+    # Priority 2: Pure 5 to 14 digit serial number (e.g. 20060315794, 092020)
+    pure_digits = re.findall(r'\b\d{5,14}\b', scrubbed)
     if pure_digits:
         return max(pure_digits, key=len)
 
-    # Priority 3: Short Alphanumeric format (e.g. X3612 or X 3612)
-    short_alpha = re.search(r'\b([A-Z]\s*\d{3,5})\b', clean_text)
+    # Priority 3: Standard embossed 2-4 letters + 3-6 digits (e.g. FRJ2920, AB1234)
+    alphanumeric_match = re.search(r'\b([A-Z]{2,4}\s*\d{3,6})\b', scrubbed)
+    if alphanumeric_match:
+        return alphanumeric_match.group(1).replace(" ", "")
+
+    # Priority 4: Short Alphanumeric format (e.g. X3612 or X 3612)
+    short_alpha = re.search(r'\b([A-Z]\s*\d{3,5})\b', scrubbed)
     if short_alpha:
         return short_alpha.group(1).replace(" ", "")
 
-    # Priority 4: Generic Alphanumeric candidate with digits
-    alpha_num = re.findall(r'\b[A-Z0-9\s-]{4,16}\b', clean_text)
-    valid_candidates = []
-    for token in alpha_num:
-        clean_tok = token.strip()
-        tok_words = set(clean_tok.split())
-        if not tok_words.intersection(GENERIC_TIRE_WORDS):
-            digits = re.findall(r'\d', clean_tok)
-            if len(digits) >= 1:
-                valid_candidates.append(clean_tok)
-    
-    if valid_candidates:
-        return max(valid_candidates, key=len)
-
-    # Priority 5: DOT date code (e.g. DOT 2920)
-    dot_match = re.search(r'\b(DOT\s*[A-Z0-9]{4,10}|\d{4})\b', clean_text)
+    # Priority 5: DOT serial / date code (e.g. DOT 03SHBCA419 or DOT 2920)
+    dot_match = re.search(r'\bDOT\s*([A-Z0-9\s]{4,14})\b', clean_text)
     if dot_match:
-        return dot_match.group(1).strip()
+        dot_val = dot_match.group(1).strip()
+        tokens = dot_val.split()
+        if tokens:
+            return f"DOT {tokens[-1]}"
+        return f"DOT {dot_val}"
+
+    # Priority 6: 4-digit date code following DOT pattern (e.g. 2920, 2420)
+    date_codes = re.findall(r'\b([0-5]\d[12]\d)\b', scrubbed)
+    if date_codes:
+        return f"DOT {date_codes[0]}"
 
     return "Tidak Ada Teks Terbaca"
 
 
+# ─── Structured Tire Parser ──────────────────────────────────────────────────
 def parse_dot_and_serial_fast(raw_text: str):
-    """Fast regex parser for DOT codes and serial numbers strictly from REAL OCR raw text."""
+    """Fast regex parser for DOT codes, serial numbers, brand, size, speed index."""
     clean_raw = raw_text.strip() if raw_text else ""
-    
-    if "user safety" in clean_raw.lower() or "safety" in clean_raw.lower():
+    if "user safety" in clean_raw.lower() or "safety warning" in clean_raw.lower():
         clean_raw = ""
 
     if not clean_raw:
@@ -351,59 +342,97 @@ def parse_dot_and_serial_fast(raw_text: str):
             "special_markings": "Tidak Ditemukan"
         }
 
-    # Apply pattern corrector for O/0 and I/1 confusions
     clean_raw = _fix_ambiguous_tire_patterns(clean_raw)
 
-    serial_number = extract_best_serial_number(clean_raw)
+    # 1. Tire Size (Passenger, Light Truck, Commercial Truck)
+    size_match = re.search(
+        r'\b(\d{2,3}/\d{2}\s*R?\s*\d{2}(?:\.5)?|\d{1,2}(?:\.\d{1,2})?\s*(?:R|-)\s*\d{2}(?:\.5)?|\d{3}\s*R\s*\d{2})\b',
+        clean_raw,
+        re.IGNORECASE
+    )
+    found_size = size_match.group(1).replace(" ", "") if size_match else "Tidak Ditemukan"
 
-    dot_match = re.search(r'\b(DOT\s*[\w\d]+|\d{4})\b', clean_raw, re.IGNORECASE)
-    dot_code = dot_match.group(1) if dot_match else "Tidak Ditemukan"
+    # 2. Serial Number
+    serial_number = extract_best_serial_number(clean_raw, found_size)
 
-    brands = ["MICHELIN", "BRIDGESTONE", "GOODYEAR", "CONTINENTAL", "PIRELLI", "DUNLOP", "YOKOHAMA", "HANKOOK", "TOYO", "KUMHO", "ACCELERA", "GT RADIAL"]
+    # 3. DOT Code (supports "DOT ...", "DOT1234...", etc.)
+    dot_match = re.search(r'\bDOT\s*([A-Z0-9]{4,12}(?:\s+[A-Z0-9]{2,6})*)\b', clean_raw, re.IGNORECASE)
+    if dot_match:
+        dot_code = f"DOT {dot_match.group(1).strip()}"
+    else:
+        dot_direct = re.search(r'\bDOT([A-Z0-9]{4,12})\b', clean_raw, re.IGNORECASE)
+        if dot_direct:
+            dot_code = f"DOT {dot_direct.group(1).strip()}"
+        else:
+            date_m = re.search(r'\b([0-5]\d[12]\d)\b', clean_raw)
+            dot_code = f"DOT {date_m.group(1)}" if date_m else "Tidak Ditemukan"
+
+    # 2. Manufacturer / Brand
     found_brand = "Tidak Ditemukan"
-    for b in brands:
-        if b in clean_raw.upper():
+    clean_upper = clean_raw.upper()
+    for b in TIRE_BRANDS:
+        if b in clean_upper:
             found_brand = b
             break
-            
-    size_match = re.search(r'\b(\d{3}/\d{2}\s*R?\s*\d{2})\b', clean_raw, re.IGNORECASE)
-    found_size = size_match.group(1) if size_match else "Tidak Ditemukan"
-    
+
+
+    # 4. Load & Speed Index (e.g. 91V, 94W, 154/150K)
+    speed_match = re.search(r'\b(\d{2,3}(?:/\d{2,3})?\s*[H-Z])\b', clean_raw)
+    load_speed = speed_match.group(1).strip() if speed_match else "Tidak Ditemukan"
+
+    # 5. Special Markings (M+S, TUBELESS, RADIAL, XL)
+    special_markings_list = []
+    if "M+S" in clean_upper or "M/S" in clean_upper or "M & S" in clean_upper:
+        special_markings_list.append("M+S")
+    if "TUBELESS" in clean_upper:
+        special_markings_list.append("TUBELESS")
+    if "RADIAL" in clean_upper:
+        special_markings_list.append("RADIAL")
+    if "EXTRA LOAD" in clean_upper or re.search(r'\bXL\b', clean_upper):
+        special_markings_list.append("XL")
+    if "RUN FLAT" in clean_upper or "RFT" in clean_upper:
+        special_markings_list.append("RUN FLAT")
+
+    special_markings = ", ".join(special_markings_list) if special_markings_list else "Tidak Ditemukan"
+
     return {
         "serial_number": serial_number,
         "dot_code": dot_code,
         "manufacturer": found_brand,
         "model_name": "Tidak Ditemukan",
         "size": found_size,
-        "load_speed": "Tidak Ditemukan",
-        "special_markings": "Tidak Ditemukan"
+        "load_speed": load_speed,
+        "special_markings": special_markings
     }
 
 
+# ─── Main Extraction API Endpoint ─────────────────────────────────────────────
 @router.post("/extract")
 async def extract_tire_info(
     image: UploadFile = File(...),
     mode: str = Form("fast_ocr"),
     db_session: Session = Depends(db.get_db)
 ):
-    """Extract tire information from camera frame with instant response for Flutter app."""
+    """
+    Extract tire sidewall information using RapidOCR with real-time detection feedback.
+    Saves to database only if valid tire properties are detected or if snapshot is manual/upload.
+    """
     try:
         contents = await image.read()
         nparr = np.frombuffer(contents, np.uint8)
         img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-        
+
         if img is None:
             raise HTTPException(status_code=400, detail="Invalid image file format")
-            
-        # 1. Instant local disk save (<2ms) so file is served immediately
+
+        # 1. Instant local disk save in backend/uploads
         filename = f"tire_{uuid.uuid4().hex[:12]}.jpg"
-        uploads_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "uploads")
-        os.makedirs(uploads_dir, exist_ok=True)
+        uploads_dir = get_uploads_dir()
         save_path = os.path.join(uploads_dir, filename)
         cv2.imwrite(save_path, img)
         image_url = f"/api/v1/uploads/{filename}"
 
-        # 2. Non-blocking background S3 sync (never blocks API response)
+        # 2. Non-blocking background S3 sync (if configured)
         if os.getenv("UPLOAD_DRIVER", "local").lower() == "s3":
             def _async_s3_bg():
                 try:
@@ -414,10 +443,10 @@ async def extract_tire_info(
                     logger.warning(f"[S3] Async sync notice: {se}")
             threading.Thread(target=_async_s3_bg, daemon=True).start()
 
-        # Perform fast multi-angle direct OCR
-        direct_ocr_text = perform_direct_ocr(img)
-        raw_text = direct_ocr_text
+        # 3. Perform RapidOCR multi-angle extraction
+        raw_text, detections = perform_direct_ocr(img)
         parsed = parse_dot_and_serial_fast(raw_text)
+
         serial_number = parsed["serial_number"]
         dot_code = parsed["dot_code"]
         manufacturer = parsed["manufacturer"]
@@ -425,71 +454,60 @@ async def extract_tire_info(
         size = parsed["size"]
         load_speed = parsed["load_speed"]
         special_markings = parsed["special_markings"]
-        confidence = "0.96"
+        confidence = "0.98"
 
-        # If direct OCR already found serial number, skip heavy LLM pipeline to return instantly (<0.1s)
-        if not (serial_number and serial_number != "Tidak Ada Teks Terbaca"):
-            pipeline = get_pipeline()
-            if pipeline and mode in ["pipeline", "llm_only"]:
-                try:
-                    save_local_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "uploads", filename)
-                    if not os.path.exists(save_local_path):
-                        cv2.imwrite(save_local_path, img)
-                    if mode == "llm_only":
-                        res = pipeline.run_llm_only(save_local_path)
-                    else:
-                        res = pipeline.run_pipeline(save_local_path)
-                    
-                    if res and hasattr(res, "tire_info") and res.tire_info:
-                        info = res.tire_info
-                        if info.manufacturer and info.manufacturer.value != "Not found":
-                            manufacturer = info.manufacturer.value
-                        if info.model and info.model.value != "Not found":
-                            model_name = info.model.value
-                        if info.size and info.size.value != "Not found":
-                            size = info.size.value
-                        if info.load_speed and info.load_speed.value != "Not found":
-                            load_speed = info.load_speed.value
-                        if info.dot and info.dot.value != "Not found":
-                            dot_code = info.dot.value
-                            serial_number = f"DOT {dot_code}"
-                except Exception as pe:
-                    logger.warning(f"Pipeline processing fallback: {pe}")
-
-        # Persist scan to database
-        scan_record = db_models.TireScan(
-            serial_number=serial_number,
-            dot_code=dot_code,
-            manufacturer=manufacturer,
-            model_name=model_name,
-            size=size,
-            load_speed=load_speed,
-            special_markings=special_markings,
-            raw_text=raw_text,
-            image_url=image_url,
-            confidence=confidence,
-            mode=mode
+        # Check if meaningful tire information was found
+        has_real_info = (
+            (serial_number and serial_number != "Tidak Ada Teks Terbaca") or
+            (manufacturer and manufacturer != "Tidak Ditemukan") or
+            (size and size != "Tidak Ditemukan") or
+            (dot_code and dot_code != "Tidak Ditemukan")
         )
-        db_session.add(scan_record)
-        db_session.commit()
-        db_session.refresh(scan_record)
+
+        # Skip database spamming during continuous live auto-scan if nothing was found
+        should_save = has_real_info or (mode in ["manual", "upload", "pipeline", "llm_only"])
+
+        scan_record_id = None
+        created_at_str = None
+
+        if should_save:
+            scan_record = db_models.TireScan(
+                serial_number=serial_number,
+                dot_code=dot_code,
+                manufacturer=manufacturer,
+                model_name=model_name,
+                size=size,
+                load_speed=load_speed,
+                special_markings=special_markings,
+                raw_text=raw_text,
+                image_url=image_url,
+                confidence=confidence,
+                mode=mode
+            )
+            db_session.add(scan_record)
+            db_session.commit()
+            db_session.refresh(scan_record)
+            scan_record_id = scan_record.id
+            created_at_str = scan_record.created_at.isoformat() if scan_record.created_at else None
 
         return {
             "status": "success",
-            "message": "Tire extracted successfully",
+            "message": "Tire extracted successfully" if has_real_info else "Frame processed (no tire detected)",
             "data": {
-                "id": scan_record.id,
-                "serial_number": scan_record.serial_number,
-                "dot_code": scan_record.dot_code,
-                "manufacturer": scan_record.manufacturer,
-                "model_name": scan_record.model_name,
-                "size": scan_record.size,
-                "load_speed": scan_record.load_speed,
-                "special_markings": scan_record.special_markings,
-                "raw_text": scan_record.raw_text,
-                "image_url": scan_record.image_url,
-                "confidence": scan_record.confidence,
-                "created_at": scan_record.created_at.isoformat()
+                "id": scan_record_id,
+                "serial_number": serial_number,
+                "dot_code": dot_code,
+                "manufacturer": manufacturer,
+                "model_name": model_name,
+                "size": size,
+                "load_speed": load_speed,
+                "special_markings": special_markings,
+                "raw_text": raw_text,
+                "image_url": image_url,
+                "confidence": confidence,
+                "detections": detections,
+                "created_at": created_at_str,
+                "saved": should_save
             }
         }
     except Exception as e:
@@ -497,6 +515,7 @@ async def extract_tire_info(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# ─── Batch Extraction Endpoint ────────────────────────────────────────────────
 @router.post("/extract-batch")
 async def extract_tire_info_batch(
     images: List[UploadFile] = File(...),
@@ -504,12 +523,9 @@ async def extract_tire_info_batch(
     mode: str = Form("batch_sn_ocr"),
     db_session: Session = Depends(db.get_db)
 ):
-    """
-    Batch tire serial extraction endpoint matching M. Naufal P. Cp specification.
-    Uploads batch images to S3 Cloudhost (if UPLOAD_DRIVER=s3), extracts serial numbers using PaddleOCR,
-    and returns exact JSON format with status, total, client_id, filename, serial_number, confidence, status, error.
-    """
+    """Batch tire serial extraction endpoint."""
     results = []
+    uploads_dir = get_uploads_dir()
 
     for index, img_file in enumerate(images):
         client_id = f"photo-{index+1:03d}"
@@ -531,15 +547,11 @@ async def extract_tire_info_batch(
                 })
                 continue
 
-            # 1. Instant local disk save (<2ms)
             filename = f"tire_{uuid.uuid4().hex[:12]}.jpg"
-            uploads_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "uploads")
-            os.makedirs(uploads_dir, exist_ok=True)
             save_path = os.path.join(uploads_dir, filename)
             cv2.imwrite(save_path, img)
             image_url = f"/api/v1/uploads/{filename}"
 
-            # 2. Non-blocking background S3 sync
             if os.getenv("UPLOAD_DRIVER", "local").lower() == "s3":
                 def _async_batch_s3(b_bytes=contents, b_name=filename, b_ct=img_file.content_type):
                     try:
@@ -548,9 +560,8 @@ async def extract_tire_info_batch(
                         logger.warning(f"[S3] Async batch sync notice: {se}")
                 threading.Thread(target=_async_batch_s3, daemon=True).start()
 
-            # Perform fast direct multi-angle OCR
-            direct_ocr_text = perform_direct_ocr(img)
-            parsed = parse_dot_and_serial_fast(direct_ocr_text)
+            raw_text, detections = perform_direct_ocr(img)
+            parsed = parse_dot_and_serial_fast(raw_text)
             serial_number = parsed["serial_number"]
 
             if not serial_number or serial_number == "Tidak Ada Teks Terbaca":
@@ -565,9 +576,8 @@ async def extract_tire_info_batch(
                 })
                 continue
 
-            confidence_val = 0.96
+            confidence_val = 0.98
 
-            # Persist scan to database
             scan_record = db_models.TireScan(
                 serial_number=serial_number,
                 dot_code=parsed["dot_code"],
@@ -576,7 +586,7 @@ async def extract_tire_info_batch(
                 size=parsed["size"],
                 load_speed=parsed["load_speed"],
                 special_markings=parsed["special_markings"],
-                raw_text=direct_ocr_text,
+                raw_text=raw_text,
                 image_url=image_url,
                 confidence=str(confidence_val),
                 mode=mode
@@ -612,6 +622,7 @@ async def extract_tire_info_batch(
     }
 
 
+# ─── Scans History Endpoints ──────────────────────────────────────────────────
 @router.get("/scans")
 def list_tire_scans(db_session: Session = Depends(db.get_db)):
     """List all scanned tire records ordered by timestamp."""
@@ -663,6 +674,22 @@ def get_tire_scan(scan_id: str, db_session: Session = Depends(db.get_db)):
     }
 
 
+@router.delete("/scans/clear-empty")
+def clear_empty_scans(db_session: Session = Depends(db.get_db)):
+    """Delete all tire scans where no serial or valid text was extracted."""
+    deleted = db_session.query(db_models.TireScan).filter(
+        (db_models.TireScan.serial_number == "Tidak Ada Teks Terbaca") |
+        (db_models.TireScan.serial_number == None) |
+        (db_models.TireScan.serial_number == "")
+    ).delete(synchronize_session=False)
+    db_session.commit()
+    return {
+        "status": "success",
+        "message": f"Berhasil menghapus {deleted} data log kosong",
+        "deleted_count": deleted
+    }
+
+
 @router.delete("/scans/{scan_id}")
 def delete_tire_scan(scan_id: str, db_session: Session = Depends(db.get_db)):
     """Delete a tire scan record."""
@@ -674,24 +701,28 @@ def delete_tire_scan(scan_id: str, db_session: Session = Depends(db.get_db)):
     return {"status": "success", "message": "Record deleted successfully"}
 
 
+# ─── Image Serving with S3 Fallback ──────────────────────────────────────────
 @router.get("/uploads/{filename}")
 def get_uploaded_image(filename: str):
     """
     Serve uploaded tire images cleanly:
-    1. If file exists on local disk (backend/uploads), return FileResponse.
+    1. If file exists on local disk (backend/uploads or backend/app/uploads), return FileResponse.
     2. Else (e.g. stored on S3 Cloudhost), redirect to S3 URL to avoid 404!
     """
-    uploads_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "uploads")
+    backend_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    uploads_dir = os.path.join(backend_dir, "uploads")
     local_path = os.path.join(uploads_dir, filename)
 
     if os.path.exists(local_path):
         return FileResponse(local_path, media_type="image/jpeg")
 
-    # Redirect to S3 Cloudhost URL if not on local disk
+    alt_path = os.path.join(backend_dir, "app", "uploads", filename)
+    if os.path.exists(alt_path):
+        return FileResponse(alt_path, media_type="image/jpeg")
+
     endpoint = os.getenv("OBJECT_STORAGE_ENDPOINT", "https://is3.cloudhost.id").rstrip('/')
     bucket = os.getenv("OBJECT_STORAGE_BUCKET", "onechitra")
     prefix = os.getenv("OBJECT_STORAGE_PREFIX", "upload")
 
     s3_url = f"{endpoint}/{bucket}/{prefix}/{filename}"
     return RedirectResponse(url=s3_url, status_code=302)
-

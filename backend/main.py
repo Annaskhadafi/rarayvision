@@ -26,7 +26,7 @@ from pathlib import Path
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import JSONResponse, HTMLResponse, StreamingResponse, FileResponse, Response
+from fastapi.responses import JSONResponse, HTMLResponse, StreamingResponse, FileResponse, Response, RedirectResponse
 from fastapi.openapi.docs import get_swagger_ui_html, get_redoc_html
 from starlette.exceptions import HTTPException as StarletteHTTPException
 import socketio
@@ -124,10 +124,20 @@ def stream_upload_file(filename: str, request: Request):
     """
     HTTP Byte-Range Streaming endpoint (HTTP 206 Partial Content).
     Enables native HTML5 MP4 video streaming and seeking in Chrome, Edge, Safari, and Firefox.
+    Falls back to S3 redirect if file is not stored on local disk.
     """
     file_path = os.path.join(uploads_dir, filename)
     if not os.path.exists(file_path):
-        raise StarletteHTTPException(status_code=404, detail="File not found")
+        alt_path = os.path.join(os.path.dirname(__file__), "app", "uploads", filename)
+        if os.path.exists(alt_path):
+            file_path = alt_path
+        else:
+            # Fallback redirect to S3 Cloudhost Object Storage
+            endpoint = os.getenv("OBJECT_STORAGE_ENDPOINT", "https://is3.cloudhost.id").rstrip('/')
+            bucket = os.getenv("OBJECT_STORAGE_BUCKET", "onechitra")
+            prefix = os.getenv("OBJECT_STORAGE_PREFIX", "upload")
+            s3_url = f"{endpoint}/{bucket}/{prefix}/{filename}"
+            return RedirectResponse(url=s3_url, status_code=302)
 
     file_size = os.path.getsize(file_path)
     range_header = request.headers.get("range")
