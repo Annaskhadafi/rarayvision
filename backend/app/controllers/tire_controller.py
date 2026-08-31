@@ -81,8 +81,8 @@ def _resize_for_ocr(img: np.ndarray, max_width: int = 1280, min_height: int = 25
             return cv2.resize(img, (4800, int(h * scale)), interpolation=cv2.INTER_AREA)
         return img
 
-    if max(h, w) > max_dimension:
-        scale = max_dimension / max(h, w)
+    if max(h, w) > max_width:
+        scale = max_width / max(h, w)
         return cv2.resize(img, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
     return img
 
