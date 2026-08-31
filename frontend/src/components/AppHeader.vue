@@ -55,7 +55,6 @@ const goTo = (path) => {
         <a v-if="store.isLoggedIn" href="#" :class="{ active: $route.path === '/tester' }" @click.prevent="goTo('/tester')">Tester</a>
         <a v-if="store.isLoggedIn" href="#" :class="{ active: $route.path === '/live' }" @click.prevent="goTo('/live')">Live</a>
         <a v-if="store.isLoggedIn" href="#" :class="{ active: $route.path.startsWith('/tires') }" @click.prevent="goTo('/tires')">Tire OCR</a>
-        <a v-if="store.isLoggedIn" href="#" :class="{ active: $route.path.startsWith('/inventory') }" @click.prevent="goTo('/inventory/playground')">Inventory</a>
         <a v-if="store.isLoggedIn" href="#" :class="{ active: $route.path.startsWith('/hse') }" @click.prevent="goTo('/hse/playground')">HSE / K3</a>
         <a v-if="store.isLoggedIn" href="#" :class="{ active: $route.path.startsWith('/cameras') }" @click.prevent="goTo('/cameras/grid')">CCTV Grid</a>
         <!-- Docs dropdown -->

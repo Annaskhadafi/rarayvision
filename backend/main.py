@@ -248,7 +248,7 @@ async def filter_openapi_schema(request: Request, call_next):
             return JSONResponse(content=json.loads(body), status_code=response.status_code)
     return response
 
-from backend.app.controllers import auth_controller, api_key_controller, face_controller, tire_controller, inventory_controller, hse_controller, camera_controller, pdf_inspector_controller, anti_spoof_controller, anydoc_controller, rag_controller, rag_datasource_controller, automl_controller
+from backend.app.controllers import auth_controller, api_key_controller, face_controller, tire_controller, inventory_controller, hse_controller, camera_controller, pdf_inspector_controller, anti_spoof_controller, anydoc_controller, rag_controller, rag_datasource_controller
 
 # Include Routers
 fastapi_app.include_router(auth_controller.router)
@@ -264,18 +264,6 @@ fastapi_app.include_router(anti_spoof_controller.router)
 fastapi_app.include_router(anydoc_controller.router)
 fastapi_app.include_router(rag_controller.router)
 fastapi_app.include_router(rag_datasource_controller.router)
-fastapi_app.include_router(automl_controller.router)
-
-# Mount Tire Counter Sub-App directly onto /tire-api
-try:
-    _tire_dir = os.path.join(_PARENT_DIR, "warehouse-tire-counter")
-    if _tire_dir not in sys.path:
-        sys.path.insert(0, _tire_dir)
-    from app import app as tire_counter_app
-    fastapi_app.mount("/tire-api", tire_counter_app)
-    print("[MainAPI] Successfully mounted /tire-api onto Vision API container.")
-except Exception as e:
-    print(f"[MainAPI] Warning: Could not mount tire-counter sub-app: {e}")
 
 
 _FAVICON = "/api/v1/uploads/favicon.png"

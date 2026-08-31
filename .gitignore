@@ -51,8 +51,6 @@ backend/models/*.onnx
 # Large Media / Demo Assets
 # =========================
 frontend/src/assets/face.mp4
-warehouse-tire-counter/samples/
-warehouse-tire-counter/uploads/
 
 # =========================
 # Node / Frontend

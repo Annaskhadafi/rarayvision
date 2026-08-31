@@ -2,7 +2,7 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-ENV PYTHONPATH="/app:/app/backend:/app/warehouse-tire-counter"
+ENV PYTHONPATH="/app:/app/backend"
 ENV PYTHONUNBUFFERED=1
 
 # Install system dependencies for OpenCV, Tesseract, PyTorch, FFMPEG, PaddleOCR, and ONNX
@@ -40,8 +40,8 @@ COPY . .
 # Ensure entrypoint script is executable
 RUN chmod +x scripts/entrypoint.sh
 
-# Expose Main Vision API (5000) and Warehouse Tire Counter (8001)
-EXPOSE 5000 8001
+# Expose Main Vision API (5000)
+EXPOSE 5000
 
 CMD ["/bin/bash", "scripts/entrypoint.sh"]
 

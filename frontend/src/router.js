@@ -58,15 +58,6 @@ const routes = [
     redirect: '/rag'
   },
   {
-    path: '/automl',
-    component: () => import('./views/AutoMLAnalyticsView.vue'),
-    meta: { requiresAuth: true }
-  },
-  {
-    path: '/forecast',
-    redirect: '/automl'
-  },
-  {
     path: '/anti-spoof',
     component: () => import('./views/AntiSpoofCompareView.vue'),
     meta: { requiresAuth: true }
@@ -84,23 +75,6 @@ const routes = [
   {
     path: '/users',
     component: () => import('./views/UsersView.vue'),
-    meta: { requiresAuth: true }
-  },
-  // Inventory Routes
-  { path: '/inventory', redirect: '/inventory/playground' },
-  {
-    path: '/inventory/playground',
-    component: () => import('./views/inventory/InventoryPlaygroundView.vue'),
-    meta: { requiresAuth: true }
-  },
-  {
-    path: '/inventory/config',
-    component: () => import('./views/inventory/InventoryConfigView.vue'),
-    meta: { requiresAuth: true }
-  },
-  {
-    path: '/inventory/history',
-    component: () => import('./views/inventory/InventoryHistoryView.vue'),
     meta: { requiresAuth: true }
   },
   // HSE Safety Routes
@@ -130,12 +104,6 @@ const routes = [
   {
     path: '/cameras/grid',
     component: () => import('./views/cameras/CameraGridView.vue'),
-    meta: { requiresAuth: true }
-  },
-  // Tire Counter (Mining OTR & Warehouse)
-  {
-    path: '/tire-counter',
-    component: () => import('./views/TireCounterView.vue'),
     meta: { requiresAuth: true }
   }
 ]

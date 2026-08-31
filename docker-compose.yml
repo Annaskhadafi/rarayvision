@@ -30,14 +30,8 @@ services:
       - uploads_data:/app/backend/uploads
       - models_data:/app/backend/ml_models
       - fastembed_cache:/root/.local/share/fastembed
-      - tire_cache:/tmp/raray_media_cache
-      - tire_uploads:/app/warehouse-tire-counter/uploads
-      - tire_samples:/app/warehouse-tire-counter/samples
     expose:
       - "5000"
-      - "8001"
-    ports:
-      - "8001:8001"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
       interval: 30s
@@ -58,7 +52,4 @@ volumes:
   uploads_data:
   models_data:
   fastembed_cache:
-  tire_cache:
-  tire_uploads:
-  tire_samples:
 
