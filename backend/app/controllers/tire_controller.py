@@ -6,7 +6,8 @@ import numpy as np
 import logging
 import threading
 from typing import Optional, List
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Request
+from pydantic import BaseModel
 from fastapi.responses import FileResponse, RedirectResponse
 from sqlalchemy.orm import Session
 
@@ -17,6 +18,9 @@ from backend.app.services.s3_service import upload_file_to_s3
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/tire", tags=["Tire Sidewall OCR"])
+
+class BulkDeleteRequest(BaseModel):
+    ids: List[str]
 
 # ─── Uploads Directory Helper ────────────────────────────────────────────────
 def get_uploads_dir() -> str:
@@ -690,6 +694,23 @@ def clear_empty_scans(db_session: Session = Depends(db.get_db)):
     }
 
 
+@router.delete("/scans/bulk-delete")
+def bulk_delete_tire_scans(payload: BulkDeleteRequest, db_session: Session = Depends(db.get_db)):
+    """Bulk delete multiple tire scan records by list of IDs."""
+    ids = payload.ids
+    if not ids:
+        raise HTTPException(status_code=400, detail="No IDs provided")
+    deleted = db_session.query(db_models.TireScan).filter(
+        db_models.TireScan.id.in_(ids)
+    ).delete(synchronize_session=False)
+    db_session.commit()
+    return {
+        "status": "success",
+        "message": f"Berhasil menghapus {deleted} catatan ban",
+        "deleted_count": deleted
+    }
+
+
 @router.delete("/scans/{scan_id}")
 def delete_tire_scan(scan_id: str, db_session: Session = Depends(db.get_db)):
     """Delete a tire scan record."""
@@ -699,6 +720,7 @@ def delete_tire_scan(scan_id: str, db_session: Session = Depends(db.get_db)):
     db_session.delete(s)
     db_session.commit()
     return {"status": "success", "message": "Record deleted successfully"}
+
 
 
 # ─── Image Serving with S3 Fallback ──────────────────────────────────────────

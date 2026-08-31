@@ -4,6 +4,10 @@ import { API_BASE_URL } from '../utils'
 
 const activeTab = ref('live') // 'live', 'upload', 'logs'
 
+// Multi-select State
+const selectedIds = ref(new Set())
+const isBulkDeleting = ref(false)
+
 // Live Camera State
 const videoRef = ref(null)
 const canvasRef = ref(null)
@@ -413,6 +417,78 @@ const filteredLogs = computed(() => {
   )
 })
 
+const allSelected = computed(() => {
+  return filteredLogs.value.length > 0 && filteredLogs.value.every(s => selectedIds.value.has(s.id))
+})
+
+const someSelected = computed(() => {
+  return filteredLogs.value.some(s => selectedIds.value.has(s.id)) && !allSelected.value
+})
+
+const toggleSelectAll = () => {
+  if (allSelected.value) {
+    // Deselect all visible rows
+    filteredLogs.value.forEach(s => selectedIds.value.delete(s.id))
+  } else {
+    // Select all visible rows
+    filteredLogs.value.forEach(s => selectedIds.value.add(s.id))
+  }
+  // trigger reactivity
+  selectedIds.value = new Set(selectedIds.value)
+}
+
+const toggleSelect = (id) => {
+  const copy = new Set(selectedIds.value)
+  if (copy.has(id)) {
+    copy.delete(id)
+  } else {
+    copy.add(id)
+  }
+  selectedIds.value = copy
+}
+
+const bulkDelete = async () => {
+  const count = selectedIds.value.size
+  if (count === 0) return
+  if (!confirm(`Apakah Anda yakin ingin menghapus ${count} catatan ban yang dipilih?`)) return
+  isBulkDeleting.value = true
+  try {
+    const ids = Array.from(selectedIds.value)
+    const res = await fetch(`${API_BASE_URL}/api/v1/tire/scans/bulk-delete`, {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ids })
+    })
+    const data = await res.json()
+    if (data.status === 'success') {
+      selectedIds.value = new Set()
+      await fetchLogs()
+    } else {
+      // Fallback: delete one-by-one
+      await Promise.all(ids.map(id =>
+        fetch(`${API_BASE_URL}/api/v1/tire/scans/${id}`, { method: 'DELETE' })
+      ))
+      selectedIds.value = new Set()
+      await fetchLogs()
+    }
+  } catch (e) {
+    // Fallback: delete one-by-one
+    try {
+      const ids = Array.from(selectedIds.value)
+      await Promise.all(ids.map(id =>
+        fetch(`${API_BASE_URL}/api/v1/tire/scans/${id}`, { method: 'DELETE' })
+      ))
+      selectedIds.value = new Set()
+      await fetchLogs()
+    } catch (e2) {
+      console.error('Bulk delete error:', e2)
+      alert('Gagal menghapus catatan yang dipilih.')
+    }
+  } finally {
+    isBulkDeleting.value = false
+  }
+}
+
 onMounted(() => {
   fetchLogs()
   initCamera()
@@ -578,10 +654,37 @@ onUnmounted(() => {
         </div>
       </div>
 
+      <!-- Bulk Action Toolbar (shows when items selected) -->
+      <div v-if="selectedIds.size > 0" class="bulk-toolbar">
+        <span class="bulk-count">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>
+          {{ selectedIds.size }} item dipilih
+        </span>
+        <div class="bulk-actions">
+          <button class="btn btn-sm btn-outline-muted" @click="selectedIds = new Set()">
+            Batalkan Pilihan
+          </button>
+          <button class="btn btn-sm btn-bulk-danger" :disabled="isBulkDeleting" @click="bulkDelete">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+            {{ isBulkDeleting ? 'Menghapus...' : `Hapus ${selectedIds.size} Data` }}
+          </button>
+        </div>
+      </div>
+
       <div class="table-wrap">
         <table class="data-table">
           <thead>
             <tr>
+              <th class="cb-col">
+                <input
+                  type="checkbox"
+                  class="row-checkbox"
+                  :checked="allSelected"
+                  :indeterminate="someSelected"
+                  @change="toggleSelectAll"
+                  title="Pilih Semua"
+                />
+              </th>
               <th>Foto</th>
               <th>Serial Number / DOT</th>
               <th>Manufacturer</th>
@@ -592,7 +695,15 @@ onUnmounted(() => {
             </tr>
           </thead>
           <tbody>
-            <tr v-for="scan in filteredLogs" :key="scan.id">
+            <tr v-for="scan in filteredLogs" :key="scan.id" :class="{ 'row-selected': selectedIds.has(scan.id) }">
+              <td class="cb-col">
+                <input
+                  type="checkbox"
+                  class="row-checkbox"
+                  :checked="selectedIds.has(scan.id)"
+                  @change="toggleSelect(scan.id)"
+                />
+              </td>
               <td>
                 <div class="thumb-wrapper" @click="selectedScanDetail = scan">
                   <img 
@@ -622,7 +733,7 @@ onUnmounted(() => {
               </td>
             </tr>
             <tr v-if="filteredLogs.length === 0">
-              <td colspan="7" class="text-center">Tidak ada catatan pemindaian ban.</td>
+              <td colspan="8" class="text-center">Tidak ada catatan pemindaian ban.</td>
             </tr>
           </tbody>
         </table>
@@ -760,4 +871,46 @@ onUnmounted(() => {
 .modal-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem; }
 .close-btn { background: none; border: none; font-size: 1.5rem; cursor: pointer; }
 .modal-img { width: 100%; max-height: 280px; object-fit: cover; border-radius: 8px; margin-bottom: 1rem; border: 1px solid #e2e8f0; }
+
+/* ─── Multi-Select & Bulk Delete ─── */
+.cb-col { width: 44px; text-align: center; padding: 0 0.5rem !important; }
+.row-checkbox {
+  width: 16px; height: 16px; cursor: pointer;
+  accent-color: #2563eb;
+  border-radius: 4px;
+}
+.row-selected td { background: #eff6ff !important; }
+.row-selected:hover td { background: #dbeafe !important; }
+
+.bulk-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: #eff6ff;
+  border: 1px solid #bfdbfe;
+  border-radius: 10px;
+  padding: 0.6rem 1rem;
+  margin-bottom: 0.75rem;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  animation: slideIn 0.2s ease;
+}
+@keyframes slideIn {
+  from { opacity: 0; transform: translateY(-8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.bulk-count {
+  display: flex; align-items: center; gap: 0.4rem;
+  font-weight: 700; color: #1e40af; font-size: 0.9rem;
+}
+.bulk-actions { display: flex; gap: 0.5rem; align-items: center; }
+.btn-sm { padding: 0.4rem 0.85rem; font-size: 0.82rem; border-radius: 7px; }
+.btn-outline-muted { background: #fff; color: #475569; border: 1px solid #cbd5e1; }
+.btn-outline-muted:hover { background: #f1f5f9; }
+.btn-bulk-danger {
+  background: #dc2626; color: #fff; border: none;
+  display: inline-flex; align-items: center; gap: 0.4rem;
+}
+.btn-bulk-danger:hover:not(:disabled) { background: #b91c1c; }
+.btn-bulk-danger:disabled { opacity: 0.65; cursor: not-allowed; }
 </style>
