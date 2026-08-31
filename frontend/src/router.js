@@ -146,6 +146,12 @@ const routes = [
     path: '/tire-counter',
     component: () => import('./views/TireCounterView.vue'),
     meta: { requiresAuth: true }
+  },
+  // System — Model Manager
+  {
+    path: '/model-manager',
+    component: () => import('./views/system/ModelManagerView.vue'),
+    meta: { requiresAuth: true }
   }
 ]
 
