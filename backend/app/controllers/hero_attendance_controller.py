@@ -145,7 +145,7 @@ async def hero_recognize_face(
             return {"status": "no_faces_registered", "recognized": False, "message": "No faces registered for this tenant"}
 
         result = await loop.run_in_executor(
-            thread_pool, process_recognize_live, img, tenant_faces, "identify"
+            thread_pool, process_recognize_live, img, tenant_faces, "liveness_identify"
         )
 
         # Parse result from process_recognize_live
@@ -258,7 +258,7 @@ async def hero_verify_face(
         # Extract embedding from live image
         loop = asyncio.get_running_loop()
         result = await loop.run_in_executor(
-            thread_pool, lambda: process_register_logic(img, check_spoof=False)
+            thread_pool, lambda: process_register_logic(img, check_spoof=True)
         )
         if result.get("status") != "success":
             return {"status": "error", "verified": False, "message": result.get("message", "Face not detected")}

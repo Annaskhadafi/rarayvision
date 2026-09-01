@@ -108,20 +108,29 @@ async def update_face_config_endpoint(payload: dict, db_session: Session = Depen
             db_session.add(config)
         
         if "threshold" in payload:
-            config.confidence = float(payload["threshold"])
+            threshold = float(payload["threshold"])
+            if not 0.20 <= threshold <= 0.99:
+                raise HTTPException(status_code=400, detail="threshold must be between 0.20 and 0.99")
+            config.confidence = threshold
         if "engine_mode" in payload:
             mode = payload["engine_mode"].lower()
             if mode in ["v1", "v2"]:
                 config.model_name = mode
                 set_global_engine_mode(mode)
         if "liveness_threshold" in payload:
-            config.iou_threshold = float(payload["liveness_threshold"])
+            liveness_threshold = float(payload["liveness_threshold"])
+            if not 0.0 <= liveness_threshold <= 1.0:
+                raise HTTPException(status_code=400, detail="liveness_threshold must be between 0 and 1")
+            config.iou_threshold = liveness_threshold
             
         extra = json.loads(config.extra_params) if config.extra_params else {}
         if "check_liveness" in payload:
             extra["check_liveness"] = bool(payload["check_liveness"])
         if "laplacian_threshold" in payload:
-            extra["laplacian_threshold"] = float(payload["laplacian_threshold"])
+            laplacian_threshold = float(payload["laplacian_threshold"])
+            if not 0.0 <= laplacian_threshold <= 1.0:
+                raise HTTPException(status_code=400, detail="laplacian_threshold must be between 0 and 1")
+            extra["laplacian_threshold"] = laplacian_threshold
             
         config.extra_params = json.dumps(extra)
         db_session.commit()

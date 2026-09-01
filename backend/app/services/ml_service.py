@@ -600,6 +600,18 @@ def process_compare_logic(img, user_id, tenant_faces, engine_mode: Optional[str]
         return {"status": "error", "message": "Multiple faces detected. Please ensure only one face is visible."}
     
     target_face = faces[0]
+    cfg = load_db_face_config()
+    liveness_score, is_real = check_liveness(
+        img, target_face.bbox, kps=target_face.kps, engine_mode=engine_mode
+    )
+    if not is_real:
+        return {
+            "status": "success",
+            "match": False,
+            "verified": False,
+            "liveness_score": float(liveness_score),
+            "message": "Liveness check failed"
+        }
 
     # 1. Search in RAM
     user_data = next((u for u in known_faces_db if str(u["id"]) == str(user_id)), None)
@@ -613,7 +625,6 @@ def process_compare_logic(img, user_id, tenant_faces, engine_mode: Optional[str]
 
     # 3. Bandingkan
     similarity = compute_similarity(target_face.embedding, target_embedding_db)
-    cfg = load_db_face_config()
     THRESHOLD = cfg["threshold"]
     latency_ms = round((time.perf_counter() - start_t) * 1000, 2)
     current_mode = engine_mode or _active_engine_mode
@@ -622,7 +633,10 @@ def process_compare_logic(img, user_id, tenant_faces, engine_mode: Optional[str]
         return {
             "status": "success",
             "match": True,
+            "verified": True,
             "similarity": float(similarity),
+            "threshold": float(THRESHOLD),
+            "liveness_score": float(liveness_score),
             "message": "Face matched",
             "engine_mode": current_mode,
             "latency_ms": latency_ms
@@ -631,7 +645,10 @@ def process_compare_logic(img, user_id, tenant_faces, engine_mode: Optional[str]
         return {
             "status": "success",
             "match": False,
+            "verified": False,
             "similarity": float(similarity),
+            "threshold": float(THRESHOLD),
+            "liveness_score": float(liveness_score),
             "message": "Face did not match",
             "engine_mode": current_mode,
             "latency_ms": latency_ms
