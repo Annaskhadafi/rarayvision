@@ -60,10 +60,15 @@ class TireExtractionConfig:
     # Logging configuration
     LOGGING_LEVEL = "INFO"
 
+    # OpenAI-compatible API configuration (9router)
+    OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+    OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://9router.chitraparatama.com/v1")
+    OPENAI_MODEL = os.getenv("OPENAI_MODEL", "cx/gpt-5.6-luna")
+
     # OpenRouter API configuration
     OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
     OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "google/gemma-4-26b-a4b-it:free")
-    LLM_PROVIDER = os.getenv("LLM_PROVIDER", "openrouter")
+    LLM_PROVIDER = os.getenv("LLM_PROVIDER", "openai")
 
     # Google Gemini API configuration
     GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")

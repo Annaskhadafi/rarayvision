@@ -267,14 +267,34 @@ class RagService:
     @staticmethod
     def get_embedding_info() -> Dict[str, Any]:
         """Returns active embedding provider, reranker info, LLM engine info, and Redis status."""
+        openai_key = os.getenv("OPENAI_API_KEY", "")
+        openai_base_url = os.getenv("OPENAI_BASE_URL", "https://9router.chitraparatama.com/v1")
+        openai_model = os.getenv("OPENAI_MODEL", "cx/gpt-5.6-luna")
         groq_key = os.getenv("GROQ_API_KEY", "")
         gemini_key = os.getenv("GEMINI_API_KEY", "")
         openrouter_key = os.getenv("OPENROUTER_API_KEY", "")
         groq_model = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
         openrouter_model = os.getenv("OPENROUTER_MODEL", "google/gemini-3.7-flash")
         openrouter_emb_model = os.getenv("OPENROUTER_EMBEDDING_MODEL", "qwen/qwen3-embedding-8b")
+        llm_provider = os.getenv("LLM_PROVIDER", "openai").strip().lower()
 
-        active_llm = f"OpenRouter ({openrouter_model})" if openrouter_key else (f"Groq LPU ({groq_model})" if groq_key else "Google Gemini")
+        if openai_key and llm_provider in ["openai", "custom", "9router"]:
+            active_llm = f"OpenAI-Compatible ({openai_model})"
+        elif openrouter_key and llm_provider == "openrouter":
+            active_llm = f"OpenRouter ({openrouter_model})"
+        elif groq_key and llm_provider == "groq":
+            active_llm = f"Groq LPU ({groq_model})"
+        elif gemini_key and llm_provider == "gemini":
+            active_llm = "Google Gemini"
+        elif openai_key:
+            active_llm = f"OpenAI-Compatible ({openai_model})"
+        elif openrouter_key:
+            active_llm = f"OpenRouter ({openrouter_model})"
+        elif groq_key:
+            active_llm = f"Groq LPU ({groq_model})"
+        else:
+            active_llm = "Google Gemini"
+
         reranker_model = os.getenv("RERANKER_MODEL", "Xenova/ms-marco-MiniLM-L-6-v2")
         reranker_active = bool(get_reranker_model())
 
@@ -286,6 +306,9 @@ class RagService:
             "reranker_model": reranker_model,
             "reranker_enabled": reranker_active,
             "active_llm": active_llm,
+            "openai_configured": bool(openai_key),
+            "openai_model": openai_model,
+            "openai_base_url": openai_base_url,
             "openrouter_configured": bool(openrouter_key),
             "groq_configured": bool(groq_key),
             "gemini_configured": bool(gemini_key),
@@ -1694,7 +1717,11 @@ Pertanyaan Pengguna:
         """
         session = get_http_session()
 
-        llm_provider = os.getenv("LLM_PROVIDER", "openrouter").strip().lower()
+        llm_provider = os.getenv("LLM_PROVIDER", "openai").strip().lower()
+
+        openai_key = os.getenv("OPENAI_API_KEY", "").strip()
+        openai_base_url = os.getenv("OPENAI_BASE_URL", "https://9router.chitraparatama.com/v1").strip().rstrip("/")
+        openai_model = os.getenv("OPENAI_MODEL", "cx/gpt-5.6-luna").strip()
 
         openrouter_key = os.getenv("OPENROUTER_API_KEY", "").strip()
         openrouter_model = os.getenv("OPENROUTER_MODEL", "google/gemini-3.7-flash").strip()
@@ -1703,6 +1730,36 @@ Pertanyaan Pengguna:
         groq_model = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile").strip()
 
         gemini_key = os.getenv("GEMINI_API_KEY", "").strip()
+
+        def try_openai():
+            if not openai_key:
+                return None
+            try:
+                payload = {
+                    "model": openai_model,
+                    "messages": messages,
+                    "temperature": 0.2,
+                    "max_tokens": 4096,
+                }
+                resp = session.post(
+                    f"{openai_base_url}/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {openai_key}",
+                        "Content-Type": "application/json"
+                    },
+                    json=payload,
+                    timeout=30
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    content = data["choices"][0]["message"]["content"] or ""
+                    cleaned = RagService._clean_llm_response(content)
+                    return cleaned if cleaned else (content.strip() or None)
+                else:
+                    logger.warning(f"[RagService] OpenAI-compatible ({openai_model}) error {resp.status_code}: {resp.text[:300]}")
+            except Exception as e:
+                logger.error(f"[RagService] OpenAI-compatible call exception: {e}")
+            return None
 
         def try_openrouter():
             if not openrouter_key:
@@ -1754,7 +1811,7 @@ Pertanyaan Pengguna:
                     "temperature": 0.2,
                     "max_tokens": 4096,
                 }
-                groq_reasoning_models = ["deepseek", "qwq", "r1"]
+                groq_reasoning_models = ["deepseek", "qwq", "r1", "qwen"]
                 if any(rm in groq_model.lower() for rm in groq_reasoning_models):
                     payload["reasoning_format"] = "hidden"
 
@@ -1769,10 +1826,10 @@ Pertanyaan Pengguna:
                 )
                 if resp.status_code == 200:
                     data = resp.json()
-                    content = data["choices"][0]["message"]["content"]
+                    content = data["choices"][0]["message"]["content"] or ""
                     cleaned = RagService._clean_llm_response(content)
-                    if cleaned:
-                        return cleaned
+                    # Use cleaned response; if empty (e.g. truncated <think> block), fallback to raw content
+                    return cleaned if cleaned else (content.strip() or None)
                 else:
                     logger.warning(f"[RagService] Groq error {resp.status_code}: {resp.text[:300]}")
             except Exception as e:
@@ -1797,12 +1854,16 @@ Pertanyaan Pengguna:
             return None
 
         # Execute providers based on LLM_PROVIDER preference
-        if llm_provider == "groq":
-            providers = [try_groq, try_openrouter, try_gemini]
+        if llm_provider in ["openai", "custom", "9router"]:
+            providers = [try_openai, try_groq, try_openrouter, try_gemini]
+        elif llm_provider == "groq":
+            providers = [try_groq, try_openai, try_openrouter, try_gemini]
         elif llm_provider == "gemini":
-            providers = [try_gemini, try_openrouter, try_groq]
+            providers = [try_gemini, try_openai, try_openrouter, try_groq]
         else:
-            providers = [try_openrouter, try_groq, try_gemini]
+            providers = [try_openai if openai_key else try_openrouter, try_groq, try_gemini]
+            if openai_key and try_openrouter not in providers:
+                providers.append(try_openrouter)
 
         for p in providers:
             res = p()
@@ -1811,7 +1872,7 @@ Pertanyaan Pengguna:
 
         logger.error("[RagService] All LLM providers failed. Returning fallback message.")
         return (
-            "⚠️ **Catatan Sistem:** Semua LLM provider (OpenRouter, Groq, Gemini) gagal merespons. "
+            "⚠️ **Catatan Sistem:** Semua LLM provider (OpenAI-Compatible, OpenRouter, Groq, Gemini) gagal merespons. "
             "Periksa log backend untuk detail error.\n\n"
             "Potongan dokumen yang relevan dari pgvector tetap tersedia di panel sumber di bawah."
         )

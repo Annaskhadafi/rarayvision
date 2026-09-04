@@ -212,20 +212,27 @@ def perform_direct_ocr(img: np.ndarray):
                 best_combined_text = combined
                 best_detections = cur_detections
 
-    # Fallback to OpenRouter Vision API if local OCR yielded no detections and key is configured
+    # Fallback to OpenAI-compatible (9router) or OpenRouter Vision API if local OCR yielded no detections
     if not best_combined_text:
+        openai_key = os.getenv("OPENAI_API_KEY", "")
+        openai_base_url = os.getenv("OPENAI_BASE_URL", "https://9router.chitraparatama.com/v1").rstrip("/")
+        openai_model = os.getenv("OPENAI_MODEL", "cx/gpt-5.6-luna")
         openrouter_key = os.getenv("OPENROUTER_API_KEY", "")
-        if openrouter_key:
+
+        if openai_key or openrouter_key:
             try:
                 import base64, requests as req
                 ok, buf = cv2.imencode('.jpg', img_small, [cv2.IMWRITE_JPEG_QUALITY, 85])
                 if ok:
                     b64 = base64.b64encode(buf.tobytes()).decode('utf-8')
-                    model_to_use = os.getenv("OPENROUTER_MODEL", "google/gemma-4-26b-a4b-it:free")
+                    target_url = f"{openai_base_url}/chat/completions" if openai_key else "https://openrouter.ai/api/v1/chat/completions"
+                    target_key = openai_key if openai_key else openrouter_key
+                    model_to_use = openai_model if openai_key else os.getenv("OPENROUTER_MODEL", "google/gemma-4-26b-a4b-it:free")
+
                     res = req.post(
-                        "https://openrouter.ai/api/v1/chat/completions",
+                        target_url,
                         headers={
-                            "Authorization": f"Bearer {openrouter_key}",
+                            "Authorization": f"Bearer {target_key}",
                             "Content-Type": "application/json"
                         },
                         json={
@@ -239,7 +246,7 @@ def perform_direct_ocr(img: np.ndarray):
                             }],
                             "max_tokens": 50
                         },
-                        timeout=5
+                        timeout=8
                     )
                     if res.status_code == 200:
                         content = res.json()["choices"][0]["message"]["content"].strip()

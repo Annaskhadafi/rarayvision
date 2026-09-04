@@ -2,13 +2,20 @@
 import { nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import { sttService } from '../services/sttService'
 
+const SpeechRecognition = typeof window !== 'undefined' ? (window.SpeechRecognition || window.webkitSpeechRecognition) : null
+
 const field = ref(null)
 const position = ref({ top: 0, left: 0 })
 const recording = ref(false)
 const busy = ref(false)
 const error = ref('')
-let recorder
+
+let activeRecognition = null
+let recorder = null
 let chunks = []
+
+let initialFieldValue = ''
+let finalTranscript = ''
 
 const isEligible = (element) => {
   if (!element || element.disabled || element.readOnly) return false
@@ -31,7 +38,21 @@ const focusIn = (event) => {
 }
 
 const focusOut = (event) => {
-  if (!event.relatedTarget?.closest?.('.voice-dictation')) field.value = null
+  if (!event.relatedTarget?.closest?.('.voice-dictation')) {
+    // Jangan langsung hilangkan jika sedang recording
+    if (!recording.value) {
+      field.value = null
+    }
+  }
+}
+
+const setFieldValue = (val) => {
+  const target = field.value
+  if (!target) return
+  const setter = Object.getOwnPropertyDescriptor(target.__proto__, 'value')?.set
+  setter?.call(target, val)
+  target.dispatchEvent(new Event('input', { bubbles: true }))
+  nextTick(() => target.setSelectionRange(val.length, val.length))
 }
 
 const insertText = (text) => {
@@ -40,19 +61,74 @@ const insertText = (text) => {
   const start = target.selectionStart ?? target.value.length
   const end = target.selectionEnd ?? start
   const value = target.value.slice(0, start) + (start && !/\s$/.test(target.value.slice(0, start)) ? ' ' : '') + text + target.value.slice(end)
-  const setter = Object.getOwnPropertyDescriptor(target.__proto__, 'value')?.set
-  setter?.call(target, value)
-  target.dispatchEvent(new Event('input', { bubbles: true }))
-  nextTick(() => target.setSelectionRange(value.length, value.length))
+  setFieldValue(value)
 }
 
 const stop = () => {
-  if (recorder && recorder.state !== 'inactive') recorder.stop()
+  if (activeRecognition) {
+    try { activeRecognition.stop() } catch {}
+    activeRecognition = null
+  }
+  if (recorder && recorder.state !== 'inactive') {
+    try { recorder.stop() } catch {}
+  }
+  recording.value = false
 }
 
-const toggle = async () => {
-  error.value = ''
-  if (recording.value) return stop()
+// ─── Realtime Typing using Web Speech API ─────────────────────────────────────
+const startRealtime = () => {
+  const recognition = new SpeechRecognition()
+  recognition.lang = 'id-ID'
+  recognition.continuous = true
+  recognition.interimResults = true
+
+  const target = field.value
+  initialFieldValue = target ? target.value : ''
+  finalTranscript = ''
+
+  recognition.onstart = () => {
+    recording.value = true
+    busy.value = false
+  }
+
+  recognition.onresult = (event) => {
+    let interim = ''
+    for (let i = event.resultIndex; i < event.results.length; ++i) {
+      const transcript = event.results[i][0].transcript
+      if (event.results[i].isFinal) {
+        finalTranscript += (finalTranscript ? ' ' : '') + transcript.trim()
+      } else {
+        interim += transcript
+      }
+    }
+
+    const spokenText = (finalTranscript + (interim ? ' ' + interim : '')).trim()
+    const separator = initialFieldValue && !/\s$/.test(initialFieldValue) ? ' ' : ''
+    const fullText = initialFieldValue ? (initialFieldValue + separator + spokenText) : spokenText
+
+    setFieldValue(fullText)
+  }
+
+  recognition.onerror = (event) => {
+    if (event.error === 'no-speech') return
+    if (event.error === 'not-allowed') {
+      error.value = 'Izin mikrofon ditolak'
+    } else {
+      error.value = `Mic: ${event.error}`
+    }
+    recording.value = false
+  }
+
+  recognition.onend = () => {
+    recording.value = false
+  }
+
+  activeRecognition = recognition
+  recognition.start()
+}
+
+// ─── Fallback MediaRecorder for older browsers ────────────────────────────────
+const startFallbackRecorder = async () => {
   if (!navigator.mediaDevices?.getUserMedia || !window.MediaRecorder) {
     error.value = 'Browser tidak mendukung perekaman suara'
     return
@@ -79,6 +155,21 @@ const toggle = async () => {
     recording.value = true
   } catch (err) {
     error.value = err.name === 'NotAllowedError' ? 'Izin mikrofon ditolak' : err.message
+    recording.value = false
+  }
+}
+
+const toggle = async () => {
+  error.value = ''
+  if (recording.value) {
+    stop()
+    return
+  }
+
+  if (SpeechRecognition) {
+    startRealtime()
+  } else {
+    await startFallbackRecorder()
   }
 }
 
@@ -88,6 +179,7 @@ onMounted(() => {
   window.addEventListener('resize', updatePosition)
   window.addEventListener('scroll', updatePosition, true)
 })
+
 onBeforeUnmount(() => {
   stop()
   document.removeEventListener('focusin', focusIn)
@@ -99,8 +191,19 @@ onBeforeUnmount(() => {
 
 <template>
   <div v-if="field" class="voice-dictation" :style="{ top: `${position.top}px`, left: `${position.left}px` }">
-    <button type="button" :class="{ recording, busy }" :disabled="busy" :aria-label="recording ? 'Stop bicara' : 'Isi field dengan suara'" @mousedown.prevent @click="toggle">
-      <svg v-if="!busy && !recording" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 1a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3Z"/><path d="M19 10v1a7 7 0 0 1-14 0v-1M12 18v5M8 23h8"/></svg>
+    <button
+      type="button"
+      :class="{ recording, busy }"
+      :disabled="busy"
+      :title="recording ? 'Klik untuk stop dikte' : 'Dikte suara realtime (bicara untuk langsung mengetik)'"
+      :aria-label="recording ? 'Stop bicara' : 'Isi field dengan suara realtime'"
+      @mousedown.prevent
+      @click="toggle"
+    >
+      <svg v-if="!busy && !recording" viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M12 1a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3Z" />
+        <path d="M19 10v1a7 7 0 0 1-14 0v-1M12 18v5M8 23h8" />
+      </svg>
       <span v-else-if="recording" aria-hidden="true">■</span>
       <span v-else aria-hidden="true">…</span>
     </button>
@@ -114,7 +217,12 @@ onBeforeUnmount(() => {
 .voice-dictation button:hover { transform: translateY(-1px); box-shadow: 0 4px 12px #0f172a2e; }
 .voice-dictation button:active { transform: scale(.96); }
 .voice-dictation svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
-.voice-dictation button.recording { background: #fee2e2; border-color: #ef4444; color: #b91c1c; }
+.voice-dictation button.recording { background: #fee2e2; border-color: #ef4444; color: #b91c1c; animation: pulse 1.2s infinite; }
 .voice-dictation button.busy { cursor: wait; }
-.voice-error { max-width: 220px; padding: 5px 8px; border-radius: 5px; color: #991b1b; background: #fee2e2; font-size: 12px; }
+.voice-error { max-width: 240px; padding: 5px 8px; border-radius: 5px; color: #991b1b; background: #fee2e2; font-size: 12px; border: 1px solid #fca5a5; }
+
+@keyframes pulse {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.05); }
+}
 </style>

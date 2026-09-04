@@ -105,7 +105,7 @@ async def transcribe_audio(
         raise HTTPException(status_code=400, detail="Model STT tidak tersedia")
     try:
         result = await asyncio.to_thread(transcribe, audio, selected_model, config.language, config.cpu_threads)
-    except (RuntimeError, ValueError) as exc:
+    except Exception as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     return {"status": "success", "result": result}
 
@@ -142,6 +142,6 @@ async def benchmark_audio(
     for model_id in selected:
         try:
             results.append(await asyncio.to_thread(transcribe, audio, model_id, config.language, config.cpu_threads))
-        except (RuntimeError, ValueError) as exc:
+        except Exception as exc:
             results.append({"model": model_id, "error": str(exc)})
     return {"status": "success", "results": results}
