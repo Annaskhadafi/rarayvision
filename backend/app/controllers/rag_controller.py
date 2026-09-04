@@ -416,8 +416,9 @@ def list_documents(
                 "id": d.id,
                 "filename": d.filename,
                 "format": d.format,
-                "s3_url": d.s3_url,
-                "local_url": d.local_url,
+                "s3_url": f"/api/v1/uploads/{d.filename.split('/')[-1]}" if (d.s3_url or d.filename) else None,
+                "raw_s3_url": d.s3_url,
+                "local_url": d.local_url or (f"/api/v1/uploads/{d.filename.split('/')[-1]}" if d.filename else None),
                 "char_count": d.char_count,
                 "word_count": d.word_count,
                 "total_chunks": d.total_chunks,
@@ -449,7 +450,8 @@ def get_document_chunks(
             "id": doc.id,
             "filename": doc.filename,
             "format": doc.format,
-            "s3_url": doc.s3_url,
+            "s3_url": f"/api/v1/uploads/{doc.filename.split('/')[-1]}" if (doc.s3_url or doc.filename) else None,
+            "raw_s3_url": doc.s3_url,
             "total_chunks": doc.total_chunks
         },
         "chunks": [

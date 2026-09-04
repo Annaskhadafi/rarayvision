@@ -738,21 +738,29 @@ def get_uploaded_image(filename: str):
     1. If file exists on local disk (backend/uploads or backend/app/uploads), return FileResponse.
     2. Else (e.g. stored on S3 Cloudhost), redirect to Presigned S3 URL to avoid AccessDenied!
     """
+    from urllib.parse import unquote
+    clean_filename = unquote(filename)
     backend_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     uploads_dir = os.path.join(backend_dir, "uploads")
-    local_path = os.path.join(uploads_dir, filename)
+    local_path = os.path.join(uploads_dir, clean_filename)
+    if not os.path.exists(local_path):
+        local_path = os.path.join(uploads_dir, filename)
 
     if os.path.exists(local_path):
         return FileResponse(local_path, media_type="image/jpeg")
 
-    alt_path = os.path.join(backend_dir, "app", "uploads", filename)
+    alt_path = os.path.join(backend_dir, "app", "uploads", clean_filename)
+    if not os.path.exists(alt_path):
+        alt_path = os.path.join(backend_dir, "app", "uploads", filename)
+
     if os.path.exists(alt_path):
         return FileResponse(alt_path, media_type="image/jpeg")
 
     from backend.app.services.s3_service import get_presigned_download_url
-    presigned = get_presigned_download_url(filename)
+    presigned = get_presigned_download_url(clean_filename) or get_presigned_download_url(filename)
     if presigned:
         return RedirectResponse(url=presigned, status_code=302)
 
     return JSONResponse(status_code=404, content={"status": "error", "message": f"File '{filename}' not found"})
+
 

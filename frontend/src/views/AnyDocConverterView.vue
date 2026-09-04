@@ -30,6 +30,16 @@ const enginesInfo = ref([])
 
 const isDragging = ref(false)
 
+const resolveStorageUrl = (storage) => {
+  if (!storage) return '#'
+  if (storage.local_url && storage.local_url.startsWith('/api/v1/uploads/')) return storage.local_url
+  const raw = storage.s3_url || ''
+  if (!raw) return '#'
+  if (raw.startsWith('/api/v1/uploads/')) return raw
+  const filename = decodeURIComponent(raw.split('?')[0].split('/').pop() || '')
+  return `/api/v1/uploads/${encodeURIComponent(filename)}`
+}
+
 onMounted(async () => {
   try {
     const res = await anydocService.getSupportedFormats()
@@ -622,11 +632,11 @@ echo "Markdown:\\n" . $data['markdown'];
               <span class="metric-val">{{ resultData.metrics?.characters?.toLocaleString() }} / {{ resultData.metrics?.words?.toLocaleString() }}</span>
             </div>
 
-            <div class="metric-item" v-if="resultData.storage?.s3_url">
-              <span class="metric-lbl">S3 Storage Link</span>
-              <a :href="resultData.storage.s3_url" target="_blank" rel="noopener" class="s3-link" title="Open S3 file">
+            <div class="metric-item" v-if="resultData.storage?.s3_url || resultData.storage?.local_url">
+              <span class="metric-lbl">File Storage</span>
+              <a :href="resolveStorageUrl(resultData.storage)" target="_blank" rel="noopener" class="s3-link" title="Open file">
                 <svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path><polyline points="15 3 21 3 21 9"></polyline><line x1="10" y1="14" x2="21" y2="3"></line></svg>
-                Stored on S3
+                Buka File
               </a>
             </div>
           </div>
@@ -746,7 +756,7 @@ echo "Markdown:\\n" . $data['markdown'];
                   <td>{{ item.metrics?.processing_time_ms ? `${item.metrics.processing_time_ms} ms` : '-' }}</td>
                   <td>{{ item.metrics?.characters?.toLocaleString() || '-' }}</td>
                   <td>
-                    <a v-if="item.storage?.s3_url" :href="item.storage.s3_url" target="_blank" class="s3-link">S3 Link</a>
+                    <a v-if="item.storage?.s3_url || item.storage?.local_url" :href="resolveStorageUrl(item.storage)" target="_blank" class="s3-link">Buka File</a>
                     <span v-else>-</span>
                   </td>
                   <td>

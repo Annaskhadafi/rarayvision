@@ -304,6 +304,18 @@ const handleDeleteDocument = async (doc) => {
   }
 }
 
+// Resolve secure document preview / download URL (routing via FastAPI presigned redirect)
+const resolveDocUrl = (doc) => {
+  if (!doc) return '#'
+  if (doc.local_url && doc.local_url.startsWith('/api/v1/uploads/')) return doc.local_url
+  const raw = doc.s3_url || doc.filename || ''
+  if (!raw) return '#'
+  if (raw.startsWith('/api/v1/uploads/')) return raw
+  const filename = decodeURIComponent(raw.split('?')[0].split('/').pop() || '')
+  return `/api/v1/uploads/${encodeURIComponent(filename)}`
+}
+
+
 // --- External PostgreSQL DB Handlers ---
 const computedDbUrl = computed(() => {
   if (dbForm.value.inputType === 'url') {
@@ -1266,9 +1278,9 @@ print("Memory Ingested:", mem_res)`
                 {{ doc.char_count?.toLocaleString() }} / {{ doc.word_count?.toLocaleString() }}
               </td>
               <td>
-                <a v-if="doc.s3_url" :href="doc.s3_url" target="_blank" rel="noopener" class="s3-btn" title="Buka file asli di S3">
+                <a v-if="doc.s3_url || doc.local_url || doc.filename" :href="resolveDocUrl(doc)" target="_blank" rel="noopener" class="s3-btn" title="Buka / Download file dokumen">
                   <svg viewBox="0 0 24 24" width="13" height="13" stroke="currentColor" stroke-width="2" fill="none"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path><polyline points="15 3 21 3 21 9"></polyline><line x1="10" y1="14" x2="21" y2="3"></line></svg>
-                  S3 File
+                  Dokumen
                 </a>
                 <span v-else>-</span>
               </td>

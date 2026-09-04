@@ -132,15 +132,20 @@ def stream_upload_file(filename: str, request: Request):
     Enables native HTML5 MP4 video streaming and seeking in Chrome, Edge, Safari, and Firefox.
     Falls back to S3 presigned URL redirect if file is not stored on local disk.
     """
-    file_path = os.path.join(uploads_dir, filename)
+    from urllib.parse import unquote
+    clean_filename = unquote(filename)
+    file_path = os.path.join(uploads_dir, clean_filename)
     if not os.path.exists(file_path):
-        alt_path = os.path.join(os.path.dirname(__file__), "app", "uploads", filename)
+        file_path = os.path.join(uploads_dir, filename)
+
+    if not os.path.exists(file_path):
+        alt_path = os.path.join(os.path.dirname(__file__), "app", "uploads", clean_filename)
         if os.path.exists(alt_path):
             file_path = alt_path
         else:
             # Fallback redirect to S3 Cloudhost Object Storage via authorized Presigned URL
             from backend.app.services.s3_service import get_presigned_download_url
-            presigned_url = get_presigned_download_url(filename)
+            presigned_url = get_presigned_download_url(clean_filename) or get_presigned_download_url(filename)
             if presigned_url:
                 return RedirectResponse(url=presigned_url, status_code=302)
             return JSONResponse(status_code=404, content={"status": "error", "message": f"File '{filename}' not found"})
