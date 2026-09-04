@@ -748,14 +748,11 @@ class RagService:
 
             first_valid_emb = next((r.embedding for r in rows if r.embedding and isinstance(r.embedding, list) and len(r.embedding) > 0), None)
             dim = len(first_valid_emb) if first_valid_emb else 384
-            dominant_model = "BAAI/bge-small-en-v1.5"
+            dominant_model = "BAAI/bge-small-en-v1.5" if dim == 384 else "qwen/qwen3-embedding-8b"
 
             items = []
             emb_list = []
             for r in rows:
-                if r.embedding and isinstance(r.embedding, list) and len(r.embedding) > 0:
-                    if r.embedding_model and "qwen" in str(r.embedding_model).lower():
-                        dominant_model = r.embedding_model
 
                 h_str = r.heading or ""
                 c_str = r.content or ""
@@ -1188,27 +1185,11 @@ class RagService:
             sub_matrix = mem_matrix
             sub_norms = mem_norms
         else:
-            items = list(doc_items) + list(mem_items)
-            if len(doc_items) > 0 and len(mem_items) > 0:
-                if doc_matrix.shape[1] == mem_matrix.shape[1]:
-                    sub_matrix = np.vstack([doc_matrix, mem_matrix])
-                    sub_norms = np.concatenate([doc_norms, mem_norms])
-                elif doc_matrix.shape[1] > mem_matrix.shape[1]:
-                    pad_width = doc_matrix.shape[1] - mem_matrix.shape[1]
-                    padded_mem = np.pad(mem_matrix, ((0, 0), (0, pad_width)), mode='constant')
-                    sub_matrix = np.vstack([doc_matrix, padded_mem])
-                    sub_norms = np.concatenate([doc_norms, mem_norms])
-                else:
-                    pad_width = mem_matrix.shape[1] - doc_matrix.shape[1]
-                    padded_doc = np.pad(doc_matrix, ((0, 0), (0, pad_width)), mode='constant')
-                    sub_matrix = np.vstack([padded_doc, mem_matrix])
-                    sub_norms = np.concatenate([doc_norms, mem_norms])
-            elif len(doc_items) > 0:
-                sub_matrix = doc_matrix
-                sub_norms = doc_norms
-            else:
-                sub_matrix = mem_matrix
-                sub_norms = mem_norms
+            # When searching the general knowledge base, prioritize document chunks.
+            # Learned memory facts are retrieved independently via search_learned_facts().
+            items = list(doc_items)
+            sub_matrix = doc_matrix
+            sub_norms = doc_norms
 
         return cls._score_items_hybrid(
             items=items,
@@ -1332,8 +1313,13 @@ class RagService:
             if not raw_facts:
                 return []
 
-            if query_vec is None or len(query_vec) == 0:
-                query_vec = cls.generate_single_embedding(query)
+            f_mat = cached_mem["matrix"]
+            f_norms = cached_mem["norms"]
+            mem_dim = f_mat.shape[1] if f_mat.ndim > 1 and f_mat.shape[0] > 0 else 384
+
+            if query_vec is None or len(query_vec) != mem_dim:
+                # FastEmbed BAAI produces 384-d embeddings matching memory facts
+                query_vec = cls.generate_single_embedding(query, model_name="BAAI/bge-small-en-v1.5")
             import numpy as np
 
             q_vec = np.array(query_vec, dtype=np.float32)
@@ -1342,8 +1328,6 @@ class RagService:
                 q_norm = 1e-9
 
             # In-memory matrix multiplication
-            f_mat = cached_mem["matrix"]
-            f_norms = cached_mem["norms"]
             sim_arr = (f_mat @ (q_vec / q_norm)) / f_norms
 
             scored = []
