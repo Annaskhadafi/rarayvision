@@ -4,8 +4,10 @@ WORKDIR /app
 
 ENV PYTHONPATH="/app:/app/backend"
 ENV PYTHONUNBUFFERED=1
-# Persist downloaded Whisper/faster-whisper models when the compose volume is mounted.
-ENV HF_HOME=/root/.cache/huggingface
+# Persistent Cache Directory for Models (HuggingFace, FastEmbed, Torch)
+ENV HF_HOME=/app/cache/huggingface
+ENV FASTEMBED_CACHE_PATH=/app/cache/fastembed
+ENV TORCH_HOME=/app/cache/torch
 
 # Install system dependencies for OpenCV, Tesseract, PyTorch, FFMPEG, PaddleOCR, and ONNX
 RUN apt-get update && apt-get install -y --no-install-recommends \

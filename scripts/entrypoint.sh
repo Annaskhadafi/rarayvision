@@ -11,6 +11,10 @@ export UVICORN_WORKERS="${UVICORN_WORKERS:-1}"
 
 echo "=== [Raray Vision] Starting Optimized Backend ==="
 
+# Ensure persistent cache and upload directories exist
+mkdir -p /app/cache/huggingface /app/cache/fastembed /app/cache/torch /app/backend/uploads
+chmod -R 777 /app/cache /app/backend/uploads 2>/dev/null || true
+
 # Trap signals for graceful shutdown
 cleanup() {
     echo "Shutting down services..."

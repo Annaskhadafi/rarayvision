@@ -21,17 +21,21 @@ services:
       GROQ_MODEL: ${GROQ_MODEL:-qwen/qwen3.6-27b}
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY}
       OPENROUTER_MODEL: nvidia/nemotron-nano-12b-v2-vl:free
-      LLM_PROVIDER: groq
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://9router.chitraparatama.com/v1}
+      OPENAI_MODEL: ${OPENAI_MODEL:-cx/gpt-5.6-luna}
+      LLM_PROVIDER: ${LLM_PROVIDER:-openai}
       GEMINI_API_KEY: ${GEMINI_API_KEY}
       EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-local}
       RERANKER_MODEL: ${RERANKER_MODEL:-Xenova/ms-marco-MiniLM-L-6-v2}
       REDIS_URL: ${REDIS_URL}
-      HF_HOME: /root/.cache/huggingface
+      HF_HOME: /app/cache/huggingface
+      FASTEMBED_CACHE_PATH: /app/cache/fastembed
+      TORCH_HOME: /app/cache/torch
     volumes:
       - uploads_data:/app/backend/uploads
       - models_data:/app/backend/ml_models
-      - fastembed_cache:/root/.local/share/fastembed
-      - hf_cache:/root/.cache/huggingface
+      - app_cache:/app/cache
     expose:
       - "5000"
     healthcheck:
@@ -53,5 +57,4 @@ services:
 volumes:
   uploads_data:
   models_data:
-  fastembed_cache:
-  hf_cache:
+  app_cache:
