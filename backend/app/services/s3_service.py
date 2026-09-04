@@ -65,3 +65,52 @@ def upload_file_to_s3(file_bytes: bytes, filename: str, content_type: str = "ima
     except Exception as e:
         logger.error(f"[S3] Cloudhost upload error: {e}")
         return None
+
+
+def get_presigned_download_url(filename: str, expires_in: int = 3600) -> Optional[str]:
+    """
+    Generates an authorized presigned GET URL for downloading/viewing private S3 Cloudhost objects.
+    """
+    endpoint = os.getenv("OBJECT_STORAGE_ENDPOINT", "https://is3.cloudhost.id")
+    bucket = os.getenv("OBJECT_STORAGE_BUCKET", "onechitra")
+    prefix = os.getenv("OBJECT_STORAGE_PREFIX", "upload")
+    region = os.getenv("OBJECT_STORAGE_REGION", "us-east-1")
+    access_key = os.getenv("OBJECT_STORAGE_ACCESS_KEY_ID", "")
+    secret_key = os.getenv("OBJECT_STORAGE_SECRET_ACCESS_KEY", "")
+
+    if not access_key or not secret_key:
+        return None
+
+    try:
+        import boto3
+        from botocore.client import Config
+
+        s3_client = boto3.client(
+            "s3",
+            endpoint_url=endpoint,
+            aws_access_key_id=access_key,
+            aws_secret_access_key=secret_key,
+            region_name=region,
+            config=Config(
+                s3={"addressing_style": "path"},
+                signature_version="s3v4"
+            )
+        )
+
+        clean_name = filename.lstrip("/")
+        if prefix and clean_name.startswith(f"{prefix}/"):
+            s3_key = clean_name
+        elif prefix:
+            s3_key = f"{prefix}/{clean_name}"
+        else:
+            s3_key = clean_name
+
+        return s3_client.generate_presigned_url(
+            "get_object",
+            Params={"Bucket": bucket, "Key": s3_key},
+            ExpiresIn=expires_in
+        )
+    except Exception as e:
+        logger.error(f"[S3] Failed to generate presigned GET url for {filename}: {e}")
+        return None
+

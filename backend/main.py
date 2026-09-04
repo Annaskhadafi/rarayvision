@@ -125,12 +125,12 @@ uploads_dir = os.path.join(os.path.dirname(__file__), "uploads")
 if not os.path.exists(uploads_dir):
     os.makedirs(uploads_dir)
 
-@fastapi_app.get("/api/v1/uploads/{filename}")
+@fastapi_app.get("/api/v1/uploads/{filename:path}")
 def stream_upload_file(filename: str, request: Request):
     """
     HTTP Byte-Range Streaming endpoint (HTTP 206 Partial Content).
     Enables native HTML5 MP4 video streaming and seeking in Chrome, Edge, Safari, and Firefox.
-    Falls back to S3 redirect if file is not stored on local disk.
+    Falls back to S3 presigned URL redirect if file is not stored on local disk.
     """
     file_path = os.path.join(uploads_dir, filename)
     if not os.path.exists(file_path):
@@ -138,21 +138,20 @@ def stream_upload_file(filename: str, request: Request):
         if os.path.exists(alt_path):
             file_path = alt_path
         else:
-            # Fallback redirect to S3 Cloudhost Object Storage
-            endpoint = os.getenv("OBJECT_STORAGE_ENDPOINT", "https://is3.cloudhost.id").rstrip('/')
-            bucket = os.getenv("OBJECT_STORAGE_BUCKET", "onechitra")
-            prefix = os.getenv("OBJECT_STORAGE_PREFIX", "upload")
-            s3_url = f"{endpoint}/{bucket}/{prefix}/{filename}"
-            return RedirectResponse(url=s3_url, status_code=302)
+            # Fallback redirect to S3 Cloudhost Object Storage via authorized Presigned URL
+            from backend.app.services.s3_service import get_presigned_download_url
+            presigned_url = get_presigned_download_url(filename)
+            if presigned_url:
+                return RedirectResponse(url=presigned_url, status_code=302)
+            return JSONResponse(status_code=404, content={"status": "error", "message": f"File '{filename}' not found"})
 
     file_size = os.path.getsize(file_path)
     range_header = request.headers.get("range")
 
-    content_type = "video/mp4" if filename.endswith(".mp4") else "image/jpeg"
-    if filename.endswith(".png"):
-        content_type = "image/png"
-    elif filename.endswith(".webp"):
-        content_type = "image/webp"
+    import mimetypes
+    content_type, _ = mimetypes.guess_type(file_path)
+    if not content_type:
+        content_type = "video/mp4" if filename.endswith(".mp4") else "application/octet-stream"
 
     if range_header and filename.endswith(".mp4"):
         try:

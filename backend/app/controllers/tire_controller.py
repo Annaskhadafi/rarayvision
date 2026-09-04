@@ -8,7 +8,7 @@ import threading
 from typing import Optional, List
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Request
 from pydantic import BaseModel
-from fastapi.responses import FileResponse, RedirectResponse
+from fastapi.responses import FileResponse, RedirectResponse, JSONResponse
 from sqlalchemy.orm import Session
 
 from backend.app.database import database as db
@@ -731,12 +731,12 @@ def delete_tire_scan(scan_id: str, db_session: Session = Depends(db.get_db)):
 
 
 # ─── Image Serving with S3 Fallback ──────────────────────────────────────────
-@router.get("/uploads/{filename}")
+@router.get("/uploads/{filename:path}")
 def get_uploaded_image(filename: str):
     """
     Serve uploaded tire images cleanly:
     1. If file exists on local disk (backend/uploads or backend/app/uploads), return FileResponse.
-    2. Else (e.g. stored on S3 Cloudhost), redirect to S3 URL to avoid 404!
+    2. Else (e.g. stored on S3 Cloudhost), redirect to Presigned S3 URL to avoid AccessDenied!
     """
     backend_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     uploads_dir = os.path.join(backend_dir, "uploads")
@@ -749,9 +749,10 @@ def get_uploaded_image(filename: str):
     if os.path.exists(alt_path):
         return FileResponse(alt_path, media_type="image/jpeg")
 
-    endpoint = os.getenv("OBJECT_STORAGE_ENDPOINT", "https://is3.cloudhost.id").rstrip('/')
-    bucket = os.getenv("OBJECT_STORAGE_BUCKET", "onechitra")
-    prefix = os.getenv("OBJECT_STORAGE_PREFIX", "upload")
+    from backend.app.services.s3_service import get_presigned_download_url
+    presigned = get_presigned_download_url(filename)
+    if presigned:
+        return RedirectResponse(url=presigned, status_code=302)
 
-    s3_url = f"{endpoint}/{bucket}/{prefix}/{filename}"
-    return RedirectResponse(url=s3_url, status_code=302)
+    return JSONResponse(status_code=404, content={"status": "error", "message": f"File '{filename}' not found"})
+
