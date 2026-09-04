@@ -33,9 +33,9 @@ services:
       FASTEMBED_CACHE_PATH: /app/cache/fastembed
       TORCH_HOME: /app/cache/torch
     volumes:
-      - uploads_data:/app/backend/uploads
+      - /mnt/data/rarayvision/uploads:/app/backend/uploads
+      - /mnt/data/rarayvision/cache:/app/cache
       - models_data:/app/backend/ml_models
-      - app_cache:/app/cache
     expose:
       - "5000"
     healthcheck:
@@ -55,6 +55,4 @@ services:
       - "3800:80"
 
 volumes:
-  uploads_data:
   models_data:
-  app_cache:
