@@ -68,6 +68,11 @@ const routes = [
     meta: { requiresAuth: true }
   },
   {
+    path: '/stt-lab',
+    component: () => import('./views/STTLabView.vue'),
+    meta: { requiresAuth: true }
+  },
+  {
     path: '/settings',
     component: () => import('./views/SettingsView.vue'),
     meta: { requiresAuth: true }

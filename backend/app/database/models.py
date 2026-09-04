@@ -85,6 +85,16 @@ class CVConfig(Base):
     is_active = Column(Boolean, default=True)
     updated_at = Column(DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
 
+class STTConfig(Base):
+    """Single active CPU speech-to-text configuration."""
+    __tablename__ = "stt_configs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    active_model = Column(String(100), nullable=False, default="fw-base-int8")
+    language = Column(String(10), nullable=False, default="id")
+    cpu_threads = Column(Integer, nullable=False, default=2)
+    updated_at = Column(DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
+
 class HSEZoneConfig(Base):
     """Menyimpan definisi Polygon Zone untuk HSE"""
     __tablename__ = "hse_zone_configs"

@@ -474,6 +474,63 @@ All face endpoints require a JWT Bearer token in the `Authorization` header:
 Authorization: Bearer <your-jwt-token>
 ```
 
+## Speech-to-Text API
+
+Raray Vision menyediakan STT Bahasa Indonesia berbasis CPU. Endpoint transkripsi memakai model aktif yang dipilih dari halaman `Voice Input Lab` atau endpoint konfigurasi. Audio tidak disimpan setelah request selesai.
+
+### Endpoint STT
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| GET | `/api/v1/stt/models` | JWT/API key | Daftar model STT CPU yang tersedia |
+| GET | `/api/v1/stt/config` | JWT/API key | Membaca model aktif dan batas CPU |
+| PATCH | `/api/v1/stt/config` | JWT/API key | Mengubah model aktif, bahasa, dan CPU threads |
+| POST | `/api/v1/stt/transcriptions` | JWT/API key | Transkripsi dengan model aktif |
+| POST | `/api/v1/stt/benchmark` | JWT/API key | Membandingkan maksimal empat model |
+
+Dokumentasi interaktif lengkap tersedia di:
+
+- Swagger UI: `/docs` → tag `Speech to Text`
+- ReDoc: `/redoc` → tag `Speech to Text`
+
+### Contoh transkripsi
+
+```bash
+curl -X POST https://yourdomain.com/api/v1/stt/transcriptions \
+  -H "Authorization: Bearer rv_your_api_key" \
+  -F "file=@contoh.wav"
+```
+
+Respons:
+
+```json
+{
+  "status": "success",
+  "result": {
+    "text": "Ini adalah contoh transkripsi bahasa Indonesia.",
+    "language": "id",
+    "duration_seconds": 3.2,
+    "processing_ms": 842.4,
+    "rtf": 0.263,
+    "model": "fw-base-int8"
+  }
+}
+```
+
+### Mengaktifkan model
+
+`PATCH /api/v1/stt/config` memakai multipart form data:
+
+```bash
+curl -X PATCH https://yourdomain.com/api/v1/stt/config \
+  -H "Authorization: Bearer rv_your_api_key" \
+  -F "active_model=fw-small-int8" \
+  -F "language=id" \
+  -F "cpu_threads=2"
+```
+
+Model yang tersedia saat ini adalah `fw-base-int8` dan `fw-small-int8`. Model diunduh saat pertama kali dipakai, sehingga request pertama dapat lebih lambat.
+
 To obtain a token, call one of the login endpoints:
 
 ### Standard Login
@@ -544,4 +601,4 @@ For business inquiries, collaboration, or custom development:
 - API Base URL: https://apirv.dfs.co.id/api/v1
 - Swagger UI: https://apirv.dfs.co.id/docs
 - ReDoc: https://apirv.dfs.co.id/redoc
-- Trakteer: https://trakteer.id/dedin_toyibah 
+- Trakteer: https://trakteer.id/dedin_toyibah

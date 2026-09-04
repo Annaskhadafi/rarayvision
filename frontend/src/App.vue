@@ -5,6 +5,7 @@ import { authService } from './services/authService'
 import { apiKeyService } from './services/apiKeyService'
 import AppHeader from './components/AppHeader.vue'
 import AppSidebar from './components/AppSidebar.vue'
+import VoiceDictation from './components/VoiceDictation.vue'
 
 const isSidebarCollapsed = ref(localStorage.getItem('sidebar_collapsed') === 'true')
 
@@ -39,6 +40,7 @@ onMounted(async () => {
         <RouterView />
       </main>
     </div>
+    <VoiceDictation v-if="store.isLoggedIn" />
   </div>
 </template>
 

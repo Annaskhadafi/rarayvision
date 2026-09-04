@@ -31,7 +31,7 @@ from fastapi.openapi.docs import get_swagger_ui_html, get_redoc_html
 from starlette.exceptions import HTTPException as StarletteHTTPException
 import socketio
 
-from backend.app.controllers import auth_controller, api_key_controller, face_controller
+from backend.app.controllers import auth_controller, api_key_controller, face_controller, stt_controller
 from backend.app.controllers import hero_attendance_controller
 from backend.app.services.socket_service import sio
 from backend.app.database.database import Base, engine
@@ -110,6 +110,12 @@ Powered by:
     version="1.0.0",
     openapi_version="3.0.2",
     contact={"name": "Raray Vision Team", "url": "https://rarayvision.dfs.co.id"},
+    openapi_tags=[
+        {
+            "name": "Speech to Text",
+            "description": "CPU-only Indonesian speech transcription, model comparison, and active model configuration.",
+        },
+    ],
     docs_url=None,
     redoc_url=None,
 )
@@ -254,6 +260,7 @@ from backend.app.controllers import auth_controller, api_key_controller, face_co
 fastapi_app.include_router(auth_controller.router)
 fastapi_app.include_router(api_key_controller.router)
 fastapi_app.include_router(face_controller.router)
+fastapi_app.include_router(stt_controller.router)
 fastapi_app.include_router(hero_attendance_controller.router)
 fastapi_app.include_router(tire_controller.router)
 fastapi_app.include_router(inventory_controller.router)
