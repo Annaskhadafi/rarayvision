@@ -142,13 +142,47 @@ def stream_upload_file(filename: str, request: Request):
         alt_path = os.path.join(os.path.dirname(__file__), "app", "uploads", clean_filename)
         if os.path.exists(alt_path):
             file_path = alt_path
-        else:
-            # Fallback redirect to S3 Cloudhost Object Storage via authorized Presigned URL
-            from backend.app.services.s3_service import get_presigned_download_url
-            presigned_url = get_presigned_download_url(clean_filename) or get_presigned_download_url(filename)
-            if presigned_url:
-                return RedirectResponse(url=presigned_url, status_code=302)
-            return JSONResponse(status_code=404, content={"status": "error", "message": f"File '{filename}' not found"})
+
+    # If file not found on disk, look up if it's an ingested document in database to find actual stored key
+    actual_s3_key = clean_filename
+    try:
+        from backend.app.database.database import SessionLocal
+        from backend.app.database.rag_models import RagDocument
+        _db = SessionLocal()
+        try:
+            _doc = _db.query(RagDocument).filter(
+                (RagDocument.filename == clean_filename) |
+                (RagDocument.filename == filename) |
+                (RagDocument.filename == clean_filename.replace("_", " ")) |
+                (RagDocument.filename == clean_filename.replace(" ", "_"))
+            ).first()
+            if _doc:
+                _stored_target = (_doc.local_url or _doc.s3_url or "").split("/")[-1]
+                if _stored_target:
+                    actual_s3_key = _stored_target
+                    _stored_path = os.path.join(uploads_dir, _stored_target)
+                    if os.path.exists(_stored_path):
+                        file_path = _stored_path
+                    else:
+                        _alt_stored_path = os.path.join(os.path.dirname(__file__), "app", "uploads", _stored_target)
+                        if os.path.exists(_alt_stored_path):
+                            file_path = _alt_stored_path
+        finally:
+            _db.close()
+    except Exception as _e:
+        print(f"[Uploads] Document DB lookup error: {_e}")
+
+    if not os.path.exists(file_path):
+        # Fallback redirect to S3 Cloudhost Object Storage via authorized Presigned URL
+        from backend.app.services.s3_service import get_presigned_download_url
+        presigned_url = (
+            get_presigned_download_url(actual_s3_key) or
+            get_presigned_download_url(clean_filename) or
+            get_presigned_download_url(filename)
+        )
+        if presigned_url:
+            return RedirectResponse(url=presigned_url, status_code=302)
+        return JSONResponse(status_code=404, content={"status": "error", "message": f"File '{filename}' not found"})
 
     file_size = os.path.getsize(file_path)
     range_header = request.headers.get("range")

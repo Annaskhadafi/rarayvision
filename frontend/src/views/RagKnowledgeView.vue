@@ -308,12 +308,13 @@ const handleDeleteDocument = async (doc) => {
 const resolveDocUrl = (doc) => {
   if (!doc) return '#'
   if (doc.local_url && doc.local_url.startsWith('/api/v1/uploads/')) return doc.local_url
-  const raw = doc.s3_url || doc.filename || ''
+  if (doc.s3_url && doc.s3_url.startsWith('/api/v1/uploads/')) return doc.s3_url
+  const raw = doc.s3_url || doc.local_url || doc.filename || ''
   if (!raw) return '#'
-  if (raw.startsWith('/api/v1/uploads/')) return raw
   const filename = decodeURIComponent(raw.split('?')[0].split('/').pop() || '')
   return `/api/v1/uploads/${encodeURIComponent(filename)}`
 }
+
 
 
 // --- External PostgreSQL DB Handlers ---
