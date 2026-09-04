@@ -1,6 +1,7 @@
 import logging
 from typing import Optional, List, Dict, Any
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Query
+from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
 
@@ -115,21 +116,32 @@ async def search_knowledge(
     if not req.query.strip():
         raise HTTPException(status_code=400, detail="Search query cannot be empty")
 
-    results = await run_in_threadpool(
-        RagService.search_similar_chunks,
-        db=db,
-        query=req.query,
-        top_k=req.top_k,
-        document_id=req.document_id,
-        enable_rerank=req.enable_rerank
-    )
+    try:
+        results = await run_in_threadpool(
+            RagService.search_similar_chunks,
+            db=db,
+            query=req.query,
+            top_k=req.top_k,
+            document_id=req.document_id,
+            enable_rerank=req.enable_rerank
+        )
 
-    return {
-        "status": "success",
-        "query": req.query,
-        "results_count": len(results),
-        "results": results
-    }
+        return {
+            "status": "success",
+            "query": req.query,
+            "results_count": len(results),
+            "results": results
+        }
+    except Exception as e:
+        logger.error(f"[RagController] search_knowledge exception: {e}", exc_info=True)
+        return JSONResponse(
+            status_code=500,
+            content={
+                "status": "error",
+                "detail": f"Terjadi kesalahan saat mencari dokumen: {str(e)}",
+                "results": []
+            }
+        )
 
 
 @router.post("/chat", summary="RAG Chatbot Endpoint (Retrieve Context + Generate Answer)")
@@ -147,23 +159,33 @@ async def rag_chat(
     if not req.query.strip():
         raise HTTPException(status_code=400, detail="Query cannot be empty")
 
-    chat_res = await run_in_threadpool(
-        RagService.chat_completion,
-        db=db,
-        query=req.query,
-        messages=req.messages,
-        session_id=req.session_id,
-        top_k=req.top_k,
-        document_id=req.document_id,
-        custom_system_prompt=req.system_prompt,
-        user_id=current_user.id if current_user else None,
-        enable_rerank=req.enable_rerank
-    )
+    try:
+        chat_res = await run_in_threadpool(
+            RagService.chat_completion,
+            db=db,
+            query=req.query,
+            messages=req.messages,
+            session_id=req.session_id,
+            top_k=req.top_k,
+            document_id=req.document_id,
+            custom_system_prompt=req.system_prompt,
+            user_id=current_user.id if current_user else None,
+            enable_rerank=req.enable_rerank
+        )
 
-    return {
-        "status": "success",
-        "data": chat_res
-    }
+        return {
+            "status": "success",
+            "data": chat_res
+        }
+    except Exception as e:
+        logger.error(f"[RagController] rag_chat exception: {e}", exc_info=True)
+        return JSONResponse(
+            status_code=500,
+            content={
+                "status": "error",
+                "detail": f"Gagal memproses jawaban RAG: {str(e)}"
+            }
+        )
 
 
 @router.post("/feedback", summary="Submit Message Feedback & Corrections (Self-Growth Engine)")

@@ -21,13 +21,13 @@ services:
       GROQ_MODEL: ${GROQ_MODEL:-qwen/qwen3.6-27b}
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY}
       OPENROUTER_MODEL: nvidia/nemotron-nano-12b-v2-vl:free
-      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-sk-a510b6e65efa23d4-hpbvtn-35dad8f5}
       OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://9router.chitraparatama.com/v1}
       OPENAI_MODEL: ${OPENAI_MODEL:-cx/gpt-5.6-luna}
       LLM_PROVIDER: ${LLM_PROVIDER:-openai}
       GEMINI_API_KEY: ${GEMINI_API_KEY}
       EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-local}
-      RERANKER_MODEL: ${RERANKER_MODEL:-Xenova/ms-marco-MiniLM-L-6-v2}
+      RERANKER_MODEL: ${RERANKER_MODEL:-jinaai/jina-reranker-v1-tiny-en}
       REDIS_URL: ${REDIS_URL}
       HF_HOME: /app/cache/huggingface
       FASTEMBED_CACHE_PATH: /app/cache/fastembed

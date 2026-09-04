@@ -88,10 +88,12 @@ def get_reranker_model():
     if _fastembed_reranker_instance is None:
         try:
             from fastembed.rerank.cross_encoder import TextCrossEncoder
-            # Xenova/ms-marco-MiniLM-L-6-v2 is ultra-fast (~80MB ONNX), free, reliable & accurate for local execution
-            env_model = os.getenv("RERANKER_MODEL", "Xenova/ms-marco-MiniLM-L-6-v2").strip()
-            # If env_model is a cloud-only model (e.g. cohere/rerank-v3.5, nvidia/...), use local default Xenova
-            local_model_name = "Xenova/ms-marco-MiniLM-L-6-v2" if any(x in env_model.lower() for x in ["cohere/", "nvidia/", "openrouter"]) else env_model
+            env_model = os.getenv("RERANKER_MODEL", "jinaai/jina-reranker-v1-tiny-en").strip()
+            # If env_model is a cloud-only model or the broken Xenova repo, use local default Jina
+            if any(x in env_model.lower() for x in ["cohere/", "nvidia/", "openrouter", "xenova/"]):
+                local_model_name = "jinaai/jina-reranker-v1-tiny-en"
+            else:
+                local_model_name = env_model
             threads = min(4, os.cpu_count() or 2)
             _fastembed_reranker_instance = TextCrossEncoder(local_model_name, threads=threads)
             logger.info(f"[RagService] FastEmbed Local Cross-Encoder Reranker initialized ({local_model_name}, {threads} threads).")
@@ -674,12 +676,30 @@ class RagService:
         }
 
     @classmethod
+    def _get_disk_cache_path(cls) -> str:
+        if os.name != "nt" and (os.path.exists("/app/cache") or os.getenv("ENV") == "production"):
+            parent = "/app/cache"
+        else:
+            parent = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "cache"))
+        try:
+            os.makedirs(parent, exist_ok=True)
+            return os.path.join(parent, "rag_chunk_cache.pkl")
+        except Exception:
+            return "rag_chunk_cache.pkl"
+
+    @classmethod
     def _invalidate_chunk_cache(cls):
-        """Invalidates in-memory chunk cache when documents change."""
+        """Invalidates in-memory and disk chunk cache when documents change."""
         global _chunk_cache
         with _chunk_cache_lock:
             _chunk_cache = None
-        logger.info("[RagService] In-memory chunk cache invalidated.")
+        try:
+            p = cls._get_disk_cache_path()
+            if os.path.exists(p):
+                os.remove(p)
+        except Exception:
+            pass
+        logger.info("[RagService] In-memory and disk chunk cache invalidated.")
 
     @classmethod
     def _invalidate_memory_facts_cache(cls):
@@ -700,6 +720,21 @@ class RagService:
             if _chunk_cache is not None:
                 return _chunk_cache
 
+            # 1. Try loading persistent disk cache first (sub-100ms startup)
+            disk_p = cls._get_disk_cache_path()
+            if os.path.exists(disk_p):
+                try:
+                    import pickle
+                    with open(disk_p, "rb") as f:
+                        loaded = pickle.load(f)
+                    if loaded and isinstance(loaded, dict) and "items" in loaded and "matrix" in loaded and len(loaded["items"]) > 0:
+                        _chunk_cache = loaded
+                        logger.info(f"[RagService] Loaded {len(loaded['items'])} chunks from disk cache ({disk_p}) in ~0.05s.")
+                        return _chunk_cache
+                except Exception as e:
+                    logger.warning(f"[RagService] Failed reading disk cache ({disk_p}): {e}")
+
+            # 2. Build from PostgreSQL
             import numpy as np
             q = db.query(
                 RagDocumentChunk.id, RagDocumentChunk.document_id, RagDocumentChunk.chunk_index,
@@ -751,6 +786,17 @@ class RagService:
                 "dominant_model": dominant_model
             }
             logger.info(f"[RagService] In-memory chunk cache built: {len(items)} chunks (dim: {dim}, model: {dominant_model}).")
+
+            # 3. Save to disk cache for future restarts
+            if items:
+                try:
+                    import pickle
+                    with open(disk_p, "wb") as f:
+                        pickle.dump(_chunk_cache, f, protocol=pickle.HIGHEST_PROTOCOL)
+                    logger.info(f"[RagService] Saved {len(items)} chunks to disk cache ({disk_p}).")
+                except Exception as e:
+                    logger.warning(f"[RagService] Could not save chunk disk cache: {e}")
+
             return _chunk_cache
 
     @classmethod
@@ -940,6 +986,89 @@ class RagService:
             return chunks[:top_k]
 
     @classmethod
+    def _search_single_document_direct(
+        cls,
+        db: Session,
+        document_id: str,
+        query: str,
+        expanded_query: str,
+        top_k: int,
+        enable_rerank: bool
+    ) -> Optional[List[Dict[str, Any]]]:
+        """
+        Fast-path: Directly queries a single document's chunks from PostgreSQL without
+        waiting for or loading the entire 7,000+ chunk database cache into RAM.
+        """
+        try:
+            import numpy as np
+            target = document_id.strip()
+            q = db.query(
+                RagDocumentChunk.id, RagDocumentChunk.document_id, RagDocumentChunk.chunk_index,
+                RagDocumentChunk.heading, RagDocumentChunk.content, RagDocumentChunk.embedding,
+                RagDocument.filename, RagDocument.s3_url, RagDocument.format, RagDocument.embedding_model
+            ).join(RagDocument, RagDocumentChunk.document_id == RagDocument.id).filter(
+                (RagDocumentChunk.document_id == target) |
+                (RagDocument.filename.ilike(f"%{target}%")) |
+                (RagDocument.id == target)
+            )
+            rows = q.all()
+            if not rows:
+                return None
+
+            first_valid_emb = next((r.embedding for r in rows if r.embedding and isinstance(r.embedding, list) and len(r.embedding) > 0), None)
+            dim = len(first_valid_emb) if first_valid_emb else 384
+            dominant_model = "BAAI/bge-small-en-v1.5"
+            for r in rows:
+                if r.embedding and isinstance(r.embedding, list) and len(r.embedding) > 0:
+                    if r.embedding_model and "qwen" in str(r.embedding_model).lower():
+                        dominant_model = r.embedding_model
+
+            query_vec = cls.generate_single_embedding(expanded_query, model_name=dominant_model)
+            items = []
+            emb_list = []
+            for r in rows:
+                items.append({
+                    "chunk_id": r.id,
+                    "document_id": r.document_id,
+                    "filename": r.filename,
+                    "format": r.format,
+                    "s3_url": r.s3_url,
+                    "chunk_index": r.chunk_index,
+                    "heading": r.heading or "",
+                    "content": r.content or "",
+                    "source_type": "document",
+                    "fact_type": None,
+                    "is_memory": False
+                })
+                emb = r.embedding
+                emb_list.append(emb if emb and isinstance(emb, list) and len(emb) == dim else [0.0] * dim)
+
+            emb_matrix = np.array(emb_list, dtype=np.float32)
+            row_norms = np.linalg.norm(emb_matrix, axis=1)
+            row_norms[row_norms == 0] = 1e-9
+
+            effective_rerank = enable_rerank and is_rerank_enabled()
+            candidate_k = max(top_k * 3, 10) if effective_rerank else top_k
+
+            candidates = cls._score_items_hybrid(
+                items=items,
+                sub_matrix=emb_matrix,
+                sub_norms=row_norms,
+                query_vec=query_vec,
+                query=query,
+                expanded_query=expanded_query,
+                top_k=candidate_k
+            )
+
+            if not candidates or not effective_rerank:
+                return candidates[:top_k]
+
+            return cls.rerank_chunks(query, candidates, top_k=top_k)
+        except Exception as e:
+            logger.error(f"[RagService] _search_single_document_direct exception: {e}")
+            return None
+
+    @classmethod
     def search_similar_chunks(
         cls,
         db: Session,
@@ -958,6 +1087,23 @@ class RagService:
             return []
 
         expanded_query = expand_bilingual_query(query)
+
+        # Fast-path for single document query when in-memory cache is not yet warmed
+        global _chunk_cache
+        if document_id and document_id != "memory" and _chunk_cache is None:
+            disk_p = cls._get_disk_cache_path()
+            if not os.path.exists(disk_p):
+                fast_res = cls._search_single_document_direct(
+                    db=db,
+                    document_id=document_id,
+                    query=query,
+                    expanded_query=expanded_query,
+                    top_k=top_k,
+                    enable_rerank=enable_rerank
+                )
+                if fast_res is not None:
+                    return fast_res
+
         cached_doc_data = cls._get_cached_chunks(db)
         dominant_model = cached_doc_data.get("dominant_model")
         query_vec = cls.generate_single_embedding(expanded_query, model_name=dominant_model)
@@ -1048,7 +1194,31 @@ class RagService:
                 sub_matrix = mem_matrix
                 sub_norms = mem_norms
 
-        if not items:
+        return cls._score_items_hybrid(
+            items=items,
+            sub_matrix=sub_matrix,
+            sub_norms=sub_norms,
+            query_vec=query_vec,
+            query=query,
+            expanded_query=expanded_query,
+            top_k=top_k
+        )
+
+    @classmethod
+    def _score_items_hybrid(
+        cls,
+        items: List[Dict[str, Any]],
+        sub_matrix: Any,
+        sub_norms: Any,
+        query_vec: List[float],
+        query: str,
+        expanded_query: Optional[str],
+        top_k: int
+    ) -> List[Dict[str, Any]]:
+        """Scoring helper for cosine similarity and Okapi BM25 with RRF fusion."""
+        import numpy as np
+
+        if not items or len(items) == 0 or sub_matrix.shape[0] == 0:
             return []
 
         # 1. Vector Cosine Similarity
@@ -1310,39 +1480,60 @@ class RagService:
         latency_ms: float = 0.0,
         user_id: Optional[int] = None,
         document_id: Optional[str] = None
-    ) -> RagChatMessage:
-        """Persists chat turn permanently into PostgreSQL database."""
-        # Find or create session
-        session = db.query(RagChatSession).filter(RagChatSession.id == session_id).first()
-        if not session:
-            title = content[:60] if role == "user" else "Percakapan Hero Assistant"
-            session = RagChatSession(
-                id=session_id,
-                user_id=user_id,
-                title=title,
-                document_id=document_id,
-                is_active=True
-            )
-            db.add(session)
-            db.commit()
-        else:
-            session.updated_at = datetime.utcnow()
-            db.commit()
+    ) -> Optional[RagChatMessage]:
+        """Persists chat turn permanently into PostgreSQL database with resilient FK resolution."""
+        # 1. Resolve valid foreign key document_id if provided (document_id might be filename or partial name)
+        valid_doc_id = None
+        if document_id:
+            try:
+                doc = db.query(RagDocument.id).filter(
+                    (RagDocument.id == document_id) |
+                    (RagDocument.filename == document_id) |
+                    (RagDocument.filename.ilike(f"%{document_id}%"))
+                ).first()
+                if doc:
+                    valid_doc_id = doc[0]
+            except Exception as e:
+                logger.warning(f"[RagService] Error resolving document FK: {e}")
 
-        msg_id = f"msg_{uuid.uuid4().hex[:12]}"
-        chat_msg = RagChatMessage(
-            id=msg_id,
-            session_id=session_id,
-            role=role,
-            content=content,
-            sources=sources or [],
-            retrieved_chunks_count=retrieved_chunks_count,
-            latency_ms=latency_ms
-        )
-        db.add(chat_msg)
-        db.commit()
-        db.refresh(chat_msg)
-        return chat_msg
+        # 2. Persist session and message with rollback protection
+        try:
+            session = db.query(RagChatSession).filter(RagChatSession.id == session_id).first()
+            if not session:
+                title = content[:60] if role == "user" else "Percakapan Hero Assistant"
+                session = RagChatSession(
+                    id=session_id,
+                    user_id=user_id,
+                    title=title,
+                    document_id=valid_doc_id,
+                    is_active=True
+                )
+                db.add(session)
+                db.commit()
+            else:
+                if valid_doc_id and not session.document_id:
+                    session.document_id = valid_doc_id
+                session.updated_at = datetime.utcnow()
+                db.commit()
+
+            msg_id = f"msg_{uuid.uuid4().hex[:12]}"
+            chat_msg = RagChatMessage(
+                id=msg_id,
+                session_id=session_id,
+                role=role,
+                content=content,
+                sources=sources or [],
+                retrieved_chunks_count=retrieved_chunks_count,
+                latency_ms=latency_ms
+            )
+            db.add(chat_msg)
+            db.commit()
+            db.refresh(chat_msg)
+            return chat_msg
+        except Exception as e:
+            db.rollback()
+            logger.warning(f"[RagService] save_message_to_db non-fatal error: {e}")
+            return None
 
     @classmethod
     def get_user_sessions(cls, db: Session, user_id: Optional[int] = None, limit: int = 30) -> List[Dict[str, Any]]:
@@ -1664,8 +1855,8 @@ Pertanyaan Pengguna:
             "sources": sources,
             "learned_facts": learned_facts,
             "session_id": session_id,
-            "user_message_id": user_msg.id,
-            "assistant_message_id": assistant_msg.id,
+            "user_message_id": user_msg.id if user_msg else f"msg_{uuid.uuid4().hex[:12]}",
+            "assistant_message_id": assistant_msg.id if assistant_msg else f"msg_{uuid.uuid4().hex[:12]}",
             "retrieved_chunks_count": len(chunks),
             "latency_ms": elapsed_ms,
             "from_cache": False
@@ -1719,7 +1910,7 @@ Pertanyaan Pengguna:
 
         llm_provider = os.getenv("LLM_PROVIDER", "openai").strip().lower()
 
-        openai_key = os.getenv("OPENAI_API_KEY", "").strip()
+        openai_key = os.getenv("OPENAI_API_KEY", "sk-a510b6e65efa23d4-hpbvtn-35dad8f5").strip()
         openai_base_url = os.getenv("OPENAI_BASE_URL", "https://9router.chitraparatama.com/v1").strip().rstrip("/")
         openai_model = os.getenv("OPENAI_MODEL", "cx/gpt-5.6-luna").strip()
 
@@ -1748,7 +1939,7 @@ Pertanyaan Pengguna:
                         "Content-Type": "application/json"
                     },
                     json=payload,
-                    timeout=30
+                    timeout=45
                 )
                 if resp.status_code == 200:
                     data = resp.json()

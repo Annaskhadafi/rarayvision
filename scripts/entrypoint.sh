@@ -15,6 +15,12 @@ echo "=== [Raray Vision] Starting Optimized Backend ==="
 mkdir -p /app/cache/huggingface /app/cache/fastembed /app/cache/torch /app/backend/uploads
 chmod -R 777 /app/cache /app/backend/uploads 2>/dev/null || true
 
+# Restore pre-downloaded models if cache was mounted empty from host
+if [ -d /opt/models_cache ]; then
+    echo "-> Syncing pre-downloaded models to /app/cache..."
+    cp -rn /opt/models_cache/* /app/cache/ 2>/dev/null || true
+fi
+
 # Trap signals for graceful shutdown
 cleanup() {
     echo "Shutting down services..."
