@@ -26,10 +26,12 @@ services:
       EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-local}
       RERANKER_MODEL: ${RERANKER_MODEL:-Xenova/ms-marco-MiniLM-L-6-v2}
       REDIS_URL: ${REDIS_URL}
+      HF_HOME: /root/.cache/huggingface
     volumes:
       - uploads_data:/app/backend/uploads
       - models_data:/app/backend/ml_models
       - fastembed_cache:/root/.local/share/fastembed
+      - hf_cache:/root/.cache/huggingface
     expose:
       - "5000"
     healthcheck:
@@ -52,4 +54,4 @@ volumes:
   uploads_data:
   models_data:
   fastembed_cache:
-
+  hf_cache:

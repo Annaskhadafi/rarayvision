@@ -529,7 +529,7 @@ curl -X PATCH https://yourdomain.com/api/v1/stt/config \
   -F "cpu_threads=2"
 ```
 
-Model yang tersedia saat ini adalah `fw-base-int8` dan `fw-small-int8`. Model diunduh saat pertama kali dipakai, sehingga request pertama dapat lebih lambat.
+Model yang tersedia saat ini adalah `fw-base-int8` dan `fw-small-int8`. Pada Docker Compose, cache Hugging Face dipasang ke volume `hf_cache`, sehingga model tidak perlu diunduh ulang setelah container restart. Request pertama tetap dapat lebih lambat karena model diunduh dan dimuat.
 
 To obtain a token, call one of the login endpoints:
 

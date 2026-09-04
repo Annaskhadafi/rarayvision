@@ -4,6 +4,8 @@ WORKDIR /app
 
 ENV PYTHONPATH="/app:/app/backend"
 ENV PYTHONUNBUFFERED=1
+# Persist downloaded Whisper/faster-whisper models when the compose volume is mounted.
+ENV HF_HOME=/root/.cache/huggingface
 
 # Install system dependencies for OpenCV, Tesseract, PyTorch, FFMPEG, PaddleOCR, and ONNX
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -44,4 +46,3 @@ RUN chmod +x scripts/entrypoint.sh
 EXPOSE 5000
 
 CMD ["/bin/bash", "scripts/entrypoint.sh"]
-
