@@ -228,9 +228,12 @@ def compute_bm25_scores(query: str, items: List[Dict[str, Any]], k1: float = 1.5
     doc_lens = []
 
     for it in items:
-        text_lower = f"{it.get('heading', '')} {it.get('content', '')}".lower()
-        words_approx = len(text_lower) // 5 + 1
-        doc_lens.append(words_approx)
+        text_lower = it.get("text_lower")
+        if text_lower is None:
+            text_lower = f"{it.get('heading', '')} {it.get('content', '')}".lower()
+            it["text_lower"] = text_lower
+            it["doc_len"] = len(text_lower) // 5 + 1
+        doc_lens.append(it.get("doc_len", len(text_lower) // 5 + 1))
 
         tf_dict = {}
         for q_tok in query_tokens:
@@ -754,6 +757,9 @@ class RagService:
                     if r.embedding_model and "qwen" in str(r.embedding_model).lower():
                         dominant_model = r.embedding_model
 
+                h_str = r.heading or ""
+                c_str = r.content or ""
+                t_lower = f"{h_str} {c_str}".lower()
                 items.append({
                     "chunk_id": r.id,
                     "document_id": r.document_id,
@@ -761,8 +767,10 @@ class RagService:
                     "format": r.format,
                     "s3_url": r.s3_url,
                     "chunk_index": r.chunk_index,
-                    "heading": r.heading or "",
-                    "content": r.content or "",
+                    "heading": h_str,
+                    "content": c_str,
+                    "text_lower": t_lower,
+                    "doc_len": len(t_lower) // 5 + 1,
                     "source_type": "document",
                     "fact_type": None,
                     "is_memory": False
@@ -920,15 +928,16 @@ class RagService:
         try:
             import numpy as np
 
-            # Combine heading and content for full structural context
+            # Combine heading and content for structural context (capped to 600 chars for high-speed cross-encoder attention)
             candidate_texts = []
             for c in chunks:
                 heading = c.get("heading", "").strip()
                 content = c.get("content", "").strip()
                 if heading and heading != "General":
-                    candidate_texts.append(f"[{heading}]\n{content}")
+                    full_txt = f"[{heading}]\n{content}"
                 else:
-                    candidate_texts.append(content)
+                    full_txt = content
+                candidate_texts.append(full_txt[:600])
 
             # 1. Try OpenRouter Reranker if configured
             openrouter_key = os.getenv("OPENROUTER_API_KEY", "").strip()
@@ -1075,8 +1084,9 @@ class RagService:
         query: str,
         top_k: int = 4,
         document_id: Optional[str] = None,
-        enable_rerank: bool = True
-    ) -> List[Dict[str, Any]]:
+        enable_rerank: bool = True,
+        return_vec: bool = False
+    ) -> Any:
         """
         Two-stage Hybrid retrieval pipeline:
         1. Recall Stage: Hybrid Search (Vector Cosine Similarity + BM25 Lexical Matching with RRF Fusion).
@@ -1084,7 +1094,7 @@ class RagService:
         2. Precision Stage: ONNX Cross-Encoder Reranks candidates against the specific user query.
         """
         if not query or not query.strip():
-            return []
+            return ([], [0.0] * 384) if return_vec else []
 
         expanded_query = expand_bilingual_query(query)
 
@@ -1102,7 +1112,7 @@ class RagService:
                     enable_rerank=enable_rerank
                 )
                 if fast_res is not None:
-                    return fast_res
+                    return (fast_res, [0.0] * 384) if return_vec else fast_res
 
         cached_doc_data = cls._get_cached_chunks(db)
         dominant_model = cached_doc_data.get("dominant_model")
@@ -1110,7 +1120,7 @@ class RagService:
 
         # Check global ENABLE_RERANK env setting as well as parameter
         effective_rerank = enable_rerank and is_rerank_enabled()
-        candidate_k = max(top_k * 3, 15) if effective_rerank else top_k
+        candidate_k = min(10, max(top_k * 2, 6)) if effective_rerank else top_k
         candidates = cls._similarity_search(
             db=db,
             query=query,
@@ -1121,9 +1131,13 @@ class RagService:
         )
 
         if not candidates or not effective_rerank:
-            return candidates[:top_k]
+            final_chunks = candidates[:top_k]
+        else:
+            final_chunks = cls.rerank_chunks(query, candidates, top_k=top_k)
 
-        return cls.rerank_chunks(query, candidates, top_k=top_k)
+        if return_vec:
+            return final_chunks, query_vec
+        return final_chunks
 
     @classmethod
     def _similarity_search(
@@ -1304,7 +1318,8 @@ class RagService:
         db: Session,
         query: str,
         top_k: int = 3,
-        user_id: Optional[int] = None
+        user_id: Optional[int] = None,
+        query_vec: Optional[List[float]] = None
     ) -> List[Dict[str, Any]]:
         """
         Sub-millisecond retrieval of top learned facts/rules/corrections from in-memory cache.
@@ -1315,7 +1330,8 @@ class RagService:
             if not raw_facts:
                 return []
 
-            query_vec = cls.generate_single_embedding(query)
+            if query_vec is None or len(query_vec) == 0:
+                query_vec = cls.generate_single_embedding(query)
             import numpy as np
 
             q_vec = np.array(query_vec, dtype=np.float32)
@@ -1720,10 +1736,12 @@ class RagService:
                     active_messages = [{"role": m["role"], "content": m["content"]} for m in db_msgs[-8:]]
 
         # 2. Check Semantic RAG Cache (if standalone query without previous turns)
-        if not active_messages:
+        is_standalone = not active_messages or len([m for m in active_messages if m.get("role") in ["assistant", "user"] and str(m.get("content")).strip() != query.strip()]) == 0
+        if is_standalone:
             cached_res = RedisService.get_rag_cache(query, document_id)
             if cached_res:
                 cached_res["latency_ms"] = round((time.perf_counter() - start_time) * 1000, 2)
+                cached_res["from_cache"] = True
                 return cached_res
 
         # 3. Context-aware search query without assistant message pollution
@@ -1739,12 +1757,12 @@ class RagService:
                 search_query = f"{user_history[-1][:80]} {query.strip()}"
 
         # 4. Retrieve relevant chunks from documents (with bilingual expansion & 2-stage Cross-Encoder reranking)
-        chunks = cls.search_similar_chunks(db, search_query, top_k=top_k, document_id=document_id, enable_rerank=enable_rerank)
+        chunks, query_vec = cls.search_similar_chunks(db, search_query, top_k=top_k, document_id=document_id, enable_rerank=enable_rerank, return_vec=True)
         if not chunks and search_query != query.strip():
-            chunks = cls.search_similar_chunks(db, query.strip(), top_k=top_k, document_id=document_id, enable_rerank=enable_rerank)
+            chunks, query_vec = cls.search_similar_chunks(db, query.strip(), top_k=top_k, document_id=document_id, enable_rerank=enable_rerank, return_vec=True)
 
-        # 5. Retrieve learned facts from Self-Growth Memory
-        learned_facts = cls.search_learned_facts(db, search_query, top_k=3, user_id=user_id)
+        # 5. Retrieve learned facts from Self-Growth Memory using precomputed query_vec
+        learned_facts = cls.search_learned_facts(db, search_query, top_k=3, user_id=user_id, query_vec=query_vec)
 
         # 6. Build Context Prompt
         context_parts = []
@@ -1780,21 +1798,19 @@ class RagService:
 
         # 7. Formulate Universal System Prompt & Multi-Turn Message History
         system_instruction = custom_system_prompt or (
-            "Anda adalah Hero Assistant, asisten AI resmi yang cerdas, komprehensif, dan profesional dalam menganalisis dokumen perusahaan, Kebijakan K3 (Keselamatan dan Kesehatan Kerja), SOP operasional, pedoman manajemen, spesifikasi teknis, dan data database.\n\n"
-            "ATURAN WAJIB FORMAT & AKURASI JAWABAN (STRICT RULES):\n"
-            "1. ANALISIS MENYELURUH DARI DOKUMEN (GROUNDED ANSWERING):\n"
-            "   - Baca dan pahami seluruh teks dalam Konteks Dokumen Pengetahuan (Markdown) di bawah.\n"
-            "   - Jawab pertanyaan pengguna secara akurat, lengkap, dan detail berlandaskan isi dokumen yang terlampir.\n"
-            "   - Jika pertanyaan mengenai Kebijakan K3 atau peraturan perusahaan, sebutkan poin-poin komitmen, sasaran, tujuan, dan instruksi yang tertulis pada dokumen tersebut secara jelas dan terstruktur.\n"
-            "2. STRUKTUR & BAHASA JAWABAN:\n"
-            "   - Sampaikan seluruh jawaban dalam Bahasa Indonesia yang baku, terstruktur, rapi, dan mudah dipahami.\n"
-            "   - Gunakan format poin-poin (bullet / numbered list) atau tabel Markdown untuk data kebijakan, langkah-langkah, atau spesifikasi teknis.\n"
-            "3. PRIORITAS MEMORI & KOREKSI PENGGUNA:\n"
-            "   - Jika terdapat bagian '[Memori & Aturan Khusus yang Dipelajari dari Pengguna]' dalam konteks, prioritaskan informasi tersebut.\n"
-            "4. LANGSUNG BERIKAN JAWABAN AKHIR (NO META-THOUGHTS):\n"
-            "   - Langsung berikan penjelasan dan jawaban akhir yang bersih, informatif, dan mudah dipahami.\n"
-            "5. REFERENSI GAMBAR (MARKDOWN IMAGES):\n"
-            "   - Jika dalam teks dokumen referensi (konteks) terdapat tautan gambar markdown seperti `![alt](url)`, sertakan tag gambar tersebut secara utuh di posisi yang sesuai di dalam jawaban akhir Anda untuk membantu visualisasi (misalnya setelah menjelaskan grafik, diagram, atau ilustrasi tersebut)."
+            "Anda adalah Hero Assistant, asisten AI resmi yang cerdas, komprehensif, dan profesional dalam menganalisis dokumen operasional PT Chitra Paratama.\n\n"
+            "PANDUAN RESPONS CEPAT, TEPAT & AKURAT (SPEED & CONCISENESS):\n"
+            "1. ANALISIS TERARAH (GROUNDED):\n"
+            "   - Berikan jawaban yang to the point, padat, jelas, dan akurat berlandaskan konteks dokumen terlampir di bawah.\n"
+            "   - Hindari kata pengantar bertele-tele atau pengulangan pertanyaan.\n"
+            "2. STRUKTUR RINGKAS:\n"
+            "   - Gunakan format poin-poin (bullet points) atau tabel ringkas untuk prosedur kerja, angka torsi, atau spesifikasi ban.\n"
+            "3. PRIORITAS MEMORI & ATURAN:\n"
+            "   - Jika terdapat bagian '[Memori & Aturan Khusus yang Dipelajari dari Pengguna]', prioritaskan informasi tersebut.\n"
+            "4. INFORMASI TIDAK TERSEDIA:\n"
+            "   - Jika informasi spesifik tidak ditemukan di dokumen, sampaikan secara singkat dan lugas tanpa spekulasi panjang.\n"
+            "5. REFERENSI GAMBAR:\n"
+            "   - Jika konteks memuat tautan gambar `![alt](url)`, sertakan tag gambar tersebut di posisi yang sesuai."
         )
 
         current_prompt = f"""Konteks Dokumen & Memori Pengetahuan (Markdown):
@@ -1862,7 +1878,7 @@ Pertanyaan Pengguna:
             "from_cache": False
         }
 
-        if not active_messages:
+        if is_standalone:
             RedisService.set_rag_cache(query, document_id, result)
 
         return result
@@ -1930,7 +1946,7 @@ Pertanyaan Pengguna:
                     "model": openai_model,
                     "messages": messages,
                     "temperature": 0.2,
-                    "max_tokens": 4096,
+                    "max_tokens": 1500,
                 }
                 resp = session.post(
                     f"{openai_base_url}/chat/completions",
