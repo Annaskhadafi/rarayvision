@@ -1,7 +1,8 @@
 import os
 from dotenv import load_dotenv
 
-# Load .env from project root
+# Load .env from project root and backend parent
+load_dotenv(os.path.join(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")), ".env"))
 load_dotenv(os.path.join(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..")), ".env"))
 
 # Database Configuration
