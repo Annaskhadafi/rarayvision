@@ -2,6 +2,7 @@ import io
 import os
 import threading
 import time
+from typing import Dict, Any, Optional
 from concurrent.futures import ThreadPoolExecutor
 
 import logging
@@ -101,10 +102,17 @@ def transcribe_sync(audio_bytes: bytes, model_id: str, language: str = "id", cpu
         return transcribe_groq(audio_bytes, language=language)
 
     # 1. Coba faster-whisper lokal jika terpasang
+    import tempfile
+    tmp_path = None
     try:
         model = _get_model(model_id, cpu_threads)
+
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".webm") as tmp:
+            tmp.write(audio_bytes)
+            tmp_path = tmp.name
+
         segments, info = model.transcribe(
-            io.BytesIO(audio_bytes),
+            tmp_path,
             language=language,
             task="transcribe",
             beam_size=1,
@@ -128,7 +136,7 @@ def transcribe_sync(audio_bytes: bytes, model_id: str, language: str = "id", cpu
         if groq_key:
             try:
                 res = transcribe_groq(audio_bytes, language=language)
-                res["note"] = f"Model lokal ({model_id}) gagal ({str(local_err)[:60]}); dialihkan otomatis ke Groq Whisper LPU"
+                res["note"] = f"Model lokal ({model_id}) dialihkan otomatis ke Groq Whisper LPU"
                 return res
             except Exception as groq_err:
                 logger.error(f"[STT] Groq Whisper fallback also failed: {groq_err}")
@@ -138,6 +146,12 @@ def transcribe_sync(audio_bytes: bytes, model_id: str, language: str = "id", cpu
             f"Model STT lokal gagal dimuat atau diproses: {local_err}. "
             "Pastikan model Whisper sudah terunduh di server atau gunakan Web Speech API realtime."
         ) from local_err
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            try:
+                os.unlink(tmp_path)
+            except Exception:
+                pass
 
 
 def transcribe(audio_bytes: bytes, model_id: str, language: str = "id", cpu_threads: int = 2):

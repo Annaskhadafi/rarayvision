@@ -33,8 +33,9 @@ RUN pip install --no-cache-dir torch torchvision --index-url https://download.py
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Pre-download FastEmbed ONNX embedding & cross-encoder reranker models to image layer for zero-latency startup
+# Pre-download FastEmbed ONNX & faster-whisper models to image layer for 100% offline zero-latency startup
 RUN python -c "from fastembed import TextEmbedding; from fastembed.rerank.cross_encoder import TextCrossEncoder; TextEmbedding('BAAI/bge-small-en-v1.5'); TextCrossEncoder('Xenova/ms-marco-MiniLM-L-6-v2')" || true
+RUN python -c "from faster_whisper import WhisperModel; WhisperModel('base', device='cpu', compute_type='int8')" || true
 
 # Copy application code
 COPY . .
