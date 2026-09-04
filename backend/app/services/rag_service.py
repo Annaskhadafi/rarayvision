@@ -1574,6 +1574,37 @@ class RagService:
         ]
 
     @classmethod
+    def _extract_images_from_message(cls, msg: Any) -> List[Dict[str, Any]]:
+        """Extracts unique images from message sources or markdown content."""
+        images = []
+        seen = set()
+        sources = getattr(msg, "sources", None) if hasattr(msg, "sources") else (msg.get("sources") if isinstance(msg, dict) else [])
+        if sources and isinstance(sources, list):
+            for s in sources:
+                if isinstance(s, dict) and s.get("images"):
+                    for img in s["images"]:
+                        u = img.get("url", "").strip()
+                        if u and u not in seen:
+                            seen.add(u)
+                            images.append({
+                                "alt": img.get("alt") or "Gambar Dokumen",
+                                "url": u,
+                                "source_doc": s.get("filename"),
+                                "heading": s.get("heading")
+                            })
+        content = getattr(msg, "content", None) if hasattr(msg, "content") else (msg.get("content") if isinstance(msg, dict) else "")
+        if content and isinstance(content, str):
+            for alt, u in re.findall(r'!\[(.*?)\]\((.*?)\)', content):
+                u_clean = u.strip()
+                if u_clean and u_clean not in seen:
+                    seen.add(u_clean)
+                    images.append({
+                        "alt": alt.strip() or "Gambar Dokumen",
+                        "url": u_clean
+                    })
+        return images
+
+    @classmethod
     def get_session_messages(cls, db: Session, session_id: str) -> List[Dict[str, Any]]:
         """Retrieves all messages for a specific session."""
         msgs = db.query(RagChatMessage).filter(
@@ -1586,6 +1617,7 @@ class RagService:
                 "role": m.role,
                 "content": m.content,
                 "sources": m.sources or [],
+                "attached_images": cls._extract_images_from_message(m),
                 "rating": m.rating,
                 "feedback_notes": m.feedback_notes,
                 "correction_text": m.correction_text,
@@ -1766,9 +1798,11 @@ class RagService:
         # 5. Retrieve learned facts from Self-Growth Memory using precomputed query_vec
         learned_facts = cls.search_learned_facts(db, search_query, top_k=3, user_id=user_id, query_vec=query_vec)
 
-        # 6. Build Context Prompt
+        # 6. Build Context Prompt & Extract Embedded Images
         context_parts = []
         sources = []
+        attached_images = []
+        seen_img_urls = set()
 
         # Add learned facts first with high priority
         if learned_facts:
@@ -1781,7 +1815,28 @@ class RagService:
                 source_tag += f" - {c['heading']}"
             source_tag += "]"
 
-            context_parts.append(f"{source_tag}\n{c['content']}")
+            c_content = c.get('content', '')
+            context_parts.append(f"{source_tag}\n{c_content}")
+
+            # Extract any embedded images from this chunk
+            chunk_images = []
+            for alt_text, img_url in re.findall(r'!\[(.*?)\]\((.*?)\)', c_content):
+                clean_url = img_url.strip()
+                if clean_url:
+                    clean_alt = alt_text.strip() or f"Diagram {c['filename']}"
+                    chunk_images.append({
+                        "alt": clean_alt,
+                        "url": clean_url
+                    })
+                    if clean_url not in seen_img_urls:
+                        seen_img_urls.add(clean_url)
+                        attached_images.append({
+                            "alt": clean_alt,
+                            "url": clean_url,
+                            "source_doc": c["filename"],
+                            "heading": c.get("heading")
+                        })
+
             sources.append({
                 "source_id": idx,
                 "filename": c["filename"],
@@ -1794,7 +1849,8 @@ class RagService:
                 "raw_reranker_logit": c.get("raw_reranker_logit"),
                 "source_type": c.get("source_type", "document"),
                 "fact_type": c.get("fact_type"),
-                "content_preview": c.get("content", "")[:250]
+                "content_preview": c_content[:250],
+                "images": chunk_images
             })
 
         combined_context = "\n\n---\n\n".join(context_parts) if context_parts else "Tidak ada dokumen yang relevan ditemukan di basis pengetahuan."
@@ -1812,8 +1868,9 @@ class RagService:
             "   - Jika terdapat bagian '[Memori & Aturan Khusus yang Dipelajari dari Pengguna]', prioritaskan informasi tersebut.\n"
             "4. INFORMASI TIDAK TERSEDIA:\n"
             "   - Jika informasi spesifik tidak ditemukan di dokumen, sampaikan secara singkat dan lugas tanpa spekulasi panjang.\n"
-            "5. REFERENSI GAMBAR:\n"
-            "   - Jika konteks memuat tautan gambar `![alt](url)`, sertakan tag gambar tersebut di posisi yang sesuai."
+            "5. REFERENSI GAMBAR & DIAGRAM (PENTING):\n"
+            "   - Jika konteks [Sumber] di bawah memuat tag gambar `![alt](url)` yang relevan dengan topik pertanyaan pengguna, ANDA WAJIB menyertakan tag gambar Markdown `![alt](url)` tersebut di dalam respons penjelasan Anda agar pengguna dapat melihat diagram visualnya secara langsung.\n"
+            "   - Gunakan URL gambar persis sama seperti yang tertulis di [Sumber], jangan mengubah path tautan URL-nya."
         )
 
         current_prompt = f"""Konteks Dokumen & Memori Pengetahuan (Markdown):
@@ -1872,6 +1929,7 @@ Pertanyaan Pengguna:
             "query": query,
             "answer": answer,
             "sources": sources,
+            "attached_images": attached_images,
             "learned_facts": learned_facts,
             "session_id": session_id,
             "user_message_id": user_msg.id if user_msg else f"msg_{uuid.uuid4().hex[:12]}",

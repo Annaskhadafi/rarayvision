@@ -1,5 +1,5 @@
 <script setup>
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { ragService } from '../services/ragService'
 import { API_BASE_URL } from '../utils'
 
@@ -90,6 +90,108 @@ const feedbackNotes = ref('')
 const isSubmittingFeedback = ref(false)
 const feedbackSuccessToast = ref('')
 
+// Image Lightbox & Attachment Gallery State
+const activeLightboxImg = ref(null) // { url, rawUrl, alt, source_doc }
+const lightboxScale = ref(1)
+
+const openLightbox = (url, alt = 'Pratinjau Gambar', sourceDoc = '') => {
+  if (!url) return
+  let fullUrl = url
+  if (url.startsWith('/api/') && API_BASE_URL) {
+    fullUrl = `${API_BASE_URL}${url}`
+  }
+  activeLightboxImg.value = {
+    url: fullUrl,
+    rawUrl: url,
+    alt: alt || 'Pratinjau Gambar',
+    source_doc: sourceDoc
+  }
+  lightboxScale.value = 1
+}
+
+const closeLightbox = () => {
+  activeLightboxImg.value = null
+  lightboxScale.value = 1
+}
+
+const zoomIn = () => {
+  lightboxScale.value = Math.min(3, +(lightboxScale.value + 0.25).toFixed(2))
+}
+
+const zoomOut = () => {
+  lightboxScale.value = Math.max(0.5, +(lightboxScale.value - 0.25).toFixed(2))
+}
+
+const resetZoom = () => {
+  lightboxScale.value = 1
+}
+
+const handleChatAreaClick = (e) => {
+  const target = e.target
+  if (target && target.classList && target.classList.contains('chat-image')) {
+    const src = target.getAttribute('data-fullsrc') || target.src
+    const alt = target.getAttribute('data-alt') || target.alt || 'Pratinjau Gambar'
+    openLightbox(src, alt)
+  }
+}
+
+const getMsgImages = (msg) => {
+  if (!msg) return []
+  const list = []
+  const seen = new Set()
+
+  if (Array.isArray(msg.attached_images)) {
+    for (const img of msg.attached_images) {
+      if (img?.url && !seen.has(img.url)) {
+        seen.add(img.url)
+        list.push({
+          url: img.url.startsWith('/api/') && API_BASE_URL ? `${API_BASE_URL}${img.url}` : img.url,
+          rawUrl: img.url,
+          alt: img.alt || 'Gambar Dokumen',
+          source_doc: img.source_doc || ''
+        })
+      }
+    }
+  }
+
+  if (Array.isArray(msg.sources)) {
+    for (const s of msg.sources) {
+      if (Array.isArray(s?.images)) {
+        for (const img of s.images) {
+          if (img?.url && !seen.has(img.url)) {
+            seen.add(img.url)
+            list.push({
+              url: img.url.startsWith('/api/') && API_BASE_URL ? `${API_BASE_URL}${img.url}` : img.url,
+              rawUrl: img.url,
+              alt: img.alt || 'Gambar Dokumen',
+              source_doc: s.filename || ''
+            })
+          }
+        }
+      }
+    }
+  }
+
+  if (typeof msg.content === 'string') {
+    const matches = msg.content.matchAll(/!\[(.*?)\]\((.*?)\)/g)
+    for (const m of matches) {
+      const alt = m[1] || 'Gambar Dokumen'
+      const url = m[2]?.trim()
+      if (url && !seen.has(url)) {
+        seen.add(url)
+        list.push({
+          url: url.startsWith('/api/') && API_BASE_URL ? `${API_BASE_URL}${url}` : url,
+          rawUrl: url,
+          alt: alt,
+          source_doc: ''
+        })
+      }
+    }
+  }
+
+  return list
+}
+
 // Memory History Manager State
 const memoryTab = ref('all')         // 'all', 'correction', 'manual'
 const memorySearchQuery = ref('')
@@ -156,6 +258,16 @@ onMounted(async () => {
   } catch (e) {
     console.warn('Could not restore chat session:', e)
   }
+
+  const handleGlobalKeyDown = (e) => {
+    if (e.key === 'Escape' && activeLightboxImg.value) {
+      closeLightbox()
+    }
+  }
+  window.addEventListener('keydown', handleGlobalKeyDown)
+  onUnmounted(() => {
+    window.removeEventListener('keydown', handleGlobalKeyDown)
+  })
 })
 
 const fetchLibrary = async () => {
@@ -792,6 +904,7 @@ const handleSendMessage = async () => {
         role: 'assistant',
         content: res.data.answer || 'Tidak ada jawaban.',
         sources: res.data.sources || [],
+        attached_images: res.data.attached_images || [],
         learned_facts: res.data.learned_facts || [],
         latency: res.data.latency_ms,
         from_cache: res.data.from_cache,
@@ -974,8 +1087,15 @@ const formatMarkdown = (text) => {
   html = html.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
   html = html.replace(/\*(.*?)\*/g, '<em>$1</em>')
 
-  // Images: ![alt](url) -> <img>
-  html = html.replace(/!\[(.*?)\]\((.*?)\)/g, '<img class="chat-image" src="$2" alt="$1" style="max-width: 100%; max-height: 350px; border-radius: 8px; margin: 12px 0; display: block; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);" />')
+  // Images: ![alt](url) -> <img> with click-to-preview data attributes and fallback
+  html = html.replace(/!\[(.*?)\]\((.*?)\)/g, (_m, alt, url) => {
+    let cleanUrl = (url || '').trim()
+    if (cleanUrl.startsWith('/api/') && API_BASE_URL) {
+      cleanUrl = `${API_BASE_URL}${cleanUrl}`
+    }
+    const cleanAlt = alt || 'Gambar / Diagram Dokumen'
+    return `<div class="chat-inline-img-box"><img class="chat-image" src="${cleanUrl}" alt="${cleanAlt}" title="${cleanAlt} (Klik untuk perbesar)" data-fullsrc="${cleanUrl}" data-alt="${cleanAlt}" loading="lazy" onerror="this.parentElement.style.display='none'" /><div class="chat-image-caption">🔍 <span>${cleanAlt}</span> <span class="caption-hint">(Klik untuk perbesar)</span></div></div>`
+  })
 
   // Links: [text](url) -> <a>
   html = html.replace(/\[(.*?)\]\((.*?)\)/g, '<a class="chat-link" href="$2" target="_blank" style="color: #3b82f6; text-decoration: underline;">$1</a>')
@@ -1783,7 +1903,7 @@ print("Memory Ingested:", mem_res)`
           </div>
 
           <!-- Messages Scroll View -->
-          <div class="messages-area">
+          <div class="messages-area" @click="handleChatAreaClick">
             <div 
               v-for="(msg, idx) in chatMessages" 
               :key="msg.id || idx" 
@@ -1792,6 +1912,31 @@ print("Memory Ingested:", mem_res)`
               <div class="chat-bubble">
                 <div class="bubble-sender">{{ msg.role === 'user' ? 'Anda' : 'Hero Assistant' }}</div>
                 <div class="bubble-content" v-html="formatMarkdown(msg.content)"></div>
+
+                <!-- Attached Images Gallery (Reliable Document Visuals) -->
+                <div v-if="msg.role === 'assistant' && getMsgImages(msg).length > 0" class="chat-attached-images-box">
+                  <div class="attached-images-title">
+                    <span>🖼️ Lampiran Gambar Dokumen ({{ getMsgImages(msg).length }}):</span>
+                  </div>
+                  <div class="attached-images-grid">
+                    <div 
+                      v-for="(img, imgIdx) in getMsgImages(msg)" 
+                      :key="imgIdx"
+                      class="attached-image-card"
+                      @click="openLightbox(img.url, img.alt, img.source_doc)"
+                      :title="img.alt + ' - Klik untuk memperbesar'"
+                    >
+                      <div class="attached-image-thumb-wrap">
+                        <img :src="img.url" :alt="img.alt" class="attached-image-thumb" loading="lazy" />
+                        <div class="thumb-overlay">🔍 Perbesar</div>
+                      </div>
+                      <div class="attached-image-info">
+                        <span class="img-alt" :title="img.alt">{{ img.alt }}</span>
+                        <span v-if="img.source_doc" class="img-doc" :title="img.source_doc">📄 {{ img.source_doc }}</span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
 
                 <!-- Sources Footnote -->
                 <div v-if="msg.sources && msg.sources.length > 0" class="sources-box">
@@ -2197,6 +2342,44 @@ print("Memory Ingested:", mem_res)`
             <span v-if="isSubmittingFeedback" class="spinner"></span>
             <span v-else>🧠 Simpan & Ajarkan ke AI</span>
           </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Interactive Image Lightbox Modal -->
+    <div v-if="activeLightboxImg" class="lightbox-overlay" @click.self="closeLightbox">
+      <div class="lightbox-container">
+        <div class="lightbox-header">
+          <div class="lightbox-title-box">
+            <h4 class="lightbox-title">🖼️ {{ activeLightboxImg.alt }}</h4>
+            <span v-if="activeLightboxImg.source_doc" class="lightbox-source">📄 Dokumen: {{ activeLightboxImg.source_doc }}</span>
+          </div>
+          <div class="lightbox-actions">
+            <button class="lightbox-btn" @click="zoomOut" title="Perkecil (-)">➖</button>
+            <span class="lightbox-zoom-level">{{ Math.round(lightboxScale * 100) }}%</span>
+            <button class="lightbox-btn" @click="zoomIn" title="Perbesar (+)">➕</button>
+            <button class="lightbox-btn" @click="resetZoom" title="Reset Zoom (100%)">🔄 Reset</button>
+            <a 
+              :href="activeLightboxImg.url" 
+              target="_blank" 
+              download 
+              class="lightbox-btn lightbox-download-btn" 
+              title="Unduh / Buka Gambar di Tab Baru"
+            >
+              📥 Buka / Unduh
+            </a>
+            <button class="lightbox-btn btn-close-lightbox" @click="closeLightbox" title="Tutup (Esc)">✕</button>
+          </div>
+        </div>
+        <div class="lightbox-body" @click.self="closeLightbox">
+          <div class="lightbox-img-wrapper" @click.self="closeLightbox">
+            <img 
+              :src="activeLightboxImg.url" 
+              :alt="activeLightboxImg.alt" 
+              class="lightbox-img" 
+              :style="{ transform: `scale(${lightboxScale})` }" 
+            />
+          </div>
         </div>
       </div>
     </div>
@@ -3405,6 +3588,299 @@ print("Memory Ingested:", mem_res)`
 
 :deep(.chat-li) {
   margin: 2px 0;
+}
+
+/* Deep styles for Markdown inline images */
+:deep(.chat-inline-img-box) {
+  margin: 12px 0;
+  display: inline-block;
+  max-width: 100%;
+}
+
+:deep(.chat-image) {
+  max-width: 100%;
+  max-height: 380px;
+  border-radius: 8px;
+  display: block;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
+  border: 1px solid #e2e8f0;
+  cursor: zoom-in;
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+:deep(.chat-image:hover) {
+  transform: translateY(-2px);
+  box-shadow: 0 8px 20px rgba(37, 99, 235, 0.15);
+  border-color: #93c5fd;
+}
+
+:deep(.chat-image-caption) {
+  font-size: 11px;
+  color: #64748b;
+  margin-top: 5px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+:deep(.caption-hint) {
+  color: #2563eb;
+  font-size: 10px;
+  font-style: italic;
+}
+
+/* Attached Images Gallery */
+.chat-attached-images-box {
+  margin-top: 14px;
+  padding: 12px 14px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+}
+
+.attached-images-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: #1e293b;
+  margin-bottom: 10px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.attached-images-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
+  gap: 10px;
+}
+
+.attached-image-card {
+  background: #ffffff;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  overflow: hidden;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  display: flex;
+  flex-direction: column;
+}
+
+.attached-image-card:hover {
+  border-color: #3b82f6;
+  box-shadow: 0 6px 16px rgba(59, 130, 246, 0.15);
+  transform: translateY(-2px);
+}
+
+.attached-image-thumb-wrap {
+  position: relative;
+  width: 100%;
+  height: 90px;
+  background: #0f172a;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.attached-image-thumb {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  transition: transform 0.25s ease;
+}
+
+.attached-image-card:hover .attached-image-thumb {
+  transform: scale(1.05);
+}
+
+.thumb-overlay {
+  position: absolute;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.65);
+  color: #ffffff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  font-weight: 600;
+  opacity: 0;
+  transition: opacity 0.2s ease;
+}
+
+.attached-image-card:hover .thumb-overlay {
+  opacity: 1;
+}
+
+.attached-image-info {
+  padding: 6px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  background: #ffffff;
+}
+
+.attached-image-info .img-alt {
+  font-size: 11px;
+  font-weight: 600;
+  color: #1e293b;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.attached-image-info .img-doc {
+  font-size: 10px;
+  color: #64748b;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Lightbox Modal */
+.lightbox-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.85);
+  backdrop-filter: blur(6px);
+  z-index: 9999;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+
+.lightbox-container {
+  background: #0f172a;
+  border: 1px solid #334155;
+  border-radius: 12px;
+  max-width: 90vw;
+  max-height: 90vh;
+  width: 1100px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
+}
+
+.lightbox-header {
+  padding: 12px 18px;
+  background: #1e293b;
+  border-bottom: 1px solid #334155;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+}
+
+.lightbox-title-box {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.lightbox-title {
+  color: #f8fafc;
+  font-size: 14px;
+  font-weight: 700;
+  margin: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.lightbox-source {
+  font-size: 11px;
+  color: #94a3b8;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.lightbox-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.lightbox-btn {
+  background: #334155;
+  color: #f8fafc;
+  border: 1px solid #475569;
+  border-radius: 6px;
+  padding: 6px 10px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  transition: all 0.15s ease;
+  text-decoration: none;
+}
+
+.lightbox-btn:hover {
+  background: #475569;
+  color: #ffffff;
+}
+
+.lightbox-zoom-level {
+  font-size: 11.5px;
+  font-weight: 700;
+  color: #cbd5e1;
+  min-width: 42px;
+  text-align: center;
+}
+
+.lightbox-download-btn {
+  background: #2563eb;
+  border-color: #1d4ed8;
+  color: #ffffff;
+}
+
+.lightbox-download-btn:hover {
+  background: #1d4ed8;
+}
+
+.btn-close-lightbox {
+  background: #ef4444;
+  border-color: #dc2626;
+  color: #ffffff;
+  font-size: 13px;
+  padding: 6px 12px;
+}
+
+.btn-close-lightbox:hover {
+  background: #dc2626;
+}
+
+.lightbox-body {
+  padding: 24px;
+  flex: 1;
+  overflow: auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 400px;
+  max-height: calc(90vh - 70px);
+  background: radial-gradient(circle at center, #1e293b 0%, #0f172a 100%);
+}
+
+.lightbox-img-wrapper {
+  display: inline-block;
+  transition: transform 0.2s ease;
+  text-align: center;
+}
+
+.lightbox-img {
+  max-width: 100%;
+  max-height: calc(85vh - 120px);
+  object-fit: contain;
+  border-radius: 6px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.4);
+  transition: transform 0.2s ease;
+  transform-origin: center center;
 }
 
 .sources-box {

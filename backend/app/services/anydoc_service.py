@@ -163,7 +163,9 @@ class AnyDocService:
             if ext in IMAGE_EXTENSIONS:
                 engine_used = "rapidocr_vision"
                 ocr_applied = True
-                markdown_output = cls._convert_image(file_bytes)
+                ocr_text = cls._convert_image(file_bytes)
+                img_url = storage_info.get("s3_url") or storage_info.get("local_url") or f"/api/v1/uploads/{storage_info['stored_filename']}"
+                markdown_output = f"![{filename}]({img_url})\n\n{ocr_text}" if ocr_text else f"![{filename}]({img_url})"
 
             # 2. PDF Documents -> AnyDoc Native + Hybrid Fallback
             elif ext in PDF_EXTENSIONS:
