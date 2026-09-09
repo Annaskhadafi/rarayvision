@@ -1,4 +1,5 @@
 import logging
+import os
 import re
 import threading
 from datetime import date, datetime
@@ -98,10 +99,10 @@ def _get_model():
 
         logger.info("Loading TimesFM 2.5 checkpoint...")
         torch.set_float32_matmul_precision("high")
-        model = model_class.from_pretrained(
-            "google/timesfm-2.5-200m-pytorch",
-            torch_compile=False,
-        )
+        pretrained_options = {"torch_compile": False}
+        if os.getenv("TIMESFM_LOCAL_FILES_ONLY", "0") == "1":
+            pretrained_options["local_files_only"] = True
+        model = model_class.from_pretrained("google/timesfm-2.5-200m-pytorch", **pretrained_options)
         model.compile(
             timesfm.ForecastConfig(
                 max_context=2048,
