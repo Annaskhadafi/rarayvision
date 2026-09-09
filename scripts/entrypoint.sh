@@ -23,6 +23,12 @@ if [ -f /opt/rarayvision-fire-model/Fire/best.pt ]; then
     echo "-> Fire model ready: /app/backend/ml_models/Fire/best.pt"
 fi
 
+if [ -f /opt/rarayvision-fire-model/model/best.onnx ]; then
+    mkdir -p /app/backend/model
+    cp /opt/rarayvision-fire-model/model/best.onnx /app/backend/model/best.onnx
+    echo "-> Fire ONNX model ready: /app/backend/model/best.onnx"
+fi
+
 # Restore pre-downloaded models if cache was mounted empty from host
 if [ -d /opt/models_cache ]; then
     echo "-> Syncing pre-downloaded models to /app/cache..."
@@ -39,4 +45,3 @@ trap cleanup SIGINT SIGTERM
 # Start Main Raray Vision FastAPI Backend (Port 5000)
 echo "-> Starting Main Vision API on port 5000 with ${UVICORN_WORKERS} worker(s)..."
 cd /app && exec uvicorn backend.main:app --host 0.0.0.0 --port 5000 --workers "$UVICORN_WORKERS" --timeout-keep-alive 65
-

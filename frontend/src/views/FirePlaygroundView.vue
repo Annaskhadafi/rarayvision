@@ -1,5 +1,5 @@
 <script setup>
-import { nextTick, onMounted, onUnmounted, ref } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
 import { API_BASE_URL } from '../utils'
 import { fireService } from '../services/fireService'
 
@@ -7,7 +7,8 @@ const fileInput = ref(null)
 const selectedFile = ref(null)
 const previewUrl = ref('')
 const result = ref(null)
-const model = ref(null)
+const models = ref([])
+const selectedModel = ref('pt')
 const confidence = ref(0.35)
 const iou = ref(0.45)
 const isProcessing = ref(false)
@@ -19,6 +20,34 @@ const webcamResult = ref(null)
 const isWebcamActive = ref(false)
 const isWebcamProcessing = ref(false)
 let webcamTimer = null
+
+const selectedModelLabel = computed(() => {
+  const item = models.value.find(model => model.id === selectedModel.value)
+  return item ? `${item.label} · ${item.file}` : 'memuat...'
+})
+
+const drawWebcamResult = (detections = []) => {
+  const video = webcamVideo.value
+  const canvas = webcamCanvas.value
+  if (!video?.videoWidth || !canvas) return
+  canvas.width = video.videoWidth
+  canvas.height = video.videoHeight
+  const context = canvas.getContext('2d')
+  context.drawImage(video, 0, 0, canvas.width, canvas.height)
+  context.lineWidth = Math.max(2, canvas.width / 320)
+  context.font = `bold ${Math.max(14, canvas.width / 45)}px sans-serif`
+  detections.forEach((detection) => {
+    const [x1, y1, x2, y2] = detection.bbox
+    const label = `${detection.class_name} ${(detection.confidence * 100).toFixed(1)}%`
+    context.strokeStyle = '#ef4444'
+    context.fillStyle = '#ef4444'
+    context.strokeRect(x1, y1, x2 - x1, y2 - y1)
+    const labelY = Math.max(24, y1)
+    context.fillRect(x1, labelY - 24, context.measureText(label).width + 12, 24)
+    context.fillStyle = '#ffffff'
+    context.fillText(label, x1 + 6, labelY - 6)
+  })
+}
 
 const chooseFile = (event) => {
   const file = event.target.files?.[0]
@@ -37,7 +66,7 @@ const detect = async () => {
   isProcessing.value = true
   errorMessage.value = ''
   try {
-    result.value = await fireService.detect(selectedFile.value, confidence.value, iou.value)
+    result.value = await fireService.detect(selectedFile.value, confidence.value, iou.value, selectedModel.value)
   } catch (error) {
     errorMessage.value = error.message
   } finally {
@@ -49,13 +78,14 @@ const processWebcamFrame = async () => {
   if (!isWebcamActive.value || isWebcamProcessing.value || !webcamVideo.value?.videoWidth) return
   isWebcamProcessing.value = true
   const canvas = webcamCanvas.value
-  const video = webcamVideo.value
-  canvas.width = video.videoWidth
-  canvas.height = video.videoHeight
-  canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height)
+  drawWebcamResult()
   try {
     const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/jpeg', 0.78))
-    if (blob && isWebcamActive.value) webcamResult.value = await fireService.detect(blob, confidence.value, iou.value)
+    if (blob && isWebcamActive.value) {
+      const detectionResult = await fireService.detect(blob, confidence.value, iou.value, selectedModel.value)
+      webcamResult.value = detectionResult
+      drawWebcamResult(detectionResult.detections)
+    }
   } catch (error) {
     errorMessage.value = error.message
   } finally {
@@ -72,6 +102,7 @@ const startWebcam = async () => {
     await nextTick()
     webcamVideo.value.srcObject = webcamStream.value
     await webcamVideo.value.play()
+    drawWebcamResult()
     processWebcamFrame()
   } catch (error) {
     stopWebcam()
@@ -92,7 +123,10 @@ const stopWebcam = () => {
 
 onMounted(async () => {
   try {
-    model.value = await fireService.getModel()
+    models.value = await fireService.getModels()
+    if (models.value.length && !models.value.some(model => model.id === selectedModel.value)) {
+      selectedModel.value = models.value[0].id
+    }
   } catch (error) {
     errorMessage.value = error.message
   }
@@ -117,8 +151,13 @@ onUnmounted(stopWebcam)
 
     <div class="model-strip">
       <span class="status-dot"></span>
-      <span>Model aktif: <strong>{{ model?.model || 'memuat...' }}</strong></span>
-      <span v-if="model?.classes">Class: {{ Object.values(model.classes).join(', ') }}</span>
+      <label for="fire-model">Model uji:</label>
+      <select id="fire-model" v-model="selectedModel" class="model-select" :disabled="isProcessing || isWebcamActive">
+        <option v-for="item in models" :key="item.id" :value="item.id" :disabled="!item.available">
+          {{ item.label }} · {{ item.file }}{{ item.available ? '' : ' (tidak tersedia)' }}
+        </option>
+      </select>
+      <span>{{ selectedModelLabel }}</span>
     </div>
 
     <div class="fire-grid">
@@ -153,7 +192,7 @@ onUnmounted(stopWebcam)
         <div class="result-heading">
           <div>
             <h2>Hasil deteksi</h2>
-            <p v-if="result">{{ result.detection_count }} objek terdeteksi · {{ result.processing_ms }} ms</p>
+        <p v-if="result">{{ result.detection_count }} objek · {{ result.processing_ms }} ms · {{ result.engine }}</p>
           </div>
           <span v-if="result" :class="['result-badge', result.detection_count ? 'found' : 'clear']">
             {{ result.detection_count ? 'API TERDETEKSI' : 'TIDAK ADA API' }}
@@ -187,14 +226,8 @@ onUnmounted(stopWebcam)
         <button v-else class="webcam-button stop" type="button" @click="stopWebcam">⏹ Stop Webcam</button>
       </div>
       <div v-if="isWebcamActive || webcamResult" class="webcam-grid">
-        <div>
-          <video ref="webcamVideo" class="webcam-video" muted playsinline></video>
-          <canvas ref="webcamCanvas" hidden></canvas>
-        </div>
-        <div class="webcam-output">
-          <img v-if="webcamResult" :src="webcamResult.annotated_image" alt="Hasil webcam deteksi api" />
-          <span v-else>Menunggu frame pertama...</span>
-        </div>
+        <video ref="webcamVideo" class="webcam-source" muted playsinline></video>
+        <canvas ref="webcamCanvas" class="webcam-canvas"></canvas>
       </div>
       <div v-else class="webcam-empty">Klik “Mulai Webcam” untuk menguji deteksi api dari kamera browser.</div>
       <p v-if="webcamResult" class="webcam-meta">
@@ -218,6 +251,7 @@ h2 { margin-bottom: 16px; font-size: 1.05rem; }
 .docs-actions { display: flex; gap: 8px; }
 .docs-actions a { padding: 9px 12px; border: 1px solid #dbe3ef; border-radius: 9px; color: #334155; background: white; text-decoration: none; font-size: .85rem; font-weight: 700; }
 .model-strip { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; padding: 11px 14px; margin-bottom: 18px; border: 1px solid #fde68a; border-radius: 10px; color: #713f12; background: #fffbeb; font-size: .9rem; }
+.model-select { padding: 6px 9px; border: 1px solid #fbbf24; border-radius: 7px; color: #713f12; background: white; font-weight: 700; }
 .model-strip span:last-child { color: #92400e; }
 .status-dot { width: 8px; height: 8px; border-radius: 50%; background: #16a34a; }
 .fire-grid { display: grid; grid-template-columns: minmax(300px, .8fr) minmax(420px, 1.2fr); gap: 18px; }
@@ -252,15 +286,13 @@ h2 { margin-bottom: 16px; font-size: 1.05rem; }
 .webcam-button { padding: 9px 13px; border: 0; border-radius: 9px; color: white; font-size: .85rem; font-weight: 800; }
 .webcam-button.start { background: #2563eb; }
 .webcam-button.stop { background: #dc2626; }
-.webcam-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 16px; }
-.webcam-video, .webcam-output { display: block; width: 100%; min-height: 230px; border-radius: 10px; background: #0f172a; object-fit: contain; }
-.webcam-output { display: grid; place-items: center; color: #94a3b8; }
-.webcam-output img { display: block; width: 100%; height: 100%; min-height: 230px; border-radius: 10px; object-fit: contain; }
+.webcam-grid { position: relative; margin-top: 16px; overflow: hidden; border-radius: 10px; background: #0f172a; }
+.webcam-source { display: none; }
+.webcam-canvas { display: block; width: 100%; max-height: 560px; object-fit: contain; }
 .webcam-empty { padding: 34px 16px; border: 1px dashed #cbd5e1; border-radius: 10px; color: #94a3b8; text-align: center; }
 .webcam-meta { margin: 12px 0 0; color: #64748b; font-size: .86rem; }
 .webcam-meta strong { margin-left: 8px; }
 .fire-found { color: #b91c1c; }
 .fire-clear { color: #15803d; }
 @media (max-width: 840px) { .fire-header { align-items: flex-start; flex-direction: column; } .fire-grid { grid-template-columns: 1fr; } }
-@media (max-width: 640px) { .webcam-grid { grid-template-columns: 1fr; } }
 </style>

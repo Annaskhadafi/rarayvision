@@ -88,3 +88,4 @@ backend/ml_models/*
 !backend/ml_models/Fire/
 backend/ml_models/Fire/*
 !backend/ml_models/Fire/best.pt
+!backend/model/best.onnx
