@@ -10,7 +10,7 @@ ENV FASTEMBED_CACHE_PATH=/app/cache/fastembed
 ENV TORCH_HOME=/app/cache/torch
 ENV TIMESFM_LOCAL_FILES_ONLY=1
 
-# Install system dependencies for OpenCV, Tesseract, PyTorch, FFMPEG, PaddleOCR, and ONNX
+# Install system dependencies for OpenCV, Tesseract, PyTorch, FFMPEG, RapidOCR, and ONNX
 RUN apt-get update && apt-get install -y --no-install-recommends \
     tesseract-ocr \
     tesseract-ocr-eng \

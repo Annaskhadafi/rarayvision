@@ -16,8 +16,6 @@ PyJWT==2.8.0
 python-dotenv
 ultralytics
 pytesseract
-paddlepaddle
-paddleocr
 boto3
 requests
 pillow
