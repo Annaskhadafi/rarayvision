@@ -27,5 +27,21 @@ export const fireService = {
     const data = await response.json()
     if (!response.ok) throw new Error(data.detail || 'Deteksi Fire gagal')
     return data.data
+  },
+
+  async detectVideo(file, confidence, iou, model) {
+    const formData = new FormData()
+    formData.append('video', file)
+    formData.append('confidence', confidence)
+    formData.append('iou', iou)
+    formData.append('model', model)
+    const response = await fetch(`${API_BASE_URL}/api/v1/fire/detect-video`, {
+      method: 'POST',
+      headers: authHeaders(),
+      body: formData
+    })
+    const data = await response.json()
+    if (!response.ok) throw new Error(data.detail || 'Deteksi video gagal')
+    return data.data
   }
 }
