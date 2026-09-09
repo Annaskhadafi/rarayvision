@@ -6,7 +6,9 @@ import { fireService } from '../services/fireService'
 const fileInput = ref(null)
 const selectedFile = ref(null)
 const previewUrl = ref('')
+const inputType = ref('image')
 const result = ref(null)
+const videoResult = ref(null)
 const models = ref([])
 const selectedModel = ref('onnx')
 const confidence = ref(0.35)
@@ -29,6 +31,12 @@ const BOX_HOLD_MS = 700
 const selectedModelLabel = computed(() => {
   const item = models.value.find(model => model.id === selectedModel.value)
   return item ? `${item.label} · ${item.file}` : 'memuat...'
+})
+
+const annotatedVideoUrl = computed(() => {
+  const path = videoResult.value?.video_url
+  if (!path || /^https?:\/\//.test(path)) return path || ''
+  return `${API_BASE_URL}${path}`
 })
 
 const drawWebcamFrame = () => {
@@ -94,21 +102,28 @@ const updateWebcamDetections = (detectionResult) => {
 const chooseFile = (event) => {
   const file = event.target.files?.[0]
   if (!file) return
+  if (previewUrl.value) URL.revokeObjectURL(previewUrl.value)
+  inputType.value = file.type.startsWith('video/') ? 'video' : 'image'
   selectedFile.value = file
   previewUrl.value = URL.createObjectURL(file)
   result.value = null
+  videoResult.value = null
   errorMessage.value = ''
 }
 
 const detect = async () => {
   if (!selectedFile.value) {
-    errorMessage.value = 'Pilih gambar terlebih dahulu.'
+    errorMessage.value = 'Pilih gambar atau video terlebih dahulu.'
     return
   }
   isProcessing.value = true
   errorMessage.value = ''
   try {
-    result.value = await fireService.detect(selectedFile.value, confidence.value, iou.value, selectedModel.value)
+    if (inputType.value === 'video') {
+      videoResult.value = await fireService.detectVideo(selectedFile.value, confidence.value, iou.value, selectedModel.value)
+    } else {
+      result.value = await fireService.detect(selectedFile.value, confidence.value, iou.value, selectedModel.value)
+    }
   } catch (error) {
     errorMessage.value = error.message
   } finally {
@@ -182,7 +197,10 @@ onMounted(async () => {
   }
 })
 
-onUnmounted(stopWebcam)
+onUnmounted(() => {
+  stopWebcam()
+  if (previewUrl.value) URL.revokeObjectURL(previewUrl.value)
+})
 </script>
 
 <template>
@@ -191,7 +209,7 @@ onUnmounted(stopWebcam)
       <div>
         <p class="eyebrow">Computer Vision AI</p>
         <h1>🔥 Fire Detection Playground</h1>
-        <p class="subtitle">Uji model YOLO hasil training Anda pada gambar api/asap.</p>
+        <p class="subtitle">Uji model YOLO hasil training Anda pada gambar, video, atau webcam.</p>
       </div>
       <div class="docs-actions">
         <a :href="`${API_BASE_URL}/docs#/Fire%20Detection`" target="_blank">Swagger</a>
@@ -212,16 +230,17 @@ onUnmounted(stopWebcam)
 
     <div class="fire-grid">
       <section class="panel">
-        <h2>Input gambar</h2>
-        <button class="dropzone" type="button" @click="fileInput.click()">
-          <input ref="fileInput" type="file" accept="image/jpeg,image/png,image/webp" hidden @change="chooseFile" />
-          <img v-if="previewUrl" :src="previewUrl" alt="Preview input" />
+        <h2>Input gambar atau video</h2>
+        <div class="dropzone" role="button" tabindex="0" @click="fileInput.click()" @keydown.enter="fileInput.click()" @keydown.space.prevent="fileInput.click()">
+          <input ref="fileInput" type="file" accept="image/jpeg,image/png,image/webp,video/mp4,video/quicktime,video/x-msvideo,video/webm" hidden @change="chooseFile" />
+          <video v-if="previewUrl && inputType === 'video'" :src="previewUrl" controls muted playsinline @click.stop />
+          <img v-else-if="previewUrl" :src="previewUrl" alt="Preview input" />
           <template v-else>
-            <span class="upload-icon">📷</span>
-            <strong>Klik untuk memilih gambar</strong>
-            <small>JPG, PNG, atau WEBP — maksimal 15 MB</small>
+            <span class="upload-icon">🎬</span>
+            <strong>Klik untuk memilih gambar atau video</strong>
+            <small>Gambar maks. 15 MB · Video MP4, MOV, AVI, WEBM maks. 100 MB</small>
           </template>
-        </button>
+        </div>
 
         <div class="control">
           <label>Confidence <strong>{{ confidence.toFixed(2) }}</strong></label>
@@ -233,7 +252,7 @@ onUnmounted(stopWebcam)
         </div>
 
         <button class="detect-button" type="button" :disabled="isProcessing" @click="detect">
-          {{ isProcessing ? '⏳ Memproses...' : '🔍 Deteksi Api' }}
+          {{ isProcessing ? (inputType === 'video' ? '⏳ Memproses video...' : '⏳ Memproses...') : `🔍 Deteksi Api${inputType === 'video' ? ' di Video' : ''}` }}
         </button>
         <p v-if="errorMessage" class="error">{{ errorMessage }}</p>
       </section>
@@ -242,10 +261,14 @@ onUnmounted(stopWebcam)
         <div class="result-heading">
           <div>
             <h2>Hasil deteksi</h2>
-        <p v-if="result">{{ result.detection_count }} objek · {{ result.processing_ms }} ms · {{ result.engine }}</p>
+            <p v-if="result">{{ result.detection_count }} objek · {{ result.processing_ms }} ms · {{ result.engine }}</p>
+            <p v-else-if="videoResult">{{ videoResult.processed_frames }} frame · {{ videoResult.processing_ms }} ms · {{ videoResult.engine }}</p>
           </div>
           <span v-if="result" :class="['result-badge', result.detection_count ? 'found' : 'clear']">
             {{ result.detection_count ? 'API TERDETEKSI' : 'TIDAK ADA API' }}
+          </span>
+          <span v-else-if="videoResult" :class="['result-badge', videoResult.fire_frames ? 'found' : 'clear']">
+            {{ videoResult.fire_frames ? 'API TERDETEKSI' : 'TIDAK ADA API' }}
           </span>
         </div>
 
@@ -259,9 +282,19 @@ onUnmounted(stopWebcam)
             </div>
           </div>
         </div>
+        <div v-else-if="videoResult" class="result-body">
+          <video :src="annotatedVideoUrl" class="result-video" controls playsinline />
+          <div class="video-stats">
+            <div><strong>{{ videoResult.fire_frames }}</strong><span>Frame dengan api</span></div>
+            <div><strong>{{ videoResult.processed_frames }}</strong><span>Frame diproses</span></div>
+            <div><strong>{{ videoResult.total_detections }}</strong><span>Total deteksi</span></div>
+            <div><strong>{{ videoResult.duration_seconds }} dtk</strong><span>Durasi video</span></div>
+          </div>
+          <a class="download-video" :href="annotatedVideoUrl" download>⬇ Unduh video hasil deteksi</a>
+        </div>
         <div v-else class="empty-result">
           <span>🔥</span>
-          <p>Hasil gambar beranotasi akan tampil di sini.</p>
+          <p>Hasil gambar atau video beranotasi akan tampil di sini.</p>
         </div>
       </section>
     </div>
@@ -309,7 +342,7 @@ h2 { margin-bottom: 16px; font-size: 1.05rem; }
 .panel { padding: 20px; border: 1px solid #e2e8f0; border-radius: 16px; background: white; box-shadow: 0 8px 24px rgba(15, 23, 42, .05); }
 .dropzone { display: grid; place-items: center; width: 100%; min-height: 275px; padding: 16px; border: 1.5px dashed #cbd5e1; border-radius: 12px; color: #475569; background: #f8fafc; }
 .dropzone:hover { border-color: #f59e0b; background: #fffbeb; }
-.dropzone img { display: block; width: 100%; max-height: 310px; object-fit: contain; border-radius: 9px; }
+.dropzone img, .dropzone video { display: block; width: 100%; max-height: 310px; object-fit: contain; border-radius: 9px; }
 .upload-icon { margin-bottom: 10px; font-size: 2.5rem; }
 .dropzone small { margin-top: 7px; color: #94a3b8; }
 .control { margin-top: 19px; }
@@ -325,6 +358,12 @@ h2 { margin-bottom: 16px; font-size: 1.05rem; }
 .result-badge.found { color: #991b1b; background: #fee2e2; }
 .result-badge.clear { color: #166534; background: #dcfce7; }
 .result-image { display: block; width: 100%; max-height: 500px; object-fit: contain; border-radius: 10px; background: #0f172a; }
+.result-video { display: block; width: 100%; max-height: 500px; border-radius: 10px; background: #0f172a; }
+.video-stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-top: 13px; }
+.video-stats div { display: flex; flex-direction: column; padding: 10px; border-radius: 9px; background: #fff7ed; }
+.video-stats strong { color: #9a3412; font-size: 1rem; }
+.video-stats span { margin-top: 3px; color: #64748b; font-size: .72rem; }
+.download-video { display: block; margin-top: 12px; padding: 10px; border-radius: 9px; color: #fff; background: #2563eb; text-align: center; text-decoration: none; font-size: .85rem; font-weight: 800; }
 .detections { margin-top: 13px; }
 .detection-row { display: grid; grid-template-columns: 1fr auto; gap: 4px 12px; padding: 10px 0; border-bottom: 1px solid #eef2f7; }
 .detection-row span { color: #b45309; font-weight: 800; }
@@ -345,5 +384,5 @@ h2 { margin-bottom: 16px; font-size: 1.05rem; }
 .webcam-meta strong { margin-left: 8px; }
 .fire-found { color: #b91c1c; }
 .fire-clear { color: #15803d; }
-@media (max-width: 840px) { .fire-header { align-items: flex-start; flex-direction: column; } .fire-grid { grid-template-columns: 1fr; } }
+@media (max-width: 840px) { .fire-header { align-items: flex-start; flex-direction: column; } .fire-grid { grid-template-columns: 1fr; } .video-stats { grid-template-columns: repeat(2, 1fr); } }
 </style>
