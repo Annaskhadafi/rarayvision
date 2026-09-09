@@ -45,6 +45,11 @@ RUN mkdir -p /opt/models_cache && cp -r /app/cache/* /opt/models_cache/ 2>/dev/n
 # Copy application code
 COPY . .
 
+# Keep the checked-in Fire model outside the runtime volume. docker-compose mounts
+# /app/backend/ml_models, which otherwise hides files copied into the image.
+RUN mkdir -p /opt/rarayvision-fire-model/Fire \
+    && cp backend/ml_models/Fire/best.pt /opt/rarayvision-fire-model/Fire/best.pt
+
 # Ensure entrypoint script is executable
 RUN chmod +x scripts/entrypoint.sh
 

@@ -15,6 +15,14 @@ echo "=== [Raray Vision] Starting Optimized Backend ==="
 mkdir -p /app/cache/huggingface /app/cache/fastembed /app/cache/torch /app/backend/uploads
 chmod -R 777 /app/cache /app/backend/uploads 2>/dev/null || true
 
+# docker-compose mounts /app/backend/ml_models and hides the image copy.
+# Seed the trained Fire model into that volume on every container start.
+if [ -f /opt/rarayvision-fire-model/Fire/best.pt ]; then
+    mkdir -p /app/backend/ml_models/Fire
+    cp /opt/rarayvision-fire-model/Fire/best.pt /app/backend/ml_models/Fire/best.pt
+    echo "-> Fire model ready: /app/backend/ml_models/Fire/best.pt"
+fi
+
 # Restore pre-downloaded models if cache was mounted empty from host
 if [ -d /opt/models_cache ]; then
     echo "-> Syncing pre-downloaded models to /app/cache..."
@@ -31,5 +39,4 @@ trap cleanup SIGINT SIGTERM
 # Start Main Raray Vision FastAPI Backend (Port 5000)
 echo "-> Starting Main Vision API on port 5000 with ${UVICORN_WORKERS} worker(s)..."
 cd /app && exec uvicorn backend.main:app --host 0.0.0.0 --port 5000 --workers "$UVICORN_WORKERS" --timeout-keep-alive 65
-
 
