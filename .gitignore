@@ -81,3 +81,10 @@ yarn-error.log*
 .agents/
 *.pt
 test_summary.json
+
+# The trained Fire model is required by the Docker deployment.
+!backend/ml_models/
+backend/ml_models/*
+!backend/ml_models/Fire/
+backend/ml_models/Fire/*
+!backend/ml_models/Fire/best.pt
