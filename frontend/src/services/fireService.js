@@ -12,12 +12,13 @@ export const fireService = {
     return data.models
   },
 
-  async detect(file, confidence, iou, model) {
+  async detect(file, confidence, iou, model, includeImage = true) {
     const formData = new FormData()
     formData.append('image', file)
     formData.append('confidence', confidence)
     formData.append('iou', iou)
     formData.append('model', model)
+    formData.append('include_image', includeImage)
     const response = await fetch(`${API_BASE_URL}/api/v1/fire/detect`, {
       method: 'POST',
       headers: authHeaders(),

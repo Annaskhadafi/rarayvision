@@ -8,45 +8,87 @@ const selectedFile = ref(null)
 const previewUrl = ref('')
 const result = ref(null)
 const models = ref([])
-const selectedModel = ref('pt')
+const selectedModel = ref('onnx')
 const confidence = ref(0.35)
 const iou = ref(0.45)
 const isProcessing = ref(false)
 const errorMessage = ref('')
 const webcamVideo = ref(null)
 const webcamCanvas = ref(null)
+const webcamCaptureCanvas = ref(null)
 const webcamStream = ref(null)
 const webcamResult = ref(null)
+const webcamDetections = ref([])
 const isWebcamActive = ref(false)
 const isWebcamProcessing = ref(false)
 let webcamTimer = null
+let webcamAnimationFrame = null
+let lastPositiveDetectionAt = 0
+const BOX_HOLD_MS = 700
 
 const selectedModelLabel = computed(() => {
   const item = models.value.find(model => model.id === selectedModel.value)
   return item ? `${item.label} · ${item.file}` : 'memuat...'
 })
 
-const drawWebcamResult = (detections = []) => {
+const drawWebcamFrame = () => {
   const video = webcamVideo.value
   const canvas = webcamCanvas.value
   if (!video?.videoWidth || !canvas) return
-  canvas.width = video.videoWidth
-  canvas.height = video.videoHeight
+  if (canvas.width !== video.videoWidth || canvas.height !== video.videoHeight) {
+    canvas.width = video.videoWidth
+    canvas.height = video.videoHeight
+  }
   const context = canvas.getContext('2d')
   context.drawImage(video, 0, 0, canvas.width, canvas.height)
   context.lineWidth = Math.max(2, canvas.width / 320)
   context.font = `bold ${Math.max(14, canvas.width / 45)}px sans-serif`
+  const detections = performance.now() - lastPositiveDetectionAt <= BOX_HOLD_MS
+    ? webcamDetections.value
+    : []
+  const sourceWidth = webcamResult.value?.image_width || canvas.width
+  const sourceHeight = webcamResult.value?.image_height || canvas.height
+  const scaleX = canvas.width / sourceWidth
+  const scaleY = canvas.height / sourceHeight
   detections.forEach((detection) => {
     const [x1, y1, x2, y2] = detection.bbox
     const label = `${detection.class_name} ${(detection.confidence * 100).toFixed(1)}%`
+    const left = x1 * scaleX
+    const top = y1 * scaleY
+    const width = (x2 - x1) * scaleX
+    const height = (y2 - y1) * scaleY
     context.strokeStyle = '#ef4444'
     context.fillStyle = '#ef4444'
-    context.strokeRect(x1, y1, x2 - x1, y2 - y1)
-    const labelY = Math.max(24, y1)
-    context.fillRect(x1, labelY - 24, context.measureText(label).width + 12, 24)
+    context.strokeRect(left, top, width, height)
+    const labelY = Math.max(24, top)
+    context.fillRect(left, labelY - 24, context.measureText(label).width + 12, 24)
     context.fillStyle = '#ffffff'
-    context.fillText(label, x1 + 6, labelY - 6)
+    context.fillText(label, left + 6, labelY - 6)
   })
+  if (isWebcamActive.value) {
+    webcamAnimationFrame = window.requestAnimationFrame(drawWebcamFrame)
+  }
+}
+
+const captureWebcamFrame = () => {
+  const video = webcamVideo.value
+  const canvas = webcamCaptureCanvas.value
+  if (!video?.videoWidth || !canvas) return null
+  const scale = Math.min(1, 640 / video.videoWidth)
+  canvas.width = Math.round(video.videoWidth * scale)
+  canvas.height = Math.round(video.videoHeight * scale)
+  canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height)
+  return canvas
+}
+
+const updateWebcamDetections = (detectionResult) => {
+  webcamResult.value = detectionResult
+  if (detectionResult.detections.length) {
+    webcamDetections.value = detectionResult.detections
+    lastPositiveDetectionAt = performance.now()
+  } else if (performance.now() - lastPositiveDetectionAt > BOX_HOLD_MS) {
+    webcamDetections.value = []
+  }
 }
 
 const chooseFile = (event) => {
@@ -75,22 +117,24 @@ const detect = async () => {
 }
 
 const processWebcamFrame = async () => {
-  if (!isWebcamActive.value || isWebcamProcessing.value || !webcamVideo.value?.videoWidth) return
+  if (!isWebcamActive.value) return
+  if (isWebcamProcessing.value || !webcamVideo.value?.videoWidth) {
+    webcamTimer = window.setTimeout(processWebcamFrame, 250)
+    return
+  }
   isWebcamProcessing.value = true
-  const canvas = webcamCanvas.value
-  drawWebcamResult()
+  const canvas = captureWebcamFrame()
   try {
-    const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/jpeg', 0.78))
+    const blob = canvas && await new Promise(resolve => canvas.toBlob(resolve, 'image/jpeg', 0.68))
     if (blob && isWebcamActive.value) {
-      const detectionResult = await fireService.detect(blob, confidence.value, iou.value, selectedModel.value)
-      webcamResult.value = detectionResult
-      drawWebcamResult(detectionResult.detections)
+      const detectionResult = await fireService.detect(blob, confidence.value, iou.value, selectedModel.value, false)
+      updateWebcamDetections(detectionResult)
     }
   } catch (error) {
     errorMessage.value = error.message
   } finally {
     isWebcamProcessing.value = false
-    if (isWebcamActive.value) webcamTimer = window.setTimeout(processWebcamFrame, 1200)
+    if (isWebcamActive.value) webcamTimer = window.setTimeout(processWebcamFrame, 250)
   }
 }
 
@@ -102,7 +146,7 @@ const startWebcam = async () => {
     await nextTick()
     webcamVideo.value.srcObject = webcamStream.value
     await webcamVideo.value.play()
-    drawWebcamResult()
+    webcamAnimationFrame = window.requestAnimationFrame(drawWebcamFrame)
     processWebcamFrame()
   } catch (error) {
     stopWebcam()
@@ -116,6 +160,10 @@ const stopWebcam = () => {
   isWebcamActive.value = false
   if (webcamTimer) window.clearTimeout(webcamTimer)
   webcamTimer = null
+  if (webcamAnimationFrame) window.cancelAnimationFrame(webcamAnimationFrame)
+  webcamAnimationFrame = null
+  webcamDetections.value = []
+  lastPositiveDetectionAt = 0
   webcamStream.value?.getTracks().forEach(track => track.stop())
   webcamStream.value = null
   if (webcamVideo.value) webcamVideo.value.srcObject = null
@@ -124,8 +172,10 @@ const stopWebcam = () => {
 onMounted(async () => {
   try {
     models.value = await fireService.getModels()
-    if (models.value.length && !models.value.some(model => model.id === selectedModel.value)) {
-      selectedModel.value = models.value[0].id
+    const selectedIsAvailable = models.value.some(model => model.id === selectedModel.value && model.available)
+    if (!selectedIsAvailable) {
+      const firstAvailable = models.value.find(model => model.available)
+      if (firstAvailable) selectedModel.value = firstAvailable.id
     }
   } catch (error) {
     errorMessage.value = error.message
@@ -228,6 +278,7 @@ onUnmounted(stopWebcam)
       <div v-if="isWebcamActive || webcamResult" class="webcam-grid">
         <video ref="webcamVideo" class="webcam-source" muted playsinline></video>
         <canvas ref="webcamCanvas" class="webcam-canvas"></canvas>
+        <canvas ref="webcamCaptureCanvas" hidden></canvas>
       </div>
       <div v-else class="webcam-empty">Klik “Mulai Webcam” untuk menguji deteksi api dari kamera browser.</div>
       <p v-if="webcamResult" class="webcam-meta">

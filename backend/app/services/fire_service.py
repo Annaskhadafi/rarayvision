@@ -16,8 +16,8 @@ try:
 except ImportError:
     YOLO = None
 
-_MODEL_PATHS = {"pt": FIRE_MODEL_PATH, "onnx": FIRE_ONNX_MODEL_PATH}
-_MODEL_LABELS = {"pt": "PyTorch (.pt)", "onnx": "ONNX Runtime (.onnx)"}
+_MODEL_PATHS = {"onnx": FIRE_ONNX_MODEL_PATH, "pt": FIRE_MODEL_PATH}
+_MODEL_LABELS = {"onnx": "ONNX Runtime (.onnx)", "pt": "PyTorch (.pt)"}
 _models = {}
 _model_lock = threading.Lock()
 
@@ -34,7 +34,7 @@ def list_fire_models() -> list[dict[str, Any]]:
     ]
 
 
-def get_fire_model(model_id: str = "pt"):
+def get_fire_model(model_id: str = "onnx"):
     if model_id not in _MODEL_PATHS:
         raise ValueError(f"Model Fire tidak valid: {model_id}")
     if model_id not in _models:
@@ -47,7 +47,7 @@ def get_fire_model(model_id: str = "pt"):
     return _models[model_id]
 
 
-def fire_model_info(model_id: str = "pt") -> dict[str, Any]:
+def fire_model_info(model_id: str = "onnx") -> dict[str, Any]:
     model = get_fire_model(model_id)
     names = model.names
     return {
@@ -70,7 +70,8 @@ def detect_fire(
     image_bytes: bytes,
     confidence: float = 0.35,
     iou: float = 0.45,
-    model_id: str = "pt",
+    model_id: str = "onnx",
+    include_image: bool = True,
 ) -> dict[str, Any]:
     image = _decode_image(image_bytes)
     started = time.perf_counter()
@@ -81,7 +82,6 @@ def detect_fire(
             image, conf=confidence, iou=iou, imgsz=640, verbose=False
         )[0]
 
-    annotated = result.plot()
     detections = []
     names = result.names
     for box in result.boxes:
@@ -93,9 +93,13 @@ def detect_fire(
             "bbox": [round(float(value), 1) for value in box.xyxy[0]],
         })
 
-    ok, buffer = cv2.imencode(".jpg", annotated, [int(cv2.IMWRITE_JPEG_QUALITY), 88])
-    if not ok:
-        raise RuntimeError("Gagal membuat gambar hasil deteksi")
+    annotated_image = None
+    if include_image:
+        annotated = result.plot()
+        ok, buffer = cv2.imencode(".jpg", annotated, [int(cv2.IMWRITE_JPEG_QUALITY), 88])
+        if not ok:
+            raise RuntimeError("Gagal membuat gambar hasil deteksi")
+        annotated_image = "data:image/jpeg;base64," + base64.b64encode(buffer).decode("ascii")
 
     return {
         "model_id": model_id,
@@ -106,5 +110,5 @@ def detect_fire(
         "detections": detections,
         "detection_count": len(detections),
         "processing_ms": round((time.perf_counter() - started) * 1000, 1),
-        "annotated_image": "data:image/jpeg;base64," + base64.b64encode(buffer).decode("ascii"),
+        "annotated_image": annotated_image,
     }

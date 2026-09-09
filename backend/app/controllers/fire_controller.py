@@ -25,7 +25,7 @@ def get_fire_models(current_user: User = Depends(get_current_user)):
     description="Returns metadata for one Fire model.",
 )
 def get_fire_model(
-    model: str = Query("pt", description="Model id returned by GET /api/v1/fire/models"),
+    model: str = Query("onnx", description="Model id returned by GET /api/v1/fire/models"),
     current_user: User = Depends(get_current_user),
 ):
     try:
@@ -45,7 +45,8 @@ async def detect_fire_endpoint(
     image: UploadFile = File(..., description="Image JPG, JPEG, or PNG"),
     confidence: float = Form(0.35, ge=0.05, le=0.99),
     iou: float = Form(0.45, ge=0.05, le=0.99),
-    model: str = Form("pt", description="Model id: pt or onnx"),
+    model: str = Form("onnx", description="Model id: onnx or pt"),
+    include_image: bool = Form(True, description="Return annotated JPEG; disable for webcam speed"),
     current_user: User = Depends(get_current_user),
 ):
     contents = await image.read()
@@ -54,7 +55,7 @@ async def detect_fire_endpoint(
     if len(contents) > MAX_IMAGE_BYTES:
         raise HTTPException(status_code=413, detail="Ukuran gambar maksimal 15 MB")
     try:
-        result = await asyncio.to_thread(detect_fire, contents, confidence, iou, model)
+        result = await asyncio.to_thread(detect_fire, contents, confidence, iou, model, include_image)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except (FileNotFoundError, RuntimeError) as exc:
