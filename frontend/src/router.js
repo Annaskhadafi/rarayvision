@@ -73,6 +73,11 @@ const routes = [
     meta: { requiresAuth: true }
   },
   {
+    path: '/forecasting',
+    component: () => import('./views/ForecastingView.vue'),
+    meta: { requiresAuth: true }
+  },
+  {
     path: '/settings',
     component: () => import('./views/SettingsView.vue'),
     meta: { requiresAuth: true }
