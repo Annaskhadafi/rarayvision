@@ -90,6 +90,11 @@ const routes = [
     meta: { requiresAuth: true }
   },
   {
+    path: '/fire/playground',
+    component: () => import('./views/FirePlaygroundView.vue'),
+    meta: { requiresAuth: true }
+  },
+  {
     path: '/hse/zone-editor',
     component: () => import('./views/hse/HSEZoneEditorView.vue'),
     meta: { requiresAuth: true }

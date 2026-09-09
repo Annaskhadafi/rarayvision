@@ -44,6 +44,7 @@ ANTI_SPOOF_MODEL_PATH = os.path.join(BASE_DIR, "ml_models", "MiniFASNetV2.onnx")
 ANTI_SPOOF_INT8_MODEL_PATH = os.path.join(BASE_DIR, "ml_models", "MiniFASNetV2_int8.onnx")
 EMOTION_MODEL_PATH = os.path.join(BASE_DIR, "ml_models", "emotion-ferplus-8.onnx")
 EMOTION_INT8_MODEL_PATH = os.path.join(BASE_DIR, "ml_models", "emotion-ferplus-8_int8.onnx")
+FIRE_MODEL_PATH = os.path.join(BASE_DIR, "ml_models", "Fire", "best.pt")
 
 # Face Engine Mode: "v1" (buffalo_l + FP32) or "v2" (buffalo_s + INT8 CPU Turbo)
 DEFAULT_FACE_ENGINE_MODE = os.getenv("FACE_ENGINE_MODE", "v1").lower()
