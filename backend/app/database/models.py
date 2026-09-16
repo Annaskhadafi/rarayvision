@@ -241,3 +241,19 @@ class MLEndpoint(Base):
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
 
+
+class MLDataset(Base):
+    """Dataset archive imported through Data Studio, including reusable artifact links."""
+    __tablename__ = "ml_datasets"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    name = Column(String(160), nullable=False)
+    folder = Column(String(255), unique=True, nullable=False, index=True)
+    status = Column(String(30), default="ready", nullable=False)
+    image_count = Column(Integer, default=0)
+    task_count = Column(Integer, default=0)
+    categories = Column(Text, default="[]")
+    images = Column(Text, default="[]")
+    artifacts = Column(Text, default="{}")
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
