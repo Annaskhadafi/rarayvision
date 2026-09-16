@@ -20,6 +20,10 @@ const importResult = ref(null)
 const errorMessage = ref('')
 const copiedKey = ref('')
 const activeTrainingTab = ref('yolo')
+const datasets = ref([])
+const selectedDataset = ref(null)
+const isLoadingDatasets = ref(false)
+let jobPollTimer = null
 
 // Real-time Upload Progress & Zero-Timeout state
 const uploadProgress = ref({
@@ -121,6 +125,79 @@ const getFullUrl = (url) => {
   return `${API_BASE_URL}${url}`
 }
 
+const fetchDatasets = async () => {
+  isLoadingDatasets.value = true
+  try {
+    const response = await fetch(`${API_BASE_URL}/api/v1/models/data/datasets`)
+    if (!response.ok) throw new Error('Gagal mengambil riwayat dataset.')
+    datasets.value = (await response.json()).datasets || []
+  } catch (error) {
+    errorMessage.value = error.message
+  } finally {
+    isLoadingDatasets.value = false
+  }
+}
+
+const openDataset = async (dataset) => {
+  try {
+    const response = await fetch(`${API_BASE_URL}/api/v1/models/data/datasets/${dataset.id}`)
+    if (!response.ok) throw new Error('Detail dataset gagal dimuat.')
+    selectedDataset.value = await response.json()
+    importResult.value = selectedDataset.value
+  } catch (error) {
+    errorMessage.value = error.message
+  }
+}
+
+const renameDataset = async (dataset) => {
+  const name = window.prompt('Nama dataset baru:', dataset.name)
+  if (!name || name.trim() === dataset.name) return
+  const response = await fetch(`${API_BASE_URL}/api/v1/models/data/datasets/${dataset.id}`, {
+    method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: name.trim() })
+  })
+  if (response.ok) await fetchDatasets()
+  else errorMessage.value = (await response.json()).detail || 'Dataset gagal diubah.'
+}
+
+const deleteDataset = async (dataset) => {
+  if (!window.confirm(`Hapus "${dataset.name}" dari riwayat?`)) return
+  const response = await fetch(`${API_BASE_URL}/api/v1/models/data/datasets/${dataset.id}`, { method: 'DELETE' })
+  if (response.ok) {
+    if (selectedDataset.value?.id === dataset.id) selectedDataset.value = null
+    if (importResult.value?.id === dataset.id) importResult.value = null
+    await fetchDatasets()
+  } else errorMessage.value = (await response.json()).detail || 'Dataset gagal dihapus.'
+}
+
+const pollDatasetJob = async (jobId) => {
+  try {
+    const response = await fetch(`${API_BASE_URL}/api/v1/models/data/jobs/${jobId}`)
+    const job = await response.json()
+    if (!response.ok) throw new Error(job.detail || 'Status proses tidak dapat dibaca.')
+    uploadProgress.value.percentage = job.percentage || 0
+    uploadProgress.value.statusText = job.message
+    uploadProgress.value.eta = job.status === 'processing' ? 'Ekstraksi & upload storage berjalan...' : 'Menunggu worker...'
+    if (job.status === 'completed') {
+      isImporting.value = false
+      importResult.value = job.result
+      selectedDataset.value = job.result
+      uploadProgress.value.percentage = 100
+      uploadProgress.value.statusText = 'Dataset siap digunakan!'
+      await fetchDatasets()
+      return
+    }
+    if (job.status === 'failed') {
+      isImporting.value = false
+      errorMessage.value = job.error || job.message
+      return
+    }
+    jobPollTimer = window.setTimeout(() => pollDatasetJob(jobId), 2000)
+  } catch (error) {
+    isImporting.value = false
+    errorMessage.value = error.message
+  }
+}
+
 const submitCvatImport = () => {
   if (!cocoJsonFile.value || !imagesZipFile.value) {
     alert('Silakan pilih file COCO JSON anotasi dan file zip gambar dari CVAT!')
@@ -204,12 +281,16 @@ const submitCvatImport = () => {
     if (xhr.status >= 200 && xhr.status < 300) {
       try {
         const data = JSON.parse(xhr.responseText)
-        if (data.success) {
-          importResult.value = data
+        if (xhr.status === 202 && data.job_id) {
+          isImporting.value = true
           cocoJsonFile.value = null
           imagesZipFile.value = null
-          uploadProgress.value.percentage = 100
-          uploadProgress.value.statusText = 'Dataset berhasil diimpor & disimpan di S3!'
+          uploadProgress.value.percentage = 0
+          uploadProgress.value.statusText = data.message
+          pollDatasetJob(data.job_id)
+        } else if (data.success) {
+          importResult.value = data
+          isImporting.value = false
         } else {
           errorMessage.value = data.detail || data.message || 'Gagal mengimpor dataset CVAT.'
         }
@@ -279,6 +360,7 @@ const triggerSync = async () => {
 
 onMounted(() => {
   fetchModelsAndEndpoints()
+  fetchDatasets()
 })
 </script>
 
@@ -300,6 +382,31 @@ onMounted(() => {
       {{ errorMessage }}
     </div>
 
+    <!-- Persistent upload history -->
+    <section class="history-card">
+      <div class="history-header">
+        <div>
+          <h2 class="card-title">Riwayat Dataset</h2>
+          <p class="desc-text">Klik dataset untuk melihat gambar dan menyalin link training / Label Studio.</p>
+        </div>
+        <span class="badge badge-primary">{{ datasets.length }} dataset</span>
+      </div>
+      <div v-if="isLoadingDatasets" class="empty-state">Memuat riwayat...</div>
+      <div v-else-if="!datasets.length" class="empty-state">Belum ada dataset. Upload dataset pertama Anda di bawah.</div>
+      <div v-else class="dataset-list">
+        <div v-for="dataset in datasets" :key="dataset.id" class="dataset-row" role="button" tabindex="0" @click="openDataset(dataset)" @keydown.enter="openDataset(dataset)">
+          <div class="dataset-icon">▦</div>
+          <div class="dataset-main">
+            <strong>{{ dataset.name }}</strong>
+            <span>{{ dataset.images_uploaded_count }} gambar · {{ dataset.tasks_created_count }} task · {{ new Date(dataset.created_at).toLocaleString('id-ID') }}</span>
+          </div>
+          <span class="status-ready">Siap</span>
+          <button class="row-action" title="Ubah nama" @click.stop="renameDataset(dataset)">Edit</button>
+          <button class="row-action danger" title="Hapus" @click.stop="deleteDataset(dataset)">Hapus</button>
+        </div>
+      </div>
+    </section>
+
     <!-- SUCCESS MODAL / CARD: S3 URL & COPYABLE INFOS FOR LABEL STUDIO -->
     <div v-if="importResult" class="success-result-card">
       <div class="result-header">
@@ -313,6 +420,19 @@ onMounted(() => {
       <p class="result-intro">
         Dataset telah diekstrak dan disimpan ke folder khusus di S3: <strong>{{ importResult.dataset_folder }}</strong>. Total <strong>{{ importResult.images_uploaded_count }} gambar</strong> dan <strong>{{ importResult.tasks_created_count }} anotasi</strong> siap digunakan.
       </p>
+
+      <div v-if="importResult.images?.length" class="gallery-section">
+        <div class="gallery-title-row">
+          <h3>Isi Dataset ({{ importResult.images.length }} gambar)</h3>
+          <span>Klik gambar untuk membuka ukuran penuh</span>
+        </div>
+        <div class="image-grid">
+          <a v-for="image in importResult.images" :key="image.url" :href="getFullUrl(image.url)" target="_blank" class="image-tile">
+            <img :src="getFullUrl(image.url)" :alt="image.name" loading="lazy" />
+            <span :title="image.name">{{ image.name }}</span>
+          </a>
+        </div>
+      </div>
 
       <!-- Copyable URLs Section -->
       <div class="copy-fields-grid">
@@ -1248,4 +1368,26 @@ onMounted(() => {
 
 .progress-footer { display: flex; justify-content: space-between; align-items: center; }
 .btn-xs { padding: 3px 8px; font-size: 0.725rem; border-radius: 4px; }
+.history-card { background: #fff; border: 1px solid #e2e8f0; border-radius: 12px; margin-bottom: 24px; padding: 20px; }
+.history-header, .gallery-title-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.history-header .desc-text { margin: 5px 0 0; }
+.dataset-list { display: flex; flex-direction: column; gap: 8px; margin-top: 16px; }
+.dataset-row { display: flex; align-items: center; gap: 12px; border: 1px solid #e2e8f0; border-radius: 9px; padding: 12px; cursor: pointer; transition: .2s; }
+.dataset-row:hover { border-color: #93c5fd; background: #f8fbff; }
+.dataset-icon { width: 38px; height: 38px; display: grid; place-items: center; border-radius: 8px; color: #2563eb; background: #dbeafe; font-size: 20px; }
+.dataset-main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+.dataset-main strong { color: #0f172a; }
+.dataset-main span { color: #64748b; font-size: .75rem; margin-top: 3px; }
+.status-ready { color: #15803d; background: #dcfce7; border-radius: 999px; padding: 4px 9px; font-size: .72rem; font-weight: 700; }
+.row-action { border: 1px solid #cbd5e1; background: white; color: #334155; border-radius: 6px; padding: 6px 9px; cursor: pointer; }
+.row-action.danger { color: #dc2626; border-color: #fecaca; }
+.empty-state { color: #64748b; text-align: center; padding: 28px; }
+.gallery-section { margin: 18px 0 24px; border-top: 1px solid #e2e8f0; padding-top: 18px; }
+.gallery-title-row h3 { margin: 0; font-size: 1rem; color: #0f172a; }
+.gallery-title-row span { color: #64748b; font-size: .75rem; }
+.image-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: 10px; margin-top: 12px; max-height: 480px; overflow: auto; }
+.image-tile { color: #334155; text-decoration: none; border: 1px solid #e2e8f0; border-radius: 8px; overflow: hidden; background: #f8fafc; }
+.image-tile img { width: 100%; aspect-ratio: 1; object-fit: cover; display: block; background: #e2e8f0; }
+.image-tile span { display: block; font-size: .7rem; padding: 7px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+@media (max-width: 700px) { .dataset-row { flex-wrap: wrap; } .dataset-main { min-width: calc(100% - 60px); } .status-ready { margin-left: 50px; } }
 </style>

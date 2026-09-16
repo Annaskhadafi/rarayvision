@@ -4,28 +4,40 @@ import uuid
 import json
 import zipfile
 import shutil
+import asyncio
+import threading
+import tempfile
+from datetime import datetime
 from typing import Optional, List, Dict, Any
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Query, status
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Query, status, BackgroundTasks
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
 
 try:
     from backend.app.database.database import get_db
-    from backend.app.database.models import MLModel, MLPrediction, MLEndpoint
+    from backend.app.database.models import MLModel, MLPrediction, MLEndpoint, MLDataset
+    from backend.app.database.database import SessionLocal
     from backend.app.services.detection_service import detection_service
     from backend.app.services.s3_service import s3_service
     from backend.app.services.label_studio_service import label_studio_service
     from backend.app.core.config import BASE_DIR
 except ImportError:
     from app.database.database import get_db
-    from app.database.models import MLModel, MLPrediction, MLEndpoint
+    from app.database.models import MLModel, MLPrediction, MLEndpoint, MLDataset
+    from app.database.database import SessionLocal
     from app.services.detection_service import detection_service
     from app.services.s3_service import s3_service
     from app.services.label_studio_service import label_studio_service
     from app.core.config import BASE_DIR
 
 router = APIRouter(prefix="/api/v1/models", tags=["Object Detection & MLOps"])
+
+_dataset_jobs: Dict[str, Dict[str, Any]] = {}
+_dataset_jobs_lock = threading.Lock()
+
+class DatasetUpdateRequest(BaseModel):
+    name: str
 
 class FeedbackRequest(BaseModel):
     feedback: str # "good" or "bad"
@@ -644,12 +656,12 @@ def sync_to_label_studio(
         }
 
 
-@router.post("/data/import-cvat")
 async def import_cvat_dataset(
     dataset_name: Optional[str] = Form(None),
     coco_json_file: UploadFile = File(...),
     images_zip_file: UploadFile = File(...),
-    project_id: Optional[str] = Form(None)
+    project_id: Optional[str] = Form(None),
+    job_id: Optional[str] = None,
 ):
     """
     Import CVAT COCO dataset:
@@ -698,6 +710,12 @@ async def import_cvat_dataset(
                 m for m in zf.namelist()
                 if os.path.basename(m) and not m.endswith("/") and not m.startswith("__MACOSX")
             ]
+            if job_id:
+                with _dataset_jobs_lock:
+                    _dataset_jobs[job_id].update(
+                        stage="extracting", percentage=10,
+                        message=f"ZIP terbaca: {len(valid_members)} file. Mengekstrak dan mengunggah gambar..."
+                    )
 
             def upload_single_member(member_name):
                 fname = os.path.basename(member_name)
@@ -715,7 +733,8 @@ async def import_cvat_dataset(
             # Upload images concurrently with 12 threads for 5-10x speedup
             with concurrent.futures.ThreadPoolExecutor(max_workers=12) as executor:
                 future_to_member = {executor.submit(upload_single_member, m): m for m in valid_members}
-                for future in concurrent.futures.as_completed(future_to_member):
+                total_members = max(len(valid_members), 1)
+                for completed, future in enumerate(concurrent.futures.as_completed(future_to_member), start=1):
                     try:
                         fname, accessible_url = future.result()
                         if accessible_url:
@@ -723,6 +742,12 @@ async def import_cvat_dataset(
                             uploaded_files.append(fname)
                     except Exception as err:
                         print(f"[CVATImport] Error uploading {future_to_member[future]}: {err}")
+                    if job_id and (completed == total_members or completed % max(total_members // 100, 1) == 0):
+                        with _dataset_jobs_lock:
+                            _dataset_jobs[job_id].update(
+                                stage="uploading", percentage=min(95, 10 + round(completed / total_members * 85)),
+                                message=f"Ekstraksi & upload storage: {completed}/{len(valid_members)} gambar."
+                            )
 
         # Convert COCO annotations to Label Studio format
         tasks = label_studio_service.convert_coco_to_label_studio(coco_json, image_url_mapping)
@@ -1173,6 +1198,10 @@ model.export(format="onnx")
             "images_uploaded_count": len(uploaded_files),
             "tasks_created_count": len(tasks),
             "categories": cat_names,
+            "images": [
+                {"name": name, "url": image_url_mapping[name]}
+                for name in sorted(image_url_mapping)
+            ],
             "colab_training": {
                 "notebook_url": colab_nb_url,
                 "data_yaml_url": yolo_yaml_url,
@@ -1201,6 +1230,169 @@ model.export(format="onnx")
                 os.remove(temp_zip_path)
             except Exception:
                 pass
+
+
+def _run_dataset_import(job_id: str, name: str, coco_path: str, zip_path: str, project_id: Optional[str]):
+    """Process a staged upload after the HTTP upload request has completed."""
+    from starlette.datastructures import UploadFile as StarletteUploadFile
+
+    with _dataset_jobs_lock:
+        _dataset_jobs[job_id].update(
+            status="processing", stage="extracting", percentage=5,
+            message="Upload selesai. ZIP sedang diekstrak dan gambar sedang dikirim ke storage."
+        )
+    try:
+        with open(coco_path, "rb") as coco_handle, open(zip_path, "rb") as zip_handle:
+            result = asyncio.run(import_cvat_dataset(
+                dataset_name=name,
+                coco_json_file=StarletteUploadFile(coco_handle, filename="annotations.json"),
+                images_zip_file=StarletteUploadFile(zip_handle, filename="images.zip"),
+                project_id=project_id,
+                job_id=job_id,
+            ))
+
+        dataset_id = str(uuid.uuid4())
+        artifacts = {key: result.get(key) for key in (
+            "s3_bucket", "s3_folder_prefix", "s3_uri", "s3_endpoint", "tasks_json_url",
+            "coco_json_url", "yolo_yaml_url", "colab_notebook_url", "colab_training",
+            "label_studio_instructions"
+        )}
+        db = SessionLocal()
+        try:
+            dataset = MLDataset(
+                id=dataset_id, name=name, folder=result["dataset_folder"], status="ready",
+                image_count=result["images_uploaded_count"], task_count=result["tasks_created_count"],
+                categories=json.dumps(result.get("categories", [])),
+                images=json.dumps(result.get("images", [])), artifacts=json.dumps(artifacts),
+            )
+            db.add(dataset)
+            db.commit()
+        finally:
+            db.close()
+
+        result["id"] = dataset_id
+        result["name"] = name
+        with _dataset_jobs_lock:
+            _dataset_jobs[job_id].update(
+                status="completed", stage="ready", percentage=100,
+                message="Dataset siap digunakan.", result=result
+            )
+    except Exception as exc:
+        detail = exc.detail if isinstance(exc, HTTPException) else str(exc)
+        with _dataset_jobs_lock:
+            _dataset_jobs[job_id].update(
+                status="failed", stage="failed", message=f"Pemrosesan gagal: {detail}", error=str(detail)
+            )
+    finally:
+        for path in (coco_path, zip_path):
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+
+
+@router.post("/data/import-cvat", status_code=202)
+async def start_cvat_dataset_import(
+    background_tasks: BackgroundTasks,
+    dataset_name: Optional[str] = Form(None),
+    coco_json_file: UploadFile = File(...),
+    images_zip_file: UploadFile = File(...),
+    project_id: Optional[str] = Form(None),
+):
+    """Stage large files on disk and return a job immediately after upload."""
+    job_id = str(uuid.uuid4())
+    staging_dir = os.path.join(BASE_DIR, "uploads", "dataset_staging")
+    os.makedirs(staging_dir, exist_ok=True)
+    coco_path = os.path.join(staging_dir, f"{job_id}.json")
+    zip_path = os.path.join(staging_dir, f"{job_id}.zip")
+
+    async def save_upload(upload: UploadFile, path: str):
+        with open(path, "wb") as output:
+            while chunk := await upload.read(8 * 1024 * 1024):
+                output.write(chunk)
+
+    try:
+        await save_upload(coco_json_file, coco_path)
+        await save_upload(images_zip_file, zip_path)
+    except Exception:
+        for path in (coco_path, zip_path):
+            if os.path.exists(path):
+                os.remove(path)
+        raise
+
+    with _dataset_jobs_lock:
+        _dataset_jobs[job_id] = {
+            "job_id": job_id, "status": "queued", "stage": "queued", "percentage": 0,
+            "message": "Upload diterima dan menunggu pemrosesan.", "created_at": datetime.utcnow().isoformat()
+        }
+    background_tasks.add_task(_run_dataset_import, job_id, dataset_name or "cvat_dataset", coco_path, zip_path, project_id)
+    return _dataset_jobs[job_id]
+
+
+@router.get("/data/jobs/{job_id}")
+def get_dataset_job(job_id: str):
+    with _dataset_jobs_lock:
+        job = _dataset_jobs.get(job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="Job upload tidak ditemukan atau server telah dimulai ulang.")
+        return dict(job)
+
+
+def _dataset_payload(dataset: MLDataset, include_images: bool = False):
+    artifacts = json.loads(dataset.artifacts or "{}")
+    payload = {
+        "id": dataset.id, "name": dataset.name, "dataset_folder": dataset.folder,
+        "status": dataset.status, "images_uploaded_count": dataset.image_count,
+        "tasks_created_count": dataset.task_count, "categories": json.loads(dataset.categories or "[]"),
+        "created_at": dataset.created_at.isoformat() if dataset.created_at else None,
+        "updated_at": dataset.updated_at.isoformat() if dataset.updated_at else None,
+        **artifacts,
+    }
+    if include_images:
+        payload["images"] = json.loads(dataset.images or "[]")
+    return payload
+
+
+@router.get("/data/datasets")
+def list_datasets(db: Session = Depends(get_db)):
+    datasets = db.query(MLDataset).order_by(MLDataset.created_at.desc()).all()
+    return {"datasets": [_dataset_payload(item) for item in datasets]}
+
+
+@router.get("/data/datasets/{dataset_id}")
+def get_dataset(dataset_id: str, db: Session = Depends(get_db)):
+    dataset = db.query(MLDataset).filter(MLDataset.id == dataset_id).first()
+    if not dataset:
+        raise HTTPException(status_code=404, detail="Dataset tidak ditemukan.")
+    return _dataset_payload(dataset, include_images=True)
+
+
+@router.patch("/data/datasets/{dataset_id}")
+def update_dataset(dataset_id: str, payload: DatasetUpdateRequest, db: Session = Depends(get_db)):
+    dataset = db.query(MLDataset).filter(MLDataset.id == dataset_id).first()
+    if not dataset:
+        raise HTTPException(status_code=404, detail="Dataset tidak ditemukan.")
+    clean_name = payload.name.strip()
+    if not clean_name:
+        raise HTTPException(status_code=400, detail="Nama dataset tidak boleh kosong.")
+    dataset.name = clean_name
+    db.commit()
+    db.refresh(dataset)
+    return _dataset_payload(dataset)
+
+
+@router.delete("/data/datasets/{dataset_id}")
+def delete_dataset(dataset_id: str, delete_files: bool = Query(False), db: Session = Depends(get_db)):
+    dataset = db.query(MLDataset).filter(MLDataset.id == dataset_id).first()
+    if not dataset:
+        raise HTTPException(status_code=404, detail="Dataset tidak ditemukan.")
+    if delete_files:
+        local_path = os.path.join(s3_service.local_s3_dir, "datasets", dataset.folder)
+        if os.path.isdir(local_path):
+            shutil.rmtree(local_path)
+    db.delete(dataset)
+    db.commit()
+    return {"success": True, "message": "Dataset dihapus dari riwayat."}
 
 
 @router.post("/predict-video")
