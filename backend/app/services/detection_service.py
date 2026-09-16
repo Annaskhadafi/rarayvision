@@ -398,4 +398,121 @@ class DetectionService:
 
 
 # Singleton instance
+
+    def predict_video(
+        self,
+        video_bytes: bytes,
+        conf_threshold: float = 0.25,
+        iou_threshold: float = 0.45,
+        max_duration_sec: int = 60
+    ) -> Dict[str, Any]:
+        """
+        Process an uploaded video file frame-by-frame using the active model,
+        draw bounding boxes, and encode to web-compatible MP4 (H.264).
+        """
+        import subprocess
+        import uuid
+
+        if not self.is_loaded or self.model_instance is None:
+            raise RuntimeError("No active model loaded.")
+
+        upload_dir = os.path.join(BASE_DIR, "uploads")
+        os.makedirs(upload_dir, exist_ok=True)
+
+        session_id = uuid.uuid4().hex[:8]
+        temp_in = os.path.join(upload_dir, f"in_{session_id}.mp4")
+        temp_raw_out = os.path.join(upload_dir, f"raw_{session_id}.mp4")
+        final_web_out = os.path.join(upload_dir, f"video_{session_id}.mp4")
+
+        with open(temp_in, "wb") as f:
+            f.write(video_bytes)
+
+        cap = cv2.VideoCapture(temp_in)
+        if not cap.isOpened():
+            if os.path.exists(temp_in): os.remove(temp_in)
+            raise ValueError("Failed to open uploaded video.")
+
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+
+        max_frames = int(fps * max_duration_sec)
+        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+        writer = cv2.VideoWriter(temp_raw_out, fourcc, fps, (width, height))
+
+        processed = 0
+        total_detections = 0
+        start_time = time.time()
+
+        try:
+            while cap.isOpened() and processed < max_frames:
+                ret, frame = cap.read()
+                if not ret:
+                    break
+
+                results = self.model_instance.predict(
+                    source=frame,
+                    conf=conf_threshold,
+                    iou=iou_threshold,
+                    verbose=False
+                )
+
+                if len(results) > 0 and results[0].boxes is not None:
+                    boxes = results[0].boxes
+                    names = results[0].names or {}
+                    for box in boxes:
+                        cls_id = int(box.cls[0].item())
+                        conf = float(box.conf[0].item())
+                        label = names.get(cls_id, str(cls_id))
+                        x1, y1, x2, y2 = [int(v) for v in box.xyxy[0].tolist()]
+
+                        color = CLASS_COLORS[cls_id % len(CLASS_COLORS)]
+                        cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+                        tag = f"{label} {conf*100:.0f}%"
+                        cv2.putText(frame, tag, (x1 + 2, max(20, y1 - 6)), cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2)
+                        total_detections += 1
+
+                writer.write(frame)
+                processed += 1
+        finally:
+            cap.release()
+            writer.release()
+            if os.path.exists(temp_in):
+                os.remove(temp_in)
+
+        # Transcode to web-ready H.264 via FFmpeg
+        final_filename = f"raw_{session_id}.mp4"
+        try:
+            cmd = [
+                "ffmpeg", "-y", "-i", temp_raw_out,
+                "-c:v", "libx264", "-preset", "ultrafast",
+                "-pix_fmt", "yuv420p", "-an", final_web_out
+            ]
+            res = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+            if res.returncode == 0 and os.path.exists(final_web_out):
+                final_filename = f"video_{session_id}.mp4"
+                if os.path.exists(temp_raw_out):
+                    os.remove(temp_raw_out)
+        except Exception:
+            pass
+
+        duration_sec = round(processed / fps, 2) if fps > 0 else 0
+        total_time_ms = round((time.time() - start_time) * 1000, 1)
+
+        return {
+            "model_id": self.active_model_id,
+            "model_name": self.active_model_name,
+            "model_version": self.active_model_version,
+            "video_url": f"/api/v1/uploads/{final_filename}",
+            "processed_frames": processed,
+            "total_frames": total_frames,
+            "total_detections": total_detections,
+            "fps": round(fps, 1),
+            "duration_seconds": duration_sec,
+            "processing_ms": total_time_ms
+        }
+
+
+# Singleton instance
 detection_service = DetectionService()

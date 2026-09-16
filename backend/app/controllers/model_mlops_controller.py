@@ -606,3 +606,33 @@ async def import_cvat_dataset(
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Gagal mengimpor dataset: {str(e)}")
+
+
+@router.post("/predict-video")
+async def predict_video_endpoint(
+    video: UploadFile = File(...),
+    conf_threshold: float = Form(0.25),
+    iou_threshold: float = Form(0.45)
+):
+    """
+    Run object detection on an uploaded video file frame-by-frame.
+    Returns URL to web-compatible MP4 with rendered bounding boxes and stats.
+    """
+    video_bytes = await video.read()
+    if not video_bytes:
+        raise HTTPException(status_code=400, detail="File video kosong")
+
+    import asyncio
+    try:
+        result = await asyncio.to_thread(
+            detection_service.predict_video,
+            video_bytes,
+            conf_threshold=conf_threshold,
+            iou_threshold=iou_threshold
+        )
+        return {
+            "status": "success",
+            "data": result
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Gagal memproses video: {str(e)}")
