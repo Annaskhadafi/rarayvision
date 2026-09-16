@@ -20,6 +20,34 @@ const importResult = ref(null)
 const errorMessage = ref('')
 const copiedKey = ref('')
 
+// Real-time Upload Progress & Zero-Timeout state
+const uploadProgress = ref({
+  loaded: 0,
+  total: 0,
+  percentage: 0,
+  speed: '',
+  eta: '',
+  statusText: ''
+})
+const xhrInstance = ref(null)
+
+const formatBytes = (bytes) => {
+  if (!bytes || bytes === 0) return '0 B'
+  const k = 1024
+  const sizes = ['B', 'KB', 'MB', 'GB', 'TB']
+  const i = Math.floor(Math.log(bytes) / Math.log(k))
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i]
+}
+
+const cancelUpload = () => {
+  if (xhrInstance.value) {
+    xhrInstance.value.abort()
+    xhrInstance.value = null
+    isImporting.value = false
+    errorMessage.value = 'Proses pengunggahan dataset dibatalkan oleh pengguna.'
+  }
+}
+
 const isSyncing = ref(false)
 const syncResult = ref(null)
 
@@ -92,7 +120,7 @@ const getFullUrl = (url) => {
   return `${API_BASE_URL}${url}`
 }
 
-const submitCvatImport = async () => {
+const submitCvatImport = () => {
   if (!cocoJsonFile.value || !imagesZipFile.value) {
     alert('Silakan pilih file COCO JSON anotasi dan file zip gambar dari CVAT!')
     return
@@ -110,24 +138,105 @@ const submitCvatImport = async () => {
     formData.append('project_id', targetProjectId.value)
   }
 
-  try {
-    const res = await fetch(`${API_BASE_URL}/api/v1/models/data/import-cvat`, {
-      method: 'POST',
-      body: formData
-    })
-    const data = await res.json()
-    if (res.ok && data.success) {
-      importResult.value = data
-      cocoJsonFile.value = null
-      imagesZipFile.value = null
-    } else {
-      errorMessage.value = data.detail || data.message || 'Gagal mengimpor dataset CVAT.'
-    }
-  } catch (err) {
-    errorMessage.value = 'Koneksi ke backend gagal saat proses impor.'
-  } finally {
-    isImporting.value = false
+  const totalBytesEstimate = (imagesZipFile.value?.size || 0) + (cocoJsonFile.value?.size || 0)
+
+  uploadProgress.value = {
+    loaded: 0,
+    total: totalBytesEstimate,
+    percentage: 0,
+    speed: 'Menghitung...',
+    eta: 'Menghitung...',
+    statusText: 'Mempersiapkan pengunggahan dataset multi-GB...'
   }
+
+  const xhr = new XMLHttpRequest()
+  xhrInstance.value = xhr
+  xhr.timeout = 0 // ZERO TIMEOUT: Biarkan proses upload multi-GB berjalan hingga selesai tanpa batas waktu
+
+  const startTime = Date.now()
+  let lastLoaded = 0
+  let lastTime = startTime
+
+  xhr.upload.onprogress = (e) => {
+    if (e.lengthComputable) {
+      const now = Date.now()
+      const elapsedSec = (now - lastTime) / 1000
+      const percent = Math.min(100, Math.round((e.loaded / e.total) * 100))
+
+      if (elapsedSec >= 0.4) {
+        const bytesDiff = e.loaded - lastLoaded
+        const speedBps = bytesDiff / (elapsedSec || 1)
+        const speedMBps = (speedBps / (1024 * 1024)).toFixed(1)
+        uploadProgress.value.speed = `${speedMBps} MB/s`
+
+        const remainingBytes = e.total - e.loaded
+        const remainingSec = Math.round(remainingBytes / (speedBps || 1))
+        if (remainingSec < 60) {
+          uploadProgress.value.eta = `${remainingSec} detik lagi`
+        } else {
+          const mins = Math.floor(remainingSec / 60)
+          const secs = remainingSec % 60
+          uploadProgress.value.eta = `${mins}m ${secs}s lagi`
+        }
+
+        lastLoaded = e.loaded
+        lastTime = now
+      }
+
+      uploadProgress.value.loaded = e.loaded
+      uploadProgress.value.total = e.total
+      uploadProgress.value.percentage = percent
+
+      if (percent < 100) {
+        uploadProgress.value.statusText = `Mengunggah file dataset (${percent}%)...`
+      } else {
+        uploadProgress.value.statusText = 'File terunggah (100%). Server sedang mengekstrak zip & mengunggah gambar ke S3 secara paralel...'
+        uploadProgress.value.eta = 'Sedang diproses server...'
+      }
+    }
+  }
+
+  xhr.onload = () => {
+    isImporting.value = false
+    xhrInstance.value = null
+    if (xhr.status >= 200 && xhr.status < 300) {
+      try {
+        const data = JSON.parse(xhr.responseText)
+        if (data.success) {
+          importResult.value = data
+          cocoJsonFile.value = null
+          imagesZipFile.value = null
+          uploadProgress.value.percentage = 100
+          uploadProgress.value.statusText = 'Dataset berhasil diimpor & disimpan di S3!'
+        } else {
+          errorMessage.value = data.detail || data.message || 'Gagal mengimpor dataset CVAT.'
+        }
+      } catch (err) {
+        errorMessage.value = 'Gagal memproses response server.'
+      }
+    } else {
+      try {
+        const errData = JSON.parse(xhr.responseText)
+        errorMessage.value = errData.detail || errData.message || `Server error: HTTP ${xhr.status}`
+      } catch (e) {
+        errorMessage.value = `Server error: HTTP ${xhr.status}`
+      }
+    }
+  }
+
+  xhr.onerror = () => {
+    isImporting.value = false
+    xhrInstance.value = null
+    errorMessage.value = 'Koneksi jaringan terputus atau backend tidak dapat dijangkau.'
+  }
+
+  xhr.onabort = () => {
+    isImporting.value = false
+    xhrInstance.value = null
+  }
+
+  xhr.open('POST', `${API_BASE_URL}/api/v1/models/data/import-cvat`, true)
+  xhr.send(formData)
 }
 
 const triggerSync = async () => {
@@ -350,9 +459,53 @@ onMounted(() => {
               />
             </div>
 
-            <button type="submit" class="btn btn-primary btn-block" :disabled="isImporting">
-              <span v-if="isImporting" class="spinner-sm"></span>
-              {{ isImporting ? 'Mengunggah ke S3 & Memproses Folder...' : 'Unggah ke S3 & Dapatkan URL' }}
+            <!-- Real-time Progress Bar Card -->
+            <div v-if="isImporting" class="upload-progress-card">
+              <div class="progress-header">
+                <div class="flex items-center gap-2">
+                  <div class="spinner-sm"></div>
+                  <span class="progress-status-text font-semibold">{{ uploadProgress.statusText }}</span>
+                </div>
+                <span class="progress-percentage-pill">{{ uploadProgress.percentage }}%</span>
+              </div>
+
+              <div class="progress-track">
+                <div 
+                  class="progress-fill" 
+                  :style="{ width: `${uploadProgress.percentage}%` }"
+                  :class="{ 'pulse-mode': uploadProgress.percentage === 100 }"
+                ></div>
+              </div>
+
+              <div class="progress-details-grid">
+                <div class="detail-box">
+                  <span class="detail-title">Terunggah:</span>
+                  <strong class="detail-val font-mono">{{ formatBytes(uploadProgress.loaded) }} / {{ formatBytes(uploadProgress.total) }}</strong>
+                </div>
+                <div class="detail-box">
+                  <span class="detail-title">Kecepatan:</span>
+                  <strong class="detail-val font-mono text-blue-600">{{ uploadProgress.speed || 'Menghitung...' }}</strong>
+                </div>
+                <div class="detail-box">
+                  <span class="detail-title">Estimasi Sisa:</span>
+                  <strong class="detail-val font-mono text-emerald-600">{{ uploadProgress.eta || 'Menghitung...' }}</strong>
+                </div>
+              </div>
+
+              <div class="progress-footer">
+                <div class="flex items-center gap-1 text-xs text-slate-500">
+                  <svg viewBox="0 0 24 24" width="13" height="13" stroke="currentColor" stroke-width="2" fill="none"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>
+                  <span>Mode Tanpa Timeout: Upload multi-GB diproses secara streaming ke disk & S3.</span>
+                </div>
+                <button type="button" class="btn btn-xs btn-outline-danger" @click="cancelUpload">
+                  Batalkan
+                </button>
+              </div>
+            </div>
+
+            <button v-else type="submit" class="btn btn-primary btn-block">
+              <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="17 8 12 3 7 8"></polyline><line x1="12" y1="3" x2="12" y2="15"></line></svg>
+              Unggah ke S3 & Dapatkan URL
             </button>
           </form>
         </div>
@@ -801,4 +954,24 @@ onMounted(() => {
 }
 
 @keyframes spin { to { transform: rotate(360deg); } }
+</style>
+
+<style scoped>
+
+.upload-progress-card { background: #f8fafc; border: 1px solid #cbd5e1; border-radius: 10px; padding: 16px; margin-top: 14px; }
+.progress-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
+.progress-status-text { font-size: 0.825rem; color: #1e293b; line-height: 1.4; }
+.progress-percentage-pill { background: #dbeafe; color: #1d4ed8; font-family: monospace; font-size: 0.85rem; font-weight: 700; padding: 2px 8px; border-radius: 6px; }
+.progress-track { width: 100%; height: 10px; background: #e2e8f0; border-radius: 9999px; overflow: hidden; margin-bottom: 12px; }
+.progress-fill { height: 100%; background: linear-gradient(90deg, #2563eb, #3b82f6); border-radius: 9999px; transition: width 0.25s ease-out; }
+.progress-fill.pulse-mode { background: linear-gradient(90deg, #10b981, #059669); animation: bar-pulse 1.5s infinite; }
+@keyframes bar-pulse { 0% { opacity: 0.8; } 50% { opacity: 1; } 100% { opacity: 0.8; } }
+
+.progress-details-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; background: white; border: 1px solid #e2e8f0; border-radius: 8px; padding: 10px; margin-bottom: 10px; }
+.detail-box { display: flex; flex-direction: column; gap: 2px; }
+.detail-title { font-size: 0.7rem; color: #64748b; font-weight: 500; }
+.detail-val { font-size: 0.775rem; color: #1e293b; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+.progress-footer { display: flex; justify-content: space-between; align-items: center; }
+.btn-xs { padding: 3px 8px; font-size: 0.725rem; border-radius: 4px; }
 </style>

@@ -30,6 +30,34 @@ const uploadForm = ref({
   results_file: null
 })
 
+// Real-time Model Upload Progress
+const modelUploadProgress = ref({
+  loaded: 0,
+  total: 0,
+  percentage: 0,
+  speed: '',
+  eta: '',
+  statusText: ''
+})
+const modelXhrInstance = ref(null)
+
+const formatModelBytes = (bytes) => {
+  if (!bytes || bytes === 0) return '0 B'
+  const k = 1024
+  const sizes = ['B', 'KB', 'MB', 'GB', 'TB']
+  const i = Math.floor(Math.log(bytes) / Math.log(k))
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i]
+}
+
+const cancelModelUpload = () => {
+  if (modelXhrInstance.value) {
+    modelXhrInstance.value.abort()
+    modelXhrInstance.value = null
+    uploadLoading.value = false
+    errorMessage.value = 'Upload model dibatalkan.'
+  }
+}
+
 // Edit Model state
 const showEditModelModal = ref(false)
 const editModelLoading = ref(false)
@@ -283,7 +311,7 @@ const handleResultsFileChange = (e) => {
   }
 }
 
-const submitUpload = async () => {
+const submitUpload = () => {
   if (!uploadForm.value.model_file) {
     alert('Silakan pilih file model (.pt atau .onnx)!')
     return
@@ -313,35 +341,110 @@ const submitUpload = async () => {
     formData.append('results_file', uploadForm.value.results_file)
   }
 
-  try {
-    const res = await fetch(`${API_BASE_URL}/api/v1/models/upload`, {
-      method: 'POST',
-      body: formData
-    })
-    const data = await res.json()
-    if (res.ok && data.success) {
-      successMessage.value = `Model "${data.model.name}" berhasil diunggah.`
-      showUploadModal.value = false
-      uploadForm.value = {
-        name: '',
-        version: '',
-        task_type: 'detection',
-        framework: 'yolo',
-        description: '',
-        model_file: null,
-        onnx_file: null,
-        results_file: null
+  const totalBytes = (uploadForm.value.model_file?.size || 0) + 
+                     (uploadForm.value.onnx_file?.size || 0) + 
+                     (uploadForm.value.results_file?.size || 0)
+
+  modelUploadProgress.value = {
+    loaded: 0,
+    total: totalBytes,
+    percentage: 0,
+    speed: 'Menghitung...',
+    eta: 'Menghitung...',
+    statusText: 'Mempersiapkan pengunggahan model...'
+  }
+
+  const xhr = new XMLHttpRequest()
+  modelXhrInstance.value = xhr
+  xhr.timeout = 0 // Zero timeout: tidak ada batasan waktu untuk file bobot besar
+
+  const startTime = Date.now()
+  let lastLoaded = 0
+  let lastTime = startTime
+
+  xhr.upload.onprogress = (e) => {
+    if (e.lengthComputable) {
+      const now = Date.now()
+      const elapsedSec = (now - lastTime) / 1000
+      const percent = Math.min(100, Math.round((e.loaded / e.total) * 100))
+
+      if (elapsedSec >= 0.4) {
+        const bytesDiff = e.loaded - lastLoaded
+        const speedBps = bytesDiff / (elapsedSec || 1)
+        const speedMBps = (speedBps / (1024 * 1024)).toFixed(1)
+        modelUploadProgress.value.speed = `${speedMBps} MB/s`
+
+        const remainingBytes = e.total - e.loaded
+        const remainingSec = Math.round(remainingBytes / (speedBps || 1))
+        modelUploadProgress.value.eta = remainingSec < 60 ? `${remainingSec}s lagi` : `${Math.floor(remainingSec / 60)}m ${remainingSec % 60}s lagi`
+
+        lastLoaded = e.loaded
+        lastTime = now
       }
-      await fetchModels()
-    } else {
-      errorMessage.value = data.detail || 'Gagal mengunggah model.'
+
+      modelUploadProgress.value.loaded = e.loaded
+      modelUploadProgress.value.total = e.total
+      modelUploadProgress.value.percentage = percent
+
+      if (percent < 100) {
+        modelUploadProgress.value.statusText = `Mengunggah bobot model (${percent}%)...`
+      } else {
+        modelUploadProgress.value.statusText = 'File model terunggah (100%). Server sedang memvalidasi weights & mengekstrak metrik evaluasi...'
+        modelUploadProgress.value.eta = 'Sedang diproses...'
+      }
     }
-  } catch (err) {
-    errorMessage.value = 'Koneksi error saat mengunggah model.'
-  } finally {
+  }
+
+  xhr.onload = () => {
     uploadLoading.value = false
+    modelXhrInstance.value = null
+    if (xhr.status >= 200 && xhr.status < 300) {
+      try {
+        const data = JSON.parse(xhr.responseText)
+        if (data.success) {
+          successMessage.value = `Model "${data.model.name}" berhasil diunggah.`
+          showUploadModal.value = false
+          uploadForm.value = {
+            name: '',
+            version: '',
+            task_type: 'detection',
+            framework: 'yolo',
+            description: '',
+            model_file: null,
+            onnx_file: null,
+            results_file: null
+          }
+          fetchModels()
+        } else {
+          errorMessage.value = data.detail || 'Gagal mengunggah model.'
+        }
+      } catch (err) {
+        errorMessage.value = 'Gagal memproses response server.'
+      }
+    } else {
+      try {
+        const errData = JSON.parse(xhr.responseText)
+        errorMessage.value = errData.detail || errData.message || `Server error: HTTP ${xhr.status}`
+      } catch (e) {
+        errorMessage.value = `Server error: HTTP ${xhr.status}`
+      }
+    }
     setTimeout(() => { successMessage.value = '' }, 4000)
   }
+
+  xhr.onerror = () => {
+    uploadLoading.value = false
+    modelXhrInstance.value = null
+    errorMessage.value = 'Koneksi terputus saat mengunggah model.'
+  }
+
+  xhr.onabort = () => {
+    uploadLoading.value = false
+    modelXhrInstance.value = null
+  }
+
+  xhr.open('POST', `${API_BASE_URL}/api/v1/models/upload`, true)
+  xhr.send(formData)
 }
 
 // ==========================================
@@ -1037,11 +1140,51 @@ onMounted(() => {
             ></textarea>
           </div>
 
-          <div class="modal-footer">
+          <!-- Real-time Model Upload Progress Bar -->
+          <div v-if="uploadLoading" class="upload-progress-card mt-3">
+            <div class="progress-header">
+              <div class="flex items-center gap-2">
+                <div class="spinner-sm"></div>
+                <span class="progress-status-text font-semibold">{{ modelUploadProgress.statusText }}</span>
+              </div>
+              <span class="progress-percentage-pill">{{ modelUploadProgress.percentage }}%</span>
+            </div>
+
+            <div class="progress-track">
+              <div 
+                class="progress-fill" 
+                :style="{ width: `${modelUploadProgress.percentage}%` }"
+                :class="{ 'pulse-mode': modelUploadProgress.percentage === 100 }"
+              ></div>
+            </div>
+
+            <div class="progress-details-grid">
+              <div class="detail-box">
+                <span class="detail-title">Terunggah:</span>
+                <strong class="detail-val font-mono">{{ formatModelBytes(modelUploadProgress.loaded) }} / {{ formatModelBytes(modelUploadProgress.total) }}</strong>
+              </div>
+              <div class="detail-box">
+                <span class="detail-title">Kecepatan:</span>
+                <strong class="detail-val font-mono text-blue-600">{{ modelUploadProgress.speed || 'Menghitung...' }}</strong>
+              </div>
+              <div class="detail-box">
+                <span class="detail-title">Sisa Waktu:</span>
+                <strong class="detail-val font-mono text-emerald-600">{{ modelUploadProgress.eta || 'Menghitung...' }}</strong>
+              </div>
+            </div>
+
+            <div class="progress-footer">
+              <span class="text-xs text-slate-500">⚡ Zero-Timeout Mode: Unggah model besar aman tanpa batas waktu.</span>
+              <button type="button" class="btn btn-xs btn-outline-danger" @click="cancelModelUpload">
+                Batalkan
+              </button>
+            </div>
+          </div>
+
+          <div class="modal-footer" v-if="!uploadLoading">
             <button type="button" class="btn btn-secondary" @click="showUploadModal = false">Batal</button>
-            <button type="submit" class="btn btn-primary" :disabled="uploadLoading">
-              <span v-if="uploadLoading" class="spinner-sm"></span>
-              {{ uploadLoading ? 'Mengunggah & Memproses...' : 'Simpan Model' }}
+            <button type="submit" class="btn btn-primary">
+              Simpan Model
             </button>
           </div>
         </form>

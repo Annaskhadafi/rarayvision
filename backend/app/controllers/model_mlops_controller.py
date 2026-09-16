@@ -676,25 +676,53 @@ async def import_cvat_dataset(
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Invalid COCO JSON file: {e}")
 
-    zip_bytes = await images_zip_file.read()
-    zip_stream = io.BytesIO(zip_bytes)
+    import tempfile
+    import concurrent.futures
 
-    image_url_mapping = {}
-    uploaded_files = []
-
-    endpoint, bucket, _, region, _, _ = get_s3_credentials()
+    # Stream multi-GB zip to disk in 8MB chunks to prevent memory explosion & timeouts
+    temp_zip = tempfile.NamedTemporaryFile(delete=False, suffix=".zip")
+    temp_zip_path = temp_zip.name
 
     try:
-        with zipfile.ZipFile(zip_stream, "r") as zf:
-            for member in zf.namelist():
-                fname = os.path.basename(member)
-                if not fname or member.endswith("/"):
-                    continue
-                file_bytes = zf.read(member)
+        while chunk := await images_zip_file.read(1024 * 1024 * 8):
+            temp_zip.write(chunk)
+        temp_zip.close()
+
+        image_url_mapping = {}
+        uploaded_files = []
+
+        endpoint, bucket, _, region, _, _ = get_s3_credentials()
+
+        with zipfile.ZipFile(temp_zip_path, "r") as zf:
+            valid_members = [
+                m for m in zf.namelist()
+                if os.path.basename(m) and not m.endswith("/") and not m.startswith("__MACOSX")
+            ]
+
+            def upload_single_member(member_name):
+                fname = os.path.basename(member_name)
+                f_bytes = zf.read(member_name)
                 s3_key = f"{s3_folder_prefix}/{fname}"
-                accessible_url = s3_service.upload_bytes(file_bytes, s3_key)
-                image_url_mapping[fname] = accessible_url
-                uploaded_files.append(fname)
+                ext = os.path.splitext(fname)[1].lower()
+                c_type = "image/jpeg"
+                if ext == ".png":
+                    c_type = "image/png"
+                elif ext == ".webp":
+                    c_type = "image/webp"
+                url = s3_service.upload_bytes(f_bytes, s3_key, content_type=c_type)
+                return fname, url
+
+            # Upload images concurrently with 12 threads for 5-10x speedup
+            with concurrent.futures.ThreadPoolExecutor(max_workers=12) as executor:
+                future_to_member = {executor.submit(upload_single_member, m): m for m in valid_members}
+                for future in concurrent.futures.as_completed(future_to_member):
+                    try:
+                        fname, accessible_url = future.result()
+                        if accessible_url:
+                            image_url_mapping[fname] = accessible_url
+                            uploaded_files.append(fname)
+                    except Exception as err:
+                        print(f"[CVATImport] Error uploading {future_to_member[future]}: {err}")
 
         # Convert COCO annotations to Label Studio format
         tasks = label_studio_service.convert_coco_to_label_studio(coco_json, image_url_mapping)
@@ -736,6 +764,12 @@ async def import_cvat_dataset(
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Gagal mengimpor dataset: {str(e)}")
+    finally:
+        if os.path.exists(temp_zip_path):
+            try:
+                os.remove(temp_zip_path)
+            except Exception:
+                pass
 
 
 @router.post("/predict-video")
