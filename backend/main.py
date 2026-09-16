@@ -31,6 +31,7 @@ from fastapi.openapi.docs import get_swagger_ui_html, get_redoc_html
 from starlette.exceptions import HTTPException as StarletteHTTPException
 import socketio
 
+from backend.app.controllers import model_mlops_controller
 from backend.app.controllers import auth_controller, api_key_controller, face_controller, stt_controller, fire_controller, forecasting_controller
 from backend.app.controllers import hero_attendance_controller
 from backend.app.services.socket_service import sio
@@ -315,6 +316,7 @@ fastapi_app.include_router(anti_spoof_controller.router)
 fastapi_app.include_router(anydoc_controller.router)
 fastapi_app.include_router(rag_controller.router)
 fastapi_app.include_router(rag_datasource_controller.router)
+fastapi_app.include_router(model_mlops_controller.router)
 
 
 _FAVICON = "/api/v1/uploads/favicon.png"

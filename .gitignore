@@ -14,7 +14,11 @@ htmlcov/
 venv/
 .env
 .env.*
+*.env
+*Copy.env
 !.env.example
+
+backend/cache/
 
 # =========================
 # Database

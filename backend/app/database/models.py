@@ -3,9 +3,9 @@ import datetime
 from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, Boolean, Float
 from sqlalchemy.orm import relationship
 try:
-    from app.database.database import Base
-except ImportError:
     from backend.app.database.database import Base
+except ImportError:
+    from app.database.database import Base
 
 class User(Base):
     __tablename__ = "users"
@@ -179,3 +179,45 @@ class Camera(Base):
 
 
 
+
+
+class MLModel(Base):
+    """Menyimpan registry model machine learning (YOLO, ONNX) dengan versioning & status aktif"""
+    __tablename__ = "ml_models"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(120), nullable=False)
+    version = Column(String(50), nullable=False)
+    task_type = Column(String(50), default="detection")
+    framework = Column(String(50), default="yolo")
+    model_path = Column(String(500), nullable=False)
+    onnx_path = Column(String(500), nullable=True)
+    classes = Column(Text, nullable=True) # JSON list of class names
+    is_active = Column(Boolean, default=False)
+    description = Column(String(255), nullable=True)
+    metrics_summary = Column(Text, nullable=True) # JSON summary (mAP50, precision, recall)
+    evaluation_dir = Column(String(500), nullable=True) # Directory storing confusion matrix, curves, etc.
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
+
+
+class MLPrediction(Base):
+    """Mencatat setiap prediksi inferensi, gambar di S3, dan data flywheel feedback"""
+    __tablename__ = "ml_predictions"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    model_id = Column(Integer, ForeignKey("ml_models.id", ondelete="SET NULL"), nullable=True)
+    model_version = Column(String(50), nullable=True)
+    original_image_url = Column(String(500), nullable=False)
+    annotated_image_url = Column(String(500), nullable=True)
+    detections = Column(Text, nullable=True) # JSON list of boxes and labels
+    top_confidence = Column(Float, default=0.0)
+    detection_count = Column(Integer, default=0)
+    latency_ms = Column(Float, default=0.0)
+    feedback_status = Column(String(30), default="pending") # pending, good, bad, auto_labeled
+    feedback_notes = Column(Text, nullable=True)
+    is_audit_sample = Column(Boolean, default=False)
+    image_quality = Column(Text, nullable=True)
+    is_synced_to_ls = Column(Boolean, default=False)
+    label_studio_task_id = Column(Integer, nullable=True)
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)

@@ -26,7 +26,7 @@ const isWebcamProcessing = ref(false)
 let webcamTimer = null
 let webcamAnimationFrame = null
 let lastPositiveDetectionAt = 0
-const BOX_HOLD_MS = 700
+const BOX_HOLD_MS = 2000
 
 const selectedModelLabel = computed(() => {
   const item = models.value.find(model => model.id === selectedModel.value)
@@ -89,10 +89,34 @@ const captureWebcamFrame = () => {
   return canvas
 }
 
+const boxIoU = (first, second) => {
+  const [ax1, ay1, ax2, ay2] = first
+  const [bx1, by1, bx2, by2] = second
+  const intersectionWidth = Math.max(0, Math.min(ax2, bx2) - Math.max(ax1, bx1))
+  const intersectionHeight = Math.max(0, Math.min(ay2, by2) - Math.max(ay1, by1))
+  const intersection = intersectionWidth * intersectionHeight
+  const firstArea = Math.max(0, ax2 - ax1) * Math.max(0, ay2 - ay1)
+  const secondArea = Math.max(0, bx2 - bx1) * Math.max(0, by2 - by1)
+  const union = firstArea + secondArea - intersection
+  return union ? intersection / union : 0
+}
+
+const stabilizeDetections = (detections) => detections.map((detection) => {
+  const previous = webcamDetections.value
+    .filter(item => item.class_id === detection.class_id)
+    .sort((first, second) => boxIoU(second.bbox, detection.bbox) - boxIoU(first.bbox, detection.bbox))[0]
+  if (!previous || boxIoU(previous.bbox, detection.bbox) < 0.15) return detection
+  const smoothing = 0.35
+  return {
+    ...detection,
+    bbox: detection.bbox.map((value, index) => Math.round((previous.bbox[index] * (1 - smoothing) + value * smoothing) * 10) / 10)
+  }
+})
+
 const updateWebcamDetections = (detectionResult) => {
   webcamResult.value = detectionResult
   if (detectionResult.detections.length) {
-    webcamDetections.value = detectionResult.detections
+    webcamDetections.value = stabilizeDetections(detectionResult.detections)
     lastPositiveDetectionAt = performance.now()
   } else if (performance.now() - lastPositiveDetectionAt > BOX_HOLD_MS) {
     webcamDetections.value = []
@@ -134,7 +158,7 @@ const detect = async () => {
 const processWebcamFrame = async () => {
   if (!isWebcamActive.value) return
   if (isWebcamProcessing.value || !webcamVideo.value?.videoWidth) {
-    webcamTimer = window.setTimeout(processWebcamFrame, 250)
+    webcamTimer = window.setTimeout(processWebcamFrame, 100)
     return
   }
   isWebcamProcessing.value = true
@@ -149,14 +173,21 @@ const processWebcamFrame = async () => {
     errorMessage.value = error.message
   } finally {
     isWebcamProcessing.value = false
-    if (isWebcamActive.value) webcamTimer = window.setTimeout(processWebcamFrame, 250)
+    if (isWebcamActive.value) webcamTimer = window.setTimeout(processWebcamFrame, 100)
   }
 }
 
 const startWebcam = async () => {
   errorMessage.value = ''
   try {
-    webcamStream.value = await navigator.mediaDevices.getUserMedia({ video: true, audio: false })
+    webcamStream.value = await navigator.mediaDevices.getUserMedia({
+      video: {
+        width: { ideal: 640 },
+        height: { ideal: 360 },
+        frameRate: { ideal: 30, max: 30 }
+      },
+      audio: false
+    })
     isWebcamActive.value = true
     await nextTick()
     webcamVideo.value.srcObject = webcamStream.value
@@ -303,7 +334,7 @@ onUnmounted(() => {
       <div class="result-heading">
         <div>
           <h2>Webcam live</h2>
-          <p>Frame webcam dikirim ke API setiap ±1,2 detik.</p>
+          <p>Preview berjalan 30 FPS; deteksi API hingga sekitar 5–8 FPS.</p>
         </div>
         <button v-if="!isWebcamActive" class="webcam-button start" type="button" @click="startWebcam">📷 Mulai Webcam</button>
         <button v-else class="webcam-button stop" type="button" @click="stopWebcam">⏹ Stop Webcam</button>
@@ -378,7 +409,7 @@ h2 { margin-bottom: 16px; font-size: 1.05rem; }
 .webcam-button.stop { background: #dc2626; }
 .webcam-grid { position: relative; margin-top: 16px; overflow: hidden; border-radius: 10px; background: #0f172a; }
 .webcam-source { display: none; }
-.webcam-canvas { display: block; width: 100%; max-height: 560px; object-fit: contain; }
+.webcam-canvas { display: block; width: 100%; height: auto; object-fit: contain; }
 .webcam-empty { padding: 34px 16px; border: 1px dashed #cbd5e1; border-radius: 10px; color: #94a3b8; text-align: center; }
 .webcam-meta { margin: 12px 0 0; color: #64748b; font-size: .86rem; }
 .webcam-meta strong { margin-left: 8px; }

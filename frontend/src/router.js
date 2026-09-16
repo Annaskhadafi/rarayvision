@@ -114,6 +114,27 @@ const routes = [
     component: () => import('./views/hse/HSEIncidentLogView.vue'),
     meta: { requiresAuth: true }
   },
+  // MLOps & Model Serving Routes
+  {
+    path: '/models',
+    component: () => import('./views/models/ModelManagementView.vue'),
+    meta: { requiresAuth: true }
+  },
+  {
+    path: '/models/playground',
+    component: () => import('./views/models/PlaygroundView.vue'),
+    meta: { requiresAuth: true }
+  },
+  {
+    path: '/models/evaluation',
+    component: () => import('./views/models/EvaluationView.vue'),
+    meta: { requiresAuth: true }
+  },
+  {
+    path: '/models/data-studio',
+    component: () => import('./views/models/DataStudioView.vue'),
+    meta: { requiresAuth: true }
+  },
   // Camera Routes
   { path: '/cameras', redirect: '/cameras/grid' },
   {

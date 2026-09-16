@@ -52,3 +52,16 @@ DEFAULT_FACE_ENGINE_MODE = os.getenv("FACE_ENGINE_MODE", "v1").lower()
 
 # Face recognition similarity matching threshold (default 0.40 to allow 0.45-0.48 scores to pass successfully)
 FACE_RECOGNITION_THRESHOLD = float(os.getenv("FACE_RECOGNITION_THRESHOLD", "0.40"))
+
+# S3 Object Storage Configuration
+S3_ENDPOINT_URL = os.getenv("S3_ENDPOINT_URL", None) # E.g. https://s3.amazonaws.com or MinIO/R2 URL
+S3_ACCESS_KEY_ID = os.getenv("S3_ACCESS_KEY_ID", os.getenv("AWS_ACCESS_KEY_ID", ""))
+S3_SECRET_ACCESS_KEY = os.getenv("S3_SECRET_ACCESS_KEY", os.getenv("AWS_SECRET_ACCESS_KEY", ""))
+S3_BUCKET_NAME = os.getenv("S3_BUCKET_NAME", "rarayvision-datasets")
+S3_REGION_NAME = os.getenv("S3_REGION_NAME", os.getenv("AWS_DEFAULT_REGION", "us-east-1"))
+S3_PUBLIC_URL_PREFIX = os.getenv("S3_PUBLIC_URL_PREFIX", "") # Optional CDN / custom domain prefix
+
+# Label Studio Configuration
+LABEL_STUDIO_URL = os.getenv("LABEL_STUDIO_URL", "http://localhost:8080")
+LABEL_STUDIO_API_KEY = os.getenv("LABEL_STUDIO_API_KEY", "")
+LABEL_STUDIO_PROJECT_ID = os.getenv("LABEL_STUDIO_PROJECT_ID", "1")
