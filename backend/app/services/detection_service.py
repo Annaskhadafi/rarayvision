@@ -45,6 +45,7 @@ class DetectionService:
         self.active_classes: List[str] = []
         self.model_instance = None
         self.is_loaded = False
+        self._model_cache = {}
         
         # Models directory
         self.models_storage_dir = os.path.join(BASE_DIR, "uploads", "models")
@@ -109,6 +110,58 @@ class DetectionService:
                 print("[DetectionService] Ultralytics not installed or failed to import.")
         except Exception as e:
             print(f"[DetectionService] Failed to load model from {path}: {e}")
+
+    def get_model(self, model_id: Optional[int] = None, db = None) -> Tuple[Any, Optional[int], str, str, List[str]]:
+        """
+        Retrieve model instance for inference. If model_id is None, returns global active model.
+        Otherwise, loads model by ID from memory cache or disk weights.
+        Returns (model_instance, model_id, model_name, model_version, classes_list)
+        """
+        if model_id is None or (self.active_model_id is not None and model_id == self.active_model_id):
+            if not self.is_loaded or self.model_instance is None:
+                self.init_model()
+            return self.model_instance, self.active_model_id, self.active_model_name, self.active_model_version, self.active_classes
+
+        if model_id in self._model_cache:
+            return self._model_cache[model_id]
+
+        should_close = False
+        if db is None:
+            db = SessionLocal()
+            should_close = True
+        try:
+            m = db.query(MLModel).filter(MLModel.id == model_id).first()
+            if not m:
+                raise ValueError(f"Model ID {model_id} not found in database")
+
+            m_path = m.onnx_path if (m.framework == 'onnx' and m.onnx_path and os.path.exists(m.onnx_path)) else m.model_path
+            if not os.path.exists(m_path):
+                raise FileNotFoundError(f"Model weights file not found at {m_path}")
+
+            if not YOLO:
+                raise RuntimeError("Ultralytics YOLO not installed")
+
+            inst = YOLO(m_path)
+            classes = []
+            if hasattr(inst, 'names') and inst.names:
+                classes = list(inst.names.values())
+            elif m.classes:
+                classes = json.loads(m.classes)
+
+            entry = (inst, m.id, m.name, m.version, classes)
+            self._model_cache[model_id] = entry
+            return entry
+        finally:
+            if should_close:
+                db.close()
+
+    def invalidate_model_cache(self, model_id: int):
+        """Remove a model from cache when updated or deleted."""
+        if model_id in self._model_cache:
+            del self._model_cache[model_id]
+        if self.active_model_id == model_id:
+            self.model_instance = None
+            self.is_loaded = False
 
     def hot_swap_model(self, model_id: int, db) -> Dict[str, Any]:
         """Switch the active model in DB and reload memory weights without server downtime."""
@@ -223,13 +276,17 @@ class DetectionService:
         self,
         image_bytes: bytes,
         conf_threshold: float = 0.25,
-        iou_threshold: float = 0.45
+        iou_threshold: float = 0.45,
+        model_id: Optional[int] = None,
+        db = None
     ) -> Dict[str, Any]:
         """
         Run inference on image bytes, draw bounding boxes, and compute metrics.
+        Can run using the active model or any specific model_id.
         """
-        if not self.is_loaded or self.model_instance is None:
-            raise RuntimeError("No active object detection model loaded.")
+        model_inst, m_id, m_name, m_version, m_classes = self.get_model(model_id, db=db)
+        if model_inst is None:
+            raise RuntimeError(f"No model available for inference (model_id={model_id}).")
 
         np_arr = np.frombuffer(image_bytes, np.uint8)
         img_bgr = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
@@ -242,7 +299,7 @@ class DetectionService:
         quality = self.check_image_quality(img_bgr)
 
         start_time = time.time()
-        results = self.model_instance.predict(
+        results = model_inst.predict(
             source=img_bgr,
             conf=conf_threshold,
             iou=iou_threshold,
@@ -321,9 +378,9 @@ class DetectionService:
         annotated_bytes = enc.tobytes()
 
         return {
-            "model_id": self.active_model_id,
-            "model_name": self.active_model_name,
-            "model_version": self.active_model_version,
+            "model_id": m_id,
+            "model_name": m_name,
+            "model_version": m_version,
             "detections": detections,
             "detection_count": len(detections),
             "top_confidence": round(top_conf, 4),
@@ -404,17 +461,20 @@ class DetectionService:
         video_bytes: bytes,
         conf_threshold: float = 0.25,
         iou_threshold: float = 0.45,
-        max_duration_sec: int = 60
+        max_duration_sec: int = 60,
+        model_id: Optional[int] = None,
+        db = None
     ) -> Dict[str, Any]:
         """
-        Process an uploaded video file frame-by-frame using the active model,
+        Process an uploaded video file frame-by-frame using the specified model (or active model),
         draw bounding boxes, and encode to web-compatible MP4 (H.264).
         """
         import subprocess
         import uuid
 
-        if not self.is_loaded or self.model_instance is None:
-            raise RuntimeError("No active model loaded.")
+        model_inst, m_id, m_name, m_version, m_classes = self.get_model(model_id, db=db)
+        if model_inst is None:
+            raise RuntimeError(f"No model available for video inference (model_id={model_id}).")
 
         upload_dir = os.path.join(BASE_DIR, "uploads")
         os.makedirs(upload_dir, exist_ok=True)
@@ -451,7 +511,7 @@ class DetectionService:
                 if not ret:
                     break
 
-                results = self.model_instance.predict(
+                results = model_inst.predict(
                     source=frame,
                     conf=conf_threshold,
                     iou=iou_threshold,

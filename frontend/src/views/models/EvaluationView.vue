@@ -7,7 +7,10 @@ const route = useRoute()
 
 const activeTab = ref('offline') // 'offline' | 'production'
 const models = ref([])
+const endpoints = ref([])
 const selectedModelId = ref(null)
+const filterModelId = ref('')
+const filterEndpointSlug = ref('')
 const evaluationData = ref(null)
 const productionAnalytics = ref(null)
 const isLoading = ref(false)
@@ -51,9 +54,24 @@ const fetchEvaluation = async (modelId) => {
   }
 }
 
+const fetchEndpoints = async () => {
+  try {
+    const res = await fetch(`${API_BASE_URL}/api/v1/models/endpoints`)
+    const data = await res.json()
+    if (res.ok) {
+      endpoints.value = data.endpoints || []
+    }
+  } catch (err) {
+    console.error('Failed to fetch endpoints:', err)
+  }
+}
+
 const fetchProductionAnalytics = async () => {
   try {
-    const res = await fetch(`${API_BASE_URL}/api/v1/models/analytics/production`)
+    const params = new URLSearchParams()
+    if (filterModelId.value) params.append('model_id', filterModelId.value)
+    if (filterEndpointSlug.value) params.append('endpoint_slug', filterEndpointSlug.value)
+    const res = await fetch(`${API_BASE_URL}/api/v1/models/analytics/production?${params.toString()}`)
     const data = await res.json()
     if (res.ok) {
       productionAnalytics.value = data
@@ -73,7 +91,9 @@ const triggerSyncToLabelStudio = async () => {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         include_bad: true,
-        include_good: true
+        include_good: true,
+        model_id: filterModelId.value ? parseInt(filterModelId.value) : null,
+        endpoint_slug: filterEndpointSlug.value || null
       })
     })
     const data = await res.json()
@@ -102,6 +122,7 @@ watch(selectedModelId, (newId) => {
 
 onMounted(async () => {
   await fetchModels()
+  await fetchEndpoints()
   if (selectedModelId.value) {
     await fetchEvaluation(selectedModelId.value)
   }
@@ -245,6 +266,31 @@ onMounted(async () => {
       </div>
 
       <div v-if="productionAnalytics" class="prod-dashboard">
+        <!-- Production Filter Bar -->
+        <div class="filter-strip">
+          <div class="filter-item">
+            <label class="filter-label">Filter Berdasarkan Model:</label>
+            <select v-model="filterModelId" @change="fetchProductionAnalytics" class="filter-select">
+              <option value="">Semua Model Registry</option>
+              <option v-for="m in models" :key="m.id" :value="m.id">
+                {{ m.name }} ({{ m.version }}) {{ m.is_active ? '★ Aktif' : '' }}
+              </option>
+            </select>
+          </div>
+          <div class="filter-item">
+            <label class="filter-label">Filter Berdasarkan Serving Endpoint:</label>
+            <select v-model="filterEndpointSlug" @change="fetchProductionAnalytics" class="filter-select">
+              <option value="">Semua Serving Endpoints</option>
+              <option v-for="ep in endpoints" :key="ep.id" :value="ep.slug">
+                🌐 {{ ep.name }} ({{ ep.slug }})
+              </option>
+            </select>
+          </div>
+          <button class="btn btn-sm btn-secondary" @click="() => { filterModelId = ''; filterEndpointSlug = ''; fetchProductionAnalytics(); }">
+            Reset Filter
+          </button>
+        </div>
+
         <!-- Flywheel Status Overview Cards -->
         <div class="kpi-grid">
           <div class="kpi-card">
@@ -344,6 +390,38 @@ onMounted(async () => {
               <div class="serving-row">
                 <span class="serving-label">Endpoint URL</span>
                 <span class="serving-val font-mono text-xs text-blue-600">/api/v1/models/predict</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Recent Inferences & Flywheel Stream -->
+        <div v-if="productionAnalytics.recent_predictions && productionAnalytics.recent_predictions.length > 0" class="card recent-preds-card mt-4">
+          <div class="card-header-clean">
+            <h3 class="card-header-title">Live Inferences & Feedback Stream (12 Terakhir)</h3>
+            <span class="text-xs text-slate-500">Hasil deteksi langsung dari endpoint produksi yang tersimpan di S3</span>
+          </div>
+          <div class="recent-preds-grid">
+            <div v-for="p in productionAnalytics.recent_predictions" :key="p.id" class="pred-thumb-card">
+              <div class="pred-thumb-wrapper" @click="zoomImage = getFullAssetUrl(p.annotated_image_url || p.original_image_url)">
+                <img :src="getFullAssetUrl(p.annotated_image_url || p.original_image_url)" alt="Prediction" class="pred-img" />
+                <span class="zoom-hint">Perbesar</span>
+              </div>
+              <div class="pred-meta">
+                <div class="meta-row-top">
+                  <span class="badge-endpoint">{{ p.endpoint_slug }}</span>
+                  <span class="text-xs font-mono text-slate-500">{{ p.latency_ms ? `${p.latency_ms}ms` : '' }}</span>
+                </div>
+                <div class="text-xs font-semibold text-slate-800">
+                  {{ p.detection_count }} objek ({{ (p.top_confidence * 100).toFixed(0) }}%)
+                </div>
+                <div class="status-badge-row mt-1">
+                  <span v-if="p.feedback_status === 'good'" class="badge-status-good">👍 Akurat</span>
+                  <span v-else-if="p.feedback_status === 'bad'" class="badge-status-bad">👎 Meleset</span>
+                  <span v-else-if="p.feedback_status === 'auto_labeled'" class="badge-status-auto">⚡ Auto-Labeled</span>
+                  <span v-else-if="p.feedback_status === 'audit_required'" class="badge-status-audit">🔍 Audit Sample</span>
+                  <span v-else class="badge-status-pending">⏳ Pending</span>
+                </div>
               </div>
             </div>
           </div>
@@ -703,4 +781,29 @@ onMounted(async () => {
 }
 
 @keyframes spin { to { transform: rotate(360deg); } }
+</style>
+
+<style scoped>
+
+.filter-strip { display: flex; align-items: center; gap: 16px; background: white; padding: 12px 18px; border-radius: 8px; border: 1px solid #e2e8f0; margin-bottom: 20px; flex-wrap: wrap; }
+.filter-item { display: flex; align-items: center; gap: 8px; }
+.filter-label { font-size: 0.8rem; font-weight: 600; color: #475569; }
+.filter-select { padding: 6px 12px; border-radius: 6px; border: 1px solid #cbd5e1; font-size: 0.825rem; min-width: 200px; background: white; }
+
+.recent-preds-card { background: white; border-radius: 12px; border: 1px solid #e2e8f0; padding: 20px; margin-top: 24px; }
+.card-header-clean { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; border-bottom: 1px solid #f1f5f9; padding-bottom: 12px; }
+.recent-preds-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 14px; }
+.pred-thumb-card { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; overflow: hidden; }
+.pred-thumb-wrapper { position: relative; height: 110px; background: #0f172a; cursor: pointer; display: flex; align-items: center; justify-content: center; overflow: hidden; }
+.pred-img { width: 100%; height: 100%; object-fit: cover; }
+.zoom-hint { position: absolute; bottom: 4px; right: 4px; background: rgba(0,0,0,0.6); color: white; font-size: 0.65rem; padding: 2px 6px; border-radius: 4px; opacity: 0; transition: opacity 0.2s; }
+.pred-thumb-wrapper:hover .zoom-hint { opacity: 1; }
+.pred-meta { padding: 8px 10px; }
+.meta-row-top { display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; }
+.badge-endpoint { background: #eff6ff; color: #1d4ed8; font-family: monospace; font-size: 0.65rem; padding: 1px 6px; border-radius: 4px; border: 1px solid #dbeafe; font-weight: 600; }
+.badge-status-good { font-size: 0.7rem; color: #15803d; font-weight: 600; }
+.badge-status-bad { font-size: 0.7rem; color: #b91c1c; font-weight: 600; }
+.badge-status-auto { font-size: 0.7rem; color: #2563eb; font-weight: 600; }
+.badge-status-audit { font-size: 0.7rem; color: #7c3aed; font-weight: 600; }
+.badge-status-pending { font-size: 0.7rem; color: #64748b; font-weight: 500; }
 </style>

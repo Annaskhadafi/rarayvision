@@ -208,6 +208,7 @@ class MLPrediction(Base):
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     model_id = Column(Integer, ForeignKey("ml_models.id", ondelete="SET NULL"), nullable=True)
     model_version = Column(String(50), nullable=True)
+    endpoint_slug = Column(String(80), nullable=True, index=True) # Tag serving endpoint
     original_image_url = Column(String(500), nullable=False)
     annotated_image_url = Column(String(500), nullable=True)
     detections = Column(Text, nullable=True) # JSON list of boxes and labels
@@ -221,3 +222,22 @@ class MLPrediction(Base):
     is_synced_to_ls = Column(Boolean, default=False)
     label_studio_task_id = Column(Integer, nullable=True)
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
+
+
+class MLEndpoint(Base):
+    """Menyimpan konfigurasi custom serving endpoint untuk melayani model tertentu secara independen"""
+    __tablename__ = "ml_endpoints"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(120), nullable=False) # e.g. "CCTV APD Area Gudang"
+    slug = Column(String(80), unique=True, nullable=False, index=True) # e.g. "cctv-apd"
+    description = Column(String(255), nullable=True)
+    model_id = Column(Integer, ForeignKey("ml_models.id", ondelete="SET NULL"), nullable=True)
+    is_active = Column(Boolean, default=True)
+    default_conf = Column(Float, default=0.25)
+    default_iou = Column(Float, default=0.45)
+    total_requests = Column(Integer, default=0)
+    last_accessed_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
+

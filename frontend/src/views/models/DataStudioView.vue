@@ -2,10 +2,18 @@
 import { ref } from 'vue'
 import { API_BASE_URL } from '../../utils'
 
+import { onMounted } from 'vue'
+
 const datasetName = ref('')
 const cocoJsonFile = ref(null)
 const imagesZipFile = ref(null)
 const targetProjectId = ref('')
+
+const models = ref([])
+const endpoints = ref([])
+const selectedTargetModel = ref('')
+const syncFilterModelId = ref('')
+const syncFilterEndpointSlug = ref('')
 
 const isImporting = ref(false)
 const importResult = ref(null)
@@ -14,6 +22,32 @@ const copiedKey = ref('')
 
 const isSyncing = ref(false)
 const syncResult = ref(null)
+
+const fetchModelsAndEndpoints = async () => {
+  try {
+    const [mRes, epRes] = await Promise.all([
+      fetch(`${API_BASE_URL}/api/v1/models`),
+      fetch(`${API_BASE_URL}/api/v1/models/endpoints`)
+    ])
+    if (mRes.ok) {
+      const mData = await mRes.json()
+      models.value = mData.models || []
+    }
+    if (epRes.ok) {
+      const epData = await epRes.json()
+      endpoints.value = epData.endpoints || []
+    }
+  } catch (err) {
+    console.error('Failed to load models/endpoints in DataStudio:', err)
+  }
+}
+
+const onTargetModelChange = () => {
+  if (selectedTargetModel.value) {
+    const safeName = selectedTargetModel.value.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '')
+    datasetName.value = `dataset_${safeName}`
+  }
+}
 
 const handleJsonChange = (e) => {
   const file = e.target.files[0]
@@ -106,7 +140,9 @@ const triggerSync = async () => {
       body: JSON.stringify({
         project_id: targetProjectId.value || null,
         include_bad: true,
-        include_good: true
+        include_good: true,
+        model_id: syncFilterModelId.value ? parseInt(syncFilterModelId.value) : null,
+        endpoint_slug: syncFilterEndpointSlug.value || null
       })
     })
     const data = await res.json()
@@ -121,6 +157,10 @@ const triggerSync = async () => {
     isSyncing.value = false
   }
 }
+
+onMounted(() => {
+  fetchModelsAndEndpoints()
+})
 </script>
 
 <template>
@@ -255,6 +295,17 @@ const triggerSync = async () => {
 
           <form @submit.prevent="submitCvatImport">
             <div class="form-group">
+              <label class="form-label">Tautkan ke Model / Kategori AI (Opsional)</label>
+              <select v-model="selectedTargetModel" @change="onTargetModelChange" class="form-input">
+                <option value="">-- Dataset Mandiri / Kategori Baru --</option>
+                <option v-for="m in models" :key="m.id" :value="m.name">
+                  {{ m.name }} ({{ m.version }})
+                </option>
+              </select>
+              <span class="form-hint">Memilih model akan otomatis merekomendasikan nama folder S3.</span>
+            </div>
+
+            <div class="form-group">
               <label class="form-label">Nama Folder / Dataset</label>
               <input 
                 type="text" 
@@ -357,6 +408,23 @@ const triggerSync = async () => {
           </div>
 
           <div class="sync-action-wrap">
+            <div class="form-row mb-3">
+              <div class="flex-1">
+                <label class="form-label text-xs">Filter Model Feedback</label>
+                <select v-model="syncFilterModelId" class="form-input text-xs">
+                  <option value="">Semua Model</option>
+                  <option v-for="m in models" :key="m.id" :value="m.id">{{ m.name }}</option>
+                </select>
+              </div>
+              <div class="flex-1">
+                <label class="form-label text-xs">Filter Endpoint</label>
+                <select v-model="syncFilterEndpointSlug" class="form-input text-xs">
+                  <option value="">Semua Endpoints</option>
+                  <option v-for="ep in endpoints" :key="ep.id" :value="ep.slug">{{ ep.name }}</option>
+                </select>
+              </div>
+            </div>
+
             <button class="btn btn-secondary btn-block" @click="triggerSync" :disabled="isSyncing">
               <span v-if="isSyncing" class="spinner-sm"></span>
               {{ isSyncing ? 'Mensinkronkan...' : 'Sinkronkan Data Review ke Label Studio' }}

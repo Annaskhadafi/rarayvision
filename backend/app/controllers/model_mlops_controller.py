@@ -12,14 +12,14 @@ from pydantic import BaseModel
 
 try:
     from backend.app.database.database import get_db
-    from backend.app.database.models import MLModel, MLPrediction
+    from backend.app.database.models import MLModel, MLPrediction, MLEndpoint
     from backend.app.services.detection_service import detection_service
     from backend.app.services.s3_service import s3_service
     from backend.app.services.label_studio_service import label_studio_service
     from backend.app.core.config import BASE_DIR
 except ImportError:
     from app.database.database import get_db
-    from app.database.models import MLModel, MLPrediction
+    from app.database.models import MLModel, MLPrediction, MLEndpoint
     from app.services.detection_service import detection_service
     from app.services.s3_service import s3_service
     from app.services.label_studio_service import label_studio_service
@@ -35,6 +35,37 @@ class LabelStudioSyncRequest(BaseModel):
     project_id: Optional[str] = None
     include_good: bool = True
     include_bad: bool = True
+    model_id: Optional[int] = None
+    endpoint_slug: Optional[str] = None
+
+class ModelUpdateRequest(BaseModel):
+    name: Optional[str] = None
+    version: Optional[str] = None
+    task_type: Optional[str] = None
+    framework: Optional[str] = None
+    description: Optional[str] = None
+
+class EndpointCreateRequest(BaseModel):
+    name: str
+    slug: Optional[str] = None
+    description: Optional[str] = None
+    model_id: Optional[int] = None
+    default_conf: float = 0.25
+    default_iou: float = 0.45
+    is_active: bool = True
+
+class EndpointUpdateRequest(BaseModel):
+    name: Optional[str] = None
+    slug: Optional[str] = None
+    description: Optional[str] = None
+    model_id: Optional[int] = None
+    default_conf: Optional[float] = None
+    default_iou: Optional[float] = None
+    is_active: Optional[bool] = None
+
+class EndpointSwitchModelRequest(BaseModel):
+    model_id: int
+
 
 
 # ==========================================
@@ -326,20 +357,77 @@ def activate_model(model_id: int, db: Session = Depends(get_db)):
     return result
 
 
-@router.delete("/{model_id}")
-def delete_model(model_id: int, db: Session = Depends(get_db)):
-    """Delete a model from registry and filesystem."""
+@router.put("/{model_id}")
+def update_model(model_id: int, payload: ModelUpdateRequest, db: Session = Depends(get_db)):
+    """Update model metadata (name, version, framework, description, task_type)."""
     model = db.query(MLModel).filter(MLModel.id == model_id).first()
     if not model:
         raise HTTPException(status_code=404, detail="Model not found")
 
-    if model.is_active:
-        raise HTTPException(status_code=400, detail="Cannot delete the currently active model. Please activate another model first.")
+    if payload.name is not None and payload.name.strip():
+        model.name = payload.name.strip()
+    if payload.version is not None and payload.version.strip():
+        model.version = payload.version.strip()
+    if payload.task_type is not None and payload.task_type.strip():
+        model.task_type = payload.task_type.strip()
+    if payload.framework is not None and payload.framework.strip():
+        model.framework = payload.framework.strip()
+    if payload.description is not None:
+        model.description = payload.description.strip()
 
-    # Remove files
+    db.commit()
+    db.refresh(model)
+
+    detection_service.invalidate_model_cache(model_id)
+
+    return {
+        "success": True,
+        "message": f"Model '{model.name}' berhasil diperbarui.",
+        "model": {
+            "id": model.id,
+            "name": model.name,
+            "version": model.version,
+            "task_type": model.task_type,
+            "framework": model.framework,
+            "description": model.description
+        }
+    }
+
+
+@router.delete("/{model_id}")
+def delete_model(model_id: int, force: bool = False, db: Session = Depends(get_db)):
+    """Delete a model from registry, unlink from endpoints, and clean filesystem."""
+    model = db.query(MLModel).filter(MLModel.id == model_id).first()
+    if not model:
+        raise HTTPException(status_code=404, detail="Model not found")
+
+    # If it is active, check if there are other models available to auto-activate
+    if model.is_active:
+        other_model = db.query(MLModel).filter(MLModel.id != model_id).first()
+        if other_model:
+            detection_service.hot_swap_model(other_model.id, db)
+        elif not force:
+            raise HTTPException(
+                status_code=400,
+                detail="Model ini adalah satu-satunya model aktif di sistem. Harap unggah model pengganti sebelum menghapus."
+            )
+
+    # Decouple endpoints referencing this model
+    endpoints_using = db.query(MLEndpoint).filter(MLEndpoint.model_id == model_id).all()
+    for ep in endpoints_using:
+        ep.model_id = None
+    if endpoints_using:
+        db.commit()
+
+    # Invalidate memory cache
+    detection_service.invalidate_model_cache(model_id)
+
+    # Remove files safely
     try:
-        if os.path.exists(model.model_path):
+        if model.model_path and os.path.exists(model.model_path):
             os.remove(model.model_path)
+        if model.onnx_path and os.path.exists(model.onnx_path):
+            os.remove(model.onnx_path)
         if model.evaluation_dir and os.path.exists(model.evaluation_dir):
             shutil.rmtree(model.evaluation_dir, ignore_errors=True)
     except Exception as e:
@@ -347,7 +435,11 @@ def delete_model(model_id: int, db: Session = Depends(get_db)):
 
     db.delete(model)
     db.commit()
-    return {"success": True, "message": f"Model {model.name} deleted successfully"}
+    return {
+        "success": True, 
+        "message": f"Model '{model.name} ({model.version})' berhasil dihapus.",
+        "unlinked_endpoints": len(endpoints_using)
+    }
 
 
 @router.get("/{model_id}/evaluation")
@@ -389,27 +481,55 @@ def get_model_evaluation(model_id: int, db: Session = Depends(get_db)):
 # ==========================================
 
 @router.get("/analytics/production")
-def get_production_analytics(db: Session = Depends(get_db)):
-    """Get online production statistics: predictions, feedback ratio, and review queue."""
-    total_preds = db.query(MLPrediction).count()
-    good_count = db.query(MLPrediction).filter(MLPrediction.feedback_status == "good").count()
-    bad_count = db.query(MLPrediction).filter(MLPrediction.feedback_status == "bad").count()
-    auto_count = db.query(MLPrediction).filter(MLPrediction.feedback_status == "auto_labeled").count()
-    audit_count = db.query(MLPrediction).filter(MLPrediction.feedback_status == "audit_required").count()
-    pending_count = db.query(MLPrediction).filter(MLPrediction.feedback_status == "pending").count()
+def get_production_analytics(
+    model_id: Optional[int] = Query(None),
+    endpoint_slug: Optional[str] = Query(None),
+    db: Session = Depends(get_db)
+):
+    """Get online production statistics filtered by model or endpoint."""
+    base_q = db.query(MLPrediction)
+    if model_id is not None:
+        base_q = base_q.filter(MLPrediction.model_id == model_id)
+    if endpoint_slug is not None and endpoint_slug.strip():
+        base_q = base_q.filter(MLPrediction.endpoint_slug == endpoint_slug.strip())
 
-    unsynced_review_count = db.query(MLPrediction).filter(
+    total_preds = base_q.count()
+    good_count = base_q.filter(MLPrediction.feedback_status == "good").count()
+    bad_count = base_q.filter(MLPrediction.feedback_status == "bad").count()
+    auto_count = base_q.filter(MLPrediction.feedback_status == "auto_labeled").count()
+    audit_count = base_q.filter(MLPrediction.feedback_status == "audit_required").count()
+    pending_count = base_q.filter(MLPrediction.feedback_status == "pending").count()
+
+    unsynced_review_count = base_q.filter(
         MLPrediction.feedback_status == "bad",
         MLPrediction.is_synced_to_ls == False
     ).count()
 
-    unsynced_auto_count = db.query(MLPrediction).filter(
+    unsynced_auto_count = base_q.filter(
         MLPrediction.feedback_status.in_(["good", "auto_labeled"]),
         MLPrediction.is_synced_to_ls == False
     ).count()
 
     from sqlalchemy import func
-    avg_lat = db.query(func.avg(MLPrediction.latency_ms)).scalar() or 0.0
+    avg_lat = base_q.with_entities(func.avg(MLPrediction.latency_ms)).scalar() or 0.0
+
+    recent_preds = base_q.order_by(MLPrediction.created_at.desc()).limit(12).all()
+    recent_items = []
+    for p in recent_preds:
+        recent_items.append({
+            "id": p.id,
+            "model_id": p.model_id,
+            "model_version": p.model_version,
+            "endpoint_slug": p.endpoint_slug or "default",
+            "original_image_url": p.original_image_url,
+            "annotated_image_url": p.annotated_image_url,
+            "detection_count": p.detection_count,
+            "top_confidence": p.top_confidence,
+            "latency_ms": p.latency_ms,
+            "feedback_status": p.feedback_status,
+            "is_audit_sample": p.is_audit_sample,
+            "created_at": p.created_at.isoformat() if p.created_at else None
+        })
 
     return {
         "total_predictions": total_preds,
@@ -434,6 +554,11 @@ def get_production_analytics(db: Session = Depends(get_db)):
                 "version": detection_service.active_model_version,
                 "classes_count": len(detection_service.active_classes)
             }
+        },
+        "recent_predictions": recent_items,
+        "filter": {
+            "model_id": model_id,
+            "endpoint_slug": endpoint_slug
         }
     }
 
@@ -457,10 +582,15 @@ def sync_to_label_studio(
     if payload.include_good:
         statuses_to_sync.extend(["good", "auto_labeled"])
 
-    items = db.query(MLPrediction).filter(
+    sync_q = db.query(MLPrediction).filter(
         MLPrediction.feedback_status.in_(statuses_to_sync),
         MLPrediction.is_synced_to_ls == False
-    ).limit(200).all()
+    )
+    if payload.model_id:
+        sync_q = sync_q.filter(MLPrediction.model_id == payload.model_id)
+    if payload.endpoint_slug:
+        sync_q = sync_q.filter(MLPrediction.endpoint_slug == payload.endpoint_slug)
+    items = sync_q.limit(200).all()
 
     if not items:
         return {"success": True, "synced_count": 0, "message": "No pending items to sync."}
@@ -636,3 +766,347 @@ async def predict_video_endpoint(
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Gagal memproses video: {str(e)}")
+
+
+# ==========================================
+# 5. Serving Endpoints (Multi-Model API Hub)
+# ==========================================
+
+import re
+
+def slugify(text: str) -> str:
+    s = text.lower().strip()
+    s = re.sub(r'[^a-z0-9]+', '-', s)
+    return s.strip('-') or f"ep-{uuid.uuid4().hex[:6]}"
+
+@router.get("/endpoints")
+def list_endpoints(db: Session = Depends(get_db)):
+    """List all custom serving endpoints with joined model information."""
+    endpoints = db.query(MLEndpoint).order_by(MLEndpoint.created_at.desc()).all()
+    results = []
+    for ep in endpoints:
+        m = db.query(MLModel).filter(MLModel.id == ep.model_id).first() if ep.model_id else None
+        results.append({
+            "id": ep.id,
+            "name": ep.name,
+            "slug": ep.slug,
+            "description": ep.description,
+            "model_id": ep.model_id,
+            "model_name": m.name if m else "(Tidak Ada Model)",
+            "model_version": m.version if m else "-",
+            "model_framework": m.framework if m else "-",
+            "is_active": ep.is_active,
+            "default_conf": ep.default_conf,
+            "default_iou": ep.default_iou,
+            "total_requests": ep.total_requests or 0,
+            "last_accessed_at": ep.last_accessed_at.isoformat() if ep.last_accessed_at else None,
+            "created_at": ep.created_at.isoformat() if ep.created_at else None,
+            "predict_url": f"/api/v1/models/endpoints/{ep.slug}/predict",
+            "predict_video_url": f"/api/v1/models/endpoints/{ep.slug}/predict-video"
+        })
+    return {"endpoints": results}
+
+
+@router.post("/endpoints")
+def create_endpoint(payload: EndpointCreateRequest, db: Session = Depends(get_db)):
+    """Create a new custom serving endpoint assigned to a model."""
+    raw_slug = payload.slug if (payload.slug and payload.slug.strip()) else slugify(payload.name)
+    clean_slug = slugify(raw_slug)
+
+    # Check slug uniqueness
+    existing = db.query(MLEndpoint).filter(MLEndpoint.slug == clean_slug).first()
+    if existing:
+        clean_slug = f"{clean_slug}-{uuid.uuid4().hex[:4]}"
+
+    # Verify model_id if given
+    if payload.model_id:
+        m = db.query(MLModel).filter(MLModel.id == payload.model_id).first()
+        if not m:
+            raise HTTPException(status_code=404, detail=f"Model ID {payload.model_id} tidak ditemukan.")
+
+    new_ep = MLEndpoint(
+        name=payload.name.strip(),
+        slug=clean_slug,
+        description=payload.description.strip() if payload.description else None,
+        model_id=payload.model_id,
+        is_active=payload.is_active,
+        default_conf=payload.default_conf,
+        default_iou=payload.default_iou,
+        total_requests=0
+    )
+    db.add(new_ep)
+    db.commit()
+    db.refresh(new_ep)
+
+    return {
+        "success": True,
+        "message": f"Serving endpoint '{new_ep.name}' berhasil dibuat!",
+        "endpoint": {
+            "id": new_ep.id,
+            "name": new_ep.name,
+            "slug": new_ep.slug,
+            "predict_url": f"/api/v1/models/endpoints/{new_ep.slug}/predict",
+            "model_id": new_ep.model_id
+        }
+    }
+
+
+@router.put("/endpoints/{endpoint_id}")
+def update_endpoint(endpoint_id: int, payload: EndpointUpdateRequest, db: Session = Depends(get_db)):
+    """Update serving endpoint configuration."""
+    ep = db.query(MLEndpoint).filter(MLEndpoint.id == endpoint_id).first()
+    if not ep:
+        raise HTTPException(status_code=404, detail="Endpoint tidak ditemukan")
+
+    if payload.name is not None and payload.name.strip():
+        ep.name = payload.name.strip()
+    if payload.slug is not None and payload.slug.strip():
+        target_slug = slugify(payload.slug)
+        duplicate = db.query(MLEndpoint).filter(MLEndpoint.slug == target_slug, MLEndpoint.id != endpoint_id).first()
+        if duplicate:
+            raise HTTPException(status_code=400, detail="Slug endpoint sudah digunakan.")
+        ep.slug = target_slug
+    if payload.description is not None:
+        ep.description = payload.description.strip()
+    if payload.model_id is not None:
+        m = db.query(MLModel).filter(MLModel.id == payload.model_id).first()
+        if not m:
+            raise HTTPException(status_code=404, detail=f"Model ID {payload.model_id} tidak ditemukan.")
+        ep.model_id = payload.model_id
+    if payload.is_active is not None:
+        ep.is_active = payload.is_active
+    if payload.default_conf is not None:
+        ep.default_conf = payload.default_conf
+    if payload.default_iou is not None:
+        ep.default_iou = payload.default_iou
+
+    db.commit()
+    db.refresh(ep)
+
+    return {
+        "success": True,
+        "message": f"Endpoint '{ep.name}' berhasil diperbarui.",
+        "endpoint": {
+            "id": ep.id,
+            "name": ep.name,
+            "slug": ep.slug,
+            "model_id": ep.model_id,
+            "is_active": ep.is_active
+        }
+    }
+
+
+@router.put("/endpoints/{endpoint_id}/switch-model")
+def switch_endpoint_model(endpoint_id: int, payload: EndpointSwitchModelRequest, db: Session = Depends(get_db)):
+    """
+    Instantly switch the target model connected to this endpoint.
+    Clients calling the endpoint will immediately use the new model without URL change!
+    """
+    ep = db.query(MLEndpoint).filter(MLEndpoint.id == endpoint_id).first()
+    if not ep:
+        raise HTTPException(status_code=404, detail="Endpoint tidak ditemukan")
+
+    target_model = db.query(MLModel).filter(MLModel.id == payload.model_id).first()
+    if not target_model:
+        raise HTTPException(status_code=404, detail=f"Model ID {payload.model_id} tidak ditemukan di registry")
+
+    old_model_id = ep.model_id
+    ep.model_id = target_model.id
+    db.commit()
+    db.refresh(ep)
+
+    return {
+        "success": True,
+        "message": f"Berhasil mengalihkan endpoint '{ep.name}' ke model '{target_model.name} ({target_model.version})'!",
+        "endpoint_slug": ep.slug,
+        "previous_model_id": old_model_id,
+        "current_model": {
+            "id": target_model.id,
+            "name": target_model.name,
+            "version": target_model.version,
+            "framework": target_model.framework
+        }
+    }
+
+
+@router.delete("/endpoints/{endpoint_id}")
+def delete_endpoint(endpoint_id: int, db: Session = Depends(get_db)):
+    """Delete a custom serving endpoint."""
+    ep = db.query(MLEndpoint).filter(MLEndpoint.id == endpoint_id).first()
+    if not ep:
+        raise HTTPException(status_code=404, detail="Endpoint tidak ditemukan")
+
+    name = ep.name
+    db.delete(ep)
+    db.commit()
+    return {"success": True, "message": f"Serving endpoint '{name}' berhasil dihapus."}
+
+
+@router.post("/endpoints/{slug}/predict")
+async def predict_via_endpoint(
+    slug: str,
+    file: Optional[UploadFile] = File(None),
+    image_url: Optional[str] = Form(None),
+    conf_threshold: Optional[float] = Form(None),
+    iou_threshold: Optional[float] = Form(None),
+    db: Session = Depends(get_db)
+):
+    """
+    Run detection inference specifically through the assigned endpoint and its connected model.
+    """
+    ep = db.query(MLEndpoint).filter(MLEndpoint.slug == slug).first()
+    if not ep:
+        raise HTTPException(status_code=404, detail=f"Serving endpoint '{slug}' tidak ditemukan")
+
+    if not ep.is_active:
+        raise HTTPException(status_code=403, detail=f"Serving endpoint '{slug}' sedang dinonaktifkan")
+
+    # Image payload
+    if file:
+        image_bytes = await file.read()
+        filename = file.filename or f"upload_{uuid.uuid4().hex[:8]}.jpg"
+    elif image_url:
+        import requests
+        try:
+            resp = requests.get(image_url, timeout=10)
+            resp.raise_for_status()
+            image_bytes = resp.content
+            filename = os.path.basename(image_url.split("?")[0]) or "remote_image.jpg"
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Gagal mengambil gambar dari URL: {e}")
+    else:
+        raise HTTPException(status_code=400, detail="Wajib menyertakan file gambar atau image_url")
+
+    # Threshold fallback to endpoint defaults
+    c_thresh = conf_threshold if conf_threshold is not None else ep.default_conf
+    i_thresh = iou_threshold if iou_threshold is not None else ep.default_iou
+
+    # Run inference with endpoint's assigned model
+    try:
+        result = detection_service.predict(
+            image_bytes,
+            conf_threshold=c_thresh,
+            iou_threshold=i_thresh,
+            model_id=ep.model_id,
+            db=db
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Inference error pada endpoint '{slug}': {str(e)}")
+
+    pred_id = str(uuid.uuid4())
+    ext = os.path.splitext(filename)[1].lower() or ".jpg"
+    if ext not in [".jpg", ".jpeg", ".png", ".webp"]:
+        ext = ".jpg"
+
+    raw_s3_key = f"datasets/raw/{pred_id}{ext}"
+    orig_url = s3_service.upload_bytes(image_bytes, raw_s3_key, content_type="image/jpeg")
+
+    annotated_s3_key = f"datasets/annotated/{pred_id}.jpg"
+    annotated_url = s3_service.upload_bytes(result["annotated_bytes"], annotated_s3_key, content_type="image/jpeg")
+
+    # Feedback logic with audit sampling
+    import random
+    initial_status = "pending"
+    is_audit = False
+    if result["top_confidence"] >= 0.88 and result["detection_count"] > 0:
+        if random.random() < 0.10:
+            initial_status = "audit_required"
+            is_audit = True
+        else:
+            initial_status = "auto_labeled"
+
+    # Store prediction record in DB with endpoint tag
+    pred_record = MLPrediction(
+        id=pred_id,
+        model_id=result["model_id"],
+        model_version=result["model_version"],
+        endpoint_slug=ep.slug,
+        original_image_url=orig_url,
+        annotated_image_url=annotated_url,
+        detections=json.dumps(result["detections"]),
+        top_confidence=result["top_confidence"],
+        detection_count=result["detection_count"],
+        latency_ms=result["latency_ms"],
+        feedback_status=initial_status,
+        is_audit_sample=is_audit,
+        image_quality=json.dumps(result.get("quality", {})),
+        is_synced_to_ls=False
+    )
+    db.add(pred_record)
+
+    # Update endpoint stats
+    import datetime
+    ep.total_requests = (ep.total_requests or 0) + 1
+    ep.last_accessed_at = datetime.datetime.utcnow()
+
+    db.commit()
+
+    return {
+        "prediction_id": pred_id,
+        "endpoint": {
+            "name": ep.name,
+            "slug": ep.slug
+        },
+        "model_id": result["model_id"],
+        "model_name": result["model_name"],
+        "model_version": result["model_version"],
+        "original_image_url": orig_url,
+        "annotated_image_url": annotated_url,
+        "detections": result["detections"],
+        "detection_count": result["detection_count"],
+        "top_confidence": result["top_confidence"],
+        "latency_ms": result["latency_ms"],
+        "image_width": result["image_width"],
+        "image_height": result["image_height"],
+        "quality": result.get("quality", {}),
+        "feedback_status": initial_status,
+        "is_audit_sample": is_audit
+    }
+
+
+@router.post("/endpoints/{slug}/predict-video")
+async def predict_video_via_endpoint(
+    slug: str,
+    video: UploadFile = File(...),
+    conf_threshold: Optional[float] = Form(None),
+    iou_threshold: Optional[float] = Form(None),
+    db: Session = Depends(get_db)
+):
+    """Run video inference specifically through the assigned endpoint and its connected model."""
+    ep = db.query(MLEndpoint).filter(MLEndpoint.slug == slug).first()
+    if not ep:
+        raise HTTPException(status_code=404, detail=f"Serving endpoint '{slug}' tidak ditemukan")
+
+    if not ep.is_active:
+        raise HTTPException(status_code=403, detail=f"Serving endpoint '{slug}' sedang dinonaktifkan")
+
+    video_bytes = await video.read()
+    if not video_bytes:
+        raise HTTPException(status_code=400, detail="File video kosong")
+
+    c_thresh = conf_threshold if conf_threshold is not None else ep.default_conf
+    i_thresh = iou_threshold if iou_threshold is not None else ep.default_iou
+
+    import asyncio
+    try:
+        result = await asyncio.to_thread(
+            detection_service.predict_video,
+            video_bytes,
+            conf_threshold=c_thresh,
+            iou_threshold=i_thresh,
+            model_id=ep.model_id,
+            db=db
+        )
+        # Update endpoint stats
+        import datetime
+        ep.total_requests = (ep.total_requests or 0) + 1
+        ep.last_accessed_at = datetime.datetime.utcnow()
+        db.commit()
+
+        return {
+            "status": "success",
+            "endpoint": {"name": ep.name, "slug": ep.slug},
+            "data": result
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Gagal memproses video pada endpoint '{slug}': {str(e)}")

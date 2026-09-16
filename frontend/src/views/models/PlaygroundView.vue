@@ -1,10 +1,16 @@
 <script setup>
 import { ref, onMounted, onUnmounted, computed, nextTick } from 'vue'
+import { useRoute } from 'vue-router'
 import { API_BASE_URL } from '../../utils'
 
-// Active Model
+const route = useRoute()
+
+// Models & Endpoints Serving State
 const activeModel = ref(null)
+const models = ref([])
+const endpoints = ref([])
 const isModelLoading = ref(false)
+const selectedTarget = ref('default') // 'default' | 'endpoint:{slug}' | 'model:{id}'
 
 // Source Mode: 'image' | 'video' | 'webcam' (Ultralytics Streamlit style)
 const sourceMode = ref('image')
@@ -43,20 +49,50 @@ let webcamAnimationFrame = null
 let lastDetectionAt = 0
 const BOX_HOLD_MS = 1500
 
-const fetchActiveModel = async () => {
+const fetchModelsAndEndpoints = async () => {
   isModelLoading.value = true
   try {
-    const res = await fetch(`${API_BASE_URL}/api/v1/models`)
-    const data = await res.json()
-    if (res.ok) {
-      activeModel.value = (data.models || []).find(m => m.is_active) || null
+    const [modelsRes, endpointsRes] = await Promise.all([
+      fetch(`${API_BASE_URL}/api/v1/models`),
+      fetch(`${API_BASE_URL}/api/v1/models/endpoints`)
+    ])
+    const modelsData = await modelsRes.json()
+    const endpointsData = await endpointsRes.json()
+
+    if (modelsRes.ok) {
+      models.value = modelsData.models || []
+      activeModel.value = models.value.find(m => m.is_active) || null
+    }
+    if (endpointsRes.ok) {
+      endpoints.value = endpointsData.endpoints || []
+    }
+
+    // Check URL query parameters
+    if (route.query.endpoint) {
+      selectedTarget.value = `endpoint:${route.query.endpoint}`
+    } else if (route.query.model_id) {
+      selectedTarget.value = `model:${route.query.model_id}`
     }
   } catch (err) {
-    console.error('Failed to fetch active model:', err)
+    console.error('Failed to fetch models and endpoints:', err)
   } finally {
     isModelLoading.value = false
   }
 }
+
+const currentTargetLabel = computed(() => {
+  if (selectedTarget.value.startsWith('endpoint:')) {
+    const slug = selectedTarget.value.replace('endpoint:', '')
+    const ep = endpoints.value.find(e => e.slug === slug)
+    return ep ? `Endpoint: ${ep.name} (${ep.model_name})` : `Endpoint: ${slug}`
+  }
+  if (selectedTarget.value.startsWith('model:')) {
+    const id = parseInt(selectedTarget.value.replace('model:', ''))
+    const m = models.value.find(item => item.id === id)
+    return m ? `Model: ${m.name} (${m.version})` : `Model #${id}`
+  }
+  return activeModel.value ? `Model Global: ${activeModel.value.name} (${activeModel.value.version})` : 'Global Active Model'
+})
 
 // -------------------------------------------------------------
 // 1. IMAGE MODE HANDLERS
@@ -103,7 +139,16 @@ const runImagePrediction = async () => {
   formData.append('iou_threshold', iouThreshold.value)
 
   try {
-    const res = await fetch(`${API_BASE_URL}/api/v1/models/predict`, {
+    let targetUrl = `${API_BASE_URL}/api/v1/models/predict`
+    if (selectedTarget.value.startsWith('endpoint:')) {
+      const slug = selectedTarget.value.replace('endpoint:', '')
+      targetUrl = `${API_BASE_URL}/api/v1/models/endpoints/${slug}/predict`
+    } else if (selectedTarget.value.startsWith('model:')) {
+      const mId = selectedTarget.value.replace('model:', '')
+      formData.append('model_id', mId)
+    }
+
+    const res = await fetch(targetUrl, {
       method: 'POST',
       body: formData
     })
@@ -192,7 +237,16 @@ const runVideoPrediction = async () => {
   formData.append('iou_threshold', iouThreshold.value)
 
   try {
-    const res = await fetch(`${API_BASE_URL}/api/v1/models/predict-video`, {
+    let targetVideoUrl = `${API_BASE_URL}/api/v1/models/predict-video`
+    if (selectedTarget.value.startsWith('endpoint:')) {
+      const slug = selectedTarget.value.replace('endpoint:', '')
+      targetVideoUrl = `${API_BASE_URL}/api/v1/models/endpoints/${slug}/predict-video`
+    } else if (selectedTarget.value.startsWith('model:')) {
+      const mId = selectedTarget.value.replace('model:', '')
+      formData.append('model_id', mId)
+    }
+
+    const res = await fetch(targetVideoUrl, {
       method: 'POST',
       body: formData
     })
@@ -276,7 +330,16 @@ const processWebcamFrame = async () => {
       formData.append('conf_threshold', confThreshold.value)
       formData.append('iou_threshold', iouThreshold.value)
 
-      const res = await fetch(`${API_BASE_URL}/api/v1/models/predict`, {
+      let targetCamUrl = `${API_BASE_URL}/api/v1/models/predict`
+      if (selectedTarget.value.startsWith('endpoint:')) {
+        const slug = selectedTarget.value.replace('endpoint:', '')
+        targetCamUrl = `${API_BASE_URL}/api/v1/models/endpoints/${slug}/predict`
+      } else if (selectedTarget.value.startsWith('model:')) {
+        const mId = selectedTarget.value.replace('model:', '')
+        formData.append('model_id', mId)
+      }
+
+      const res = await fetch(targetCamUrl, {
         method: 'POST',
         body: formData
       })
@@ -350,7 +413,7 @@ const getFullUrl = (url) => {
 }
 
 onMounted(() => {
-  fetchActiveModel()
+  fetchModelsAndEndpoints()
 })
 
 onUnmounted(() => {
@@ -369,12 +432,12 @@ onUnmounted(() => {
         </p>
       </div>
 
-      <!-- Active Model Banner -->
+      <!-- Active Target Banner -->
       <div class="active-model-pill">
         <span class="pulse-indicator"></span>
         <div class="model-info-text">
-          <span class="caption">Model Aktif</span>
-          <strong class="name">{{ activeModel ? `${activeModel.name} (${activeModel.version})` : 'YOLO Default' }}</strong>
+          <span class="caption">Target Serving Model</span>
+          <strong class="name">{{ currentTargetLabel }}</strong>
         </div>
       </div>
     </div>
@@ -425,6 +488,25 @@ onUnmounted(() => {
 
         <!-- Ultralytics Hyperparameters Sliders -->
         <h3 class="subsection-title">Pengaturan Model (Model Config)</h3>
+
+        <!-- Model & Endpoint Target Selector -->
+        <div class="control-group">
+          <label class="control-label">Target Model / Serving Endpoint</label>
+          <select v-model="selectedTarget" class="form-input-sm">
+            <option value="default">⭐ Model Aktif Global (Default)</option>
+            <optgroup v-if="endpoints.length > 0" label="🌐 Serving Endpoints (API Hub)">
+              <option v-for="ep in endpoints" :key="'ep-'+ep.id" :value="'endpoint:' + ep.slug">
+                {{ ep.name }} → [{{ ep.model_name }}]
+              </option>
+            </optgroup>
+            <optgroup label="📦 Model Registry (Direct Model)">
+              <option v-for="m in models" :key="'m-'+m.id" :value="'model:' + m.id">
+                {{ m.name }} ({{ m.version }}) - {{ m.framework }}
+              </option>
+            </optgroup>
+          </select>
+          <span class="slider-hint">Pilih endpoint atau versi model spesifik untuk pengujian.</span>
+        </div>
         
         <div class="control-group">
           <div class="slider-header">
@@ -755,6 +837,8 @@ onUnmounted(() => {
 .slider-header { display: flex; justify-content: space-between; margin-bottom: 4px; }
 .control-label { font-size: 0.8rem; font-weight: 600; color: #475569; }
 .slider-val { font-size: 0.8rem; font-weight: 600; color: #2563eb; }
+.form-input-sm { width: 100%; padding: 8px 10px; border-radius: 6px; border: 1px solid #cbd5e1; font-size: 0.825rem; background: white; color: #1e293b; margin-bottom: 4px; }
+.form-input-sm:focus { outline: none; border-color: #2563eb; }
 .slider { width: 100%; accent-color: #2563eb; cursor: pointer; }
 .slider-hint { display: block; font-size: 0.7rem; color: #94a3b8; margin-top: 2px; }
 .dropzone { border: 2px dashed #cbd5e1; border-radius: 8px; padding: 20px 16px; text-align: center; cursor: pointer; background: #f8fafc; transition: all 0.2s; display: flex; flex-direction: column; align-items: center; gap: 8px; margin-bottom: 12px; }
