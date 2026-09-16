@@ -164,7 +164,12 @@ const submitCvatImport = () => {
       const elapsedSec = (now - lastTime) / 1000
       const percent = Math.min(100, Math.round((e.loaded / e.total) * 100))
 
-      if (elapsedSec >= 0.4) {
+      // Always update loaded, total, and percentage immediately on every tick
+      uploadProgress.value.loaded = e.loaded
+      uploadProgress.value.total = e.total
+      uploadProgress.value.percentage = percent
+
+      if (elapsedSec >= 0.3 && e.loaded > lastLoaded) {
         const bytesDiff = e.loaded - lastLoaded
         const speedBps = bytesDiff / (elapsedSec || 1)
         const speedMBps = (speedBps / (1024 * 1024)).toFixed(1)
@@ -183,10 +188,6 @@ const submitCvatImport = () => {
         lastLoaded = e.loaded
         lastTime = now
       }
-
-      uploadProgress.value.loaded = e.loaded
-      uploadProgress.value.total = e.total
-      uploadProgress.value.percentage = percent
 
       if (percent < 100) {
         uploadProgress.value.statusText = `Mengunggah file dataset (${percent}%)...`
@@ -220,7 +221,15 @@ const submitCvatImport = () => {
         const errData = JSON.parse(xhr.responseText)
         errorMessage.value = errData.detail || errData.message || `Server error: HTTP ${xhr.status}`
       } catch (e) {
-        errorMessage.value = `Server error: HTTP ${xhr.status}`
+        if (xhr.status === 413) {
+          errorMessage.value = 'Ukuran file melampaui batas server reverse proxy (HTTP 413 Payload Too Large). Pastikan client_max_body_size pada Dokploy / Traefik / Nginx diatur ke 0 (unlimited).'
+        } else if (xhr.status === 502) {
+          errorMessage.value = 'Backend server sedang down atau restart (HTTP 502 Bad Gateway).'
+        } else if (xhr.status === 504) {
+          errorMessage.value = 'Request timeout (HTTP 504 Gateway Timeout). Pastikan timeout proxy Dokploy diatur lebih panjang.'
+        } else {
+          errorMessage.value = `Server error: HTTP ${xhr.status}`
+        }
       }
     }
   }
@@ -228,7 +237,7 @@ const submitCvatImport = () => {
   xhr.onerror = () => {
     isImporting.value = false
     xhrInstance.value = null
-    errorMessage.value = 'Koneksi jaringan terputus atau backend tidak dapat dijangkau.'
+    errorMessage.value = 'Koneksi jaringan terputus, reverse proxy menolak payload besar (HTTP 413 / Connection Reset), atau backend tidak dapat dijangkau.'
   }
 
   xhr.onabort = () => {
