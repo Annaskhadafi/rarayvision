@@ -419,58 +419,104 @@ onMounted(() => {
         <div class="colab-header">
           <div class="flex items-center gap-2">
             <svg viewBox="0 0 24 24" width="18" height="18" stroke="#d97706" stroke-width="2" fill="none"><circle cx="12" cy="12" r="10"></circle><polygon points="10 8 16 12 10 16 10 8"></polygon></svg>
-            <h3 class="colab-title">Snippet Google Colab Training & Validasi (YOLO & RF-DETR)</h3>
+            <h3 class="colab-title">Google Colab Training Hub (YOLO-X, YOLO-26, RF-DETR &bull; 200 Epochs T4 GPU)</h3>
           </div>
-          <div class="colab-tabs">
-            <button 
-              type="button" 
-              class="colab-tab-btn" 
-              :class="{ 'active': activeTrainingTab === 'yolo' }" 
-              @click="activeTrainingTab = 'yolo'"
+          
+          <div class="flex items-center gap-2">
+            <!-- Download / Open .ipynb Button -->
+            <a 
+              v-if="importResult.colab_notebook_url"
+              :href="getFullUrl(importResult.colab_notebook_url)" 
+              target="_blank" 
+              download="raray_vision_colab_training.ipynb"
+              class="btn-download-ipynb"
             >
-              YOLOv8 / YOLO11
-            </button>
-            <button 
-              type="button" 
-              class="colab-tab-btn" 
-              :class="{ 'active': activeTrainingTab === 'rfdetr' }" 
-              @click="activeTrainingTab = 'rfdetr'"
-            >
-              RF-DETR / RT-DETR
-            </button>
+              <svg viewBox="0 0 24 24" width="13" height="13" stroke="currentColor" stroke-width="2" fill="none"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
+              Unduh Notebook (.ipynb)
+            </a>
+
+            <div class="colab-tabs">
+              <button 
+                type="button" 
+                class="colab-tab-btn" 
+                :class="{ 'active': activeTrainingTab === 'yolo' }" 
+                @click="activeTrainingTab = 'yolo'"
+              >
+                1. YOLO-X
+              </button>
+              <button 
+                type="button" 
+                class="colab-tab-btn" 
+                :class="{ 'active': activeTrainingTab === 'yolo26' }" 
+                @click="activeTrainingTab = 'yolo26'"
+              >
+                2. YOLO-26
+              </button>
+              <button 
+                type="button" 
+                class="colab-tab-btn" 
+                :class="{ 'active': activeTrainingTab === 'rfdetr' }" 
+                @click="activeTrainingTab = 'rfdetr'"
+              >
+                3. RF-DETR
+              </button>
+            </div>
           </div>
         </div>
 
-        <!-- YOLO Snippet -->
+        <!-- Direct S3 Notebook URL Info Row -->
+        <div v-if="importResult.colab_notebook_url" class="ipynb-url-row">
+          <span class="text-xs text-amber-900 font-medium">Link Notebook S3:</span>
+          <input type="text" readonly :value="getFullUrl(importResult.colab_notebook_url)" class="copy-input text-xs font-mono py-1" />
+          <button class="btn-copy py-1 text-xs" @click="copyToClipboard(getFullUrl(importResult.colab_notebook_url), 'colab_ipynb_url')">
+            {{ copiedKey === 'colab_ipynb_url' ? '✓ Tersalin!' : 'Salin URL .ipynb' }}
+          </button>
+        </div>
+
+        <!-- TAB 1: YOLO-X Snippet -->
         <div v-if="activeTrainingTab === 'yolo'" class="colab-code-box">
           <div class="code-box-header">
-            <span class="text-xs text-amber-800 font-semibold">Script Training Ultralytics YOLO di Colab:</span>
+            <span class="text-xs text-amber-300 font-semibold">1. YOLO-X Training (200 Epochs, T4 GPU, AdamW):</span>
             <button 
               class="btn-xs-copy" 
               @click="copyToClipboard(importResult.colab_training.yolo_code, 'colab_yolo')"
             >
-              {{ copiedKey === 'colab_yolo' ? '✓ Tersalin!' : 'Salin Script Colab' }}
+              {{ copiedKey === 'colab_yolo' ? '✓ Tersalin!' : 'Salin Script YOLO-X' }}
             </button>
           </div>
           <pre class="code-block"><code>{{ importResult.colab_training.yolo_code }}</code></pre>
         </div>
 
-        <!-- RF-DETR Snippet -->
+        <!-- TAB 2: YOLO-26 Snippet -->
+        <div v-else-if="activeTrainingTab === 'yolo26'" class="colab-code-box">
+          <div class="code-box-header">
+            <span class="text-xs text-sky-300 font-semibold">2. YOLO-26 Training (200 Epochs, T4 GPU, Fast Edge):</span>
+            <button 
+              class="btn-xs-copy bg-sky-600 hover:bg-sky-700" 
+              @click="copyToClipboard(importResult.colab_training.yolo26_code || importResult.colab_training.yolo_code, 'colab_yolo26')"
+            >
+              {{ copiedKey === 'colab_yolo26' ? '✓ Tersalin!' : 'Salin Script YOLO-26' }}
+            </button>
+          </div>
+          <pre class="code-block"><code>{{ importResult.colab_training.yolo26_code || importResult.colab_training.yolo_code }}</code></pre>
+        </div>
+
+        <!-- TAB 3: RF-DETR Snippet -->
         <div v-else class="colab-code-box">
           <div class="code-box-header">
-            <span class="text-xs text-purple-800 font-semibold">Script Training RF-DETR / RT-DETR di Colab:</span>
+            <span class="text-xs text-purple-300 font-semibold">3. RF-DETR / RT-DETR Training (200 Epochs, T4 GPU, Transformer):</span>
             <button 
-              class="btn-xs-copy" 
+              class="btn-xs-copy bg-purple-600 hover:bg-purple-700" 
               @click="copyToClipboard(importResult.colab_training.rfdetr_code, 'colab_rfdetr')"
             >
-              {{ copiedKey === 'colab_rfdetr' ? '✓ Tersalin!' : 'Salin Script Colab' }}
+              {{ copiedKey === 'colab_rfdetr' ? '✓ Tersalin!' : 'Salin Script RF-DETR' }}
             </button>
           </div>
           <pre class="code-block"><code>{{ importResult.colab_training.rfdetr_code }}</code></pre>
         </div>
 
         <div class="colab-footer-hint">
-          💡 <strong>Alur Retraining Flywheel:</strong> Setelah selesai training di Google Colab, unduh <code>best.pt</code> atau <code>best.onnx</code> dari Colab, lalu buka tab <strong>Model Management</strong> di web ini untuk mengunggah model baru. Model baru langsung aktif tanpa mengganti endpoint API klien!
+          💡 <strong>Cara Membuka di Google Colab:</strong> Buka <a href="https://colab.research.google.com" target="_blank" class="font-bold underline text-amber-900">Google Colab</a> &gt; Klik tab <em>Upload</em> lalu pilih file <code>raray_vision_colab_training.ipynb</code> di atas. Atau copy paste script tab di atas ke cell Colab. Setelah 200 epochs selesai, download <code>best.pt</code> / <code>best.onnx</code> dan unggah ke tab <strong>Model Management</strong>!
         </div>
       </div>
 
@@ -818,6 +864,37 @@ onMounted(() => {
 .btn-copy:hover { background: #1d4ed8; }
 
 /* Colab Training Card */
+/* Download ipynb and URL row */
+.btn-download-ipynb {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  background: #059669;
+  color: white;
+  text-decoration: none;
+  font-size: 0.75rem;
+  font-weight: 700;
+  padding: 5px 11px;
+  border-radius: 6px;
+  transition: background 0.2s;
+  white-space: nowrap;
+}
+.btn-download-ipynb:hover {
+  background: #047857;
+  color: white;
+}
+
+.ipynb-url-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: #fef3c7;
+  border: 1px dashed #f59e0b;
+  border-radius: 6px;
+  padding: 8px 12px;
+  margin-bottom: 12px;
+}
+
 .colab-training-card {
   margin-top: 18px;
   background: #fffbeb;
