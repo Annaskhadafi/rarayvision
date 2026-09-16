@@ -732,12 +732,90 @@ async def import_cvat_dataset(
         tasks_s3_key = f"datasets/{folder_name}/label_studio_tasks.json"
         tasks_url = s3_service.upload_bytes(tasks_json_bytes, tasks_s3_key, content_type="application/json")
 
+        # Save COCO annotations (with S3 image URLs embedded) for RF-DETR & PyTorch COCO Evaluators
+        coco_annotations_s3_key = f"datasets/{folder_name}/annotations_coco.json"
+        coco_s3_bytes = json.dumps(coco_json, indent=2).encode("utf-8")
+        coco_url = s3_service.upload_bytes(coco_s3_bytes, coco_annotations_s3_key, content_type="application/json")
+
+        # Generate YOLO data.yaml configuration file
+        import yaml
+        cat_list = coco_json.get("categories", [])
+        if cat_list:
+            cat_names = [c.get("name") for c in sorted(cat_list, key=lambda x: x.get("id", 0))]
+            yolo_names = {i: name for i, name in enumerate(cat_names)}
+        else:
+            cat_names = ["object"]
+            yolo_names = {0: "object"}
+
+        yolo_yaml_data = {
+            "path": f"./{folder_name}",
+            "train": "images/train",
+            "val": "images/val",
+            "nc": len(cat_names),
+            "names": yolo_names
+        }
+        yolo_yaml_bytes = yaml.dump(yolo_yaml_data, sort_keys=False).encode("utf-8")
+        yolo_yaml_s3_key = f"datasets/{folder_name}/data.yaml"
+        yolo_yaml_url = s3_service.upload_bytes(yolo_yaml_bytes, yolo_yaml_s3_key, content_type="text/yaml")
+
         # Optionally push directly if Label Studio instance is configured
         ls_push_result = None
         if project_id:
             ls_push_result = label_studio_service.push_bulk_tasks(tasks, project_id=project_id)
 
         s3_uri = f"s3://{bucket}/{s3_folder_prefix}/"
+
+        # Ready-to-run Colab code snippet
+        colab_yolo_snippet = f"""# ==========================================
+# 🚀 GOOGLE COLAB TRAINING PIPELINE (YOLOv8 / YOLO11)
+# Dataset: {folder_name}
+# ==========================================
+!pip install -q ultralytics
+
+# 1. Download data.yaml
+!curl -fsSL -o data.yaml "{yolo_yaml_url}"
+
+# 2. Download tasks / annotations
+!curl -fsSL -o dataset_tasks.json "{tasks_url}"
+
+# 3. Train Model
+from ultralytics import YOLO
+
+model = YOLO("yolo11n.pt") # atau yolov8m.pt / rfdetr
+results = model.train(data="data.yaml", epochs=50, imgsz=640)
+
+# 4. Validasi Model
+metrics = model.val()
+print("mAP50-95:", metrics.box.map)
+
+# 5. Export weights untuk diunggah kembali ke Raray Vision
+# Model weights tersimpan di: runs/detect/train/weights/best.pt
+model.export(format="onnx")
+"""
+
+        colab_rfdetr_snippet = f"""# ==========================================
+# 🎯 GOOGLE COLAB TRAINING PIPELINE (RF-DETR / RT-DETR)
+# Dataset: {folder_name}
+# ==========================================
+!pip install -q ultralytics
+
+# 1. Download data.yaml & COCO annotations
+!curl -fsSL -o data.yaml "{yolo_yaml_url}"
+!curl -fsSL -o annotations_coco.json "{coco_url}"
+
+# 2. Train RT-DETR / RF-DETR
+from ultralytics import RTDETR
+
+model = RTDETR("rtdetr-l.pt")
+results = model.train(data="data.yaml", epochs=50, imgsz=640)
+
+# 3. Validasi Model
+metrics = model.val()
+print("Validation Results:", metrics)
+
+# 4. Export ONNX untuk Hot-Swap di Raray Vision
+model.export(format="onnx")
+"""
 
         return {
             "success": True,
@@ -747,9 +825,17 @@ async def import_cvat_dataset(
             "s3_uri": s3_uri,
             "s3_endpoint": endpoint,
             "tasks_json_url": tasks_url,
+            "coco_json_url": coco_url,
+            "yolo_yaml_url": yolo_yaml_url,
             "images_uploaded_count": len(uploaded_files),
             "tasks_created_count": len(tasks),
-            "categories": [c.get("name") for c in coco_json.get("categories", [])],
+            "categories": cat_names,
+            "colab_training": {
+                "data_yaml_url": yolo_yaml_url,
+                "coco_json_url": coco_url,
+                "yolo_code": colab_yolo_snippet,
+                "rfdetr_code": colab_rfdetr_snippet
+            },
             "label_studio_instructions": {
                 "method_1_cloud_storage": {
                     "storage_type": "AWS S3",
@@ -760,7 +846,7 @@ async def import_cvat_dataset(
                 },
                 "method_2_direct_import_url": tasks_url
             },
-            "message": f"Dataset berhasil diunggah ke folder S3 '{folder_name}'. URL dan prefix siap di-copy ke Label Studio."
+            "message": f"Dataset berhasil diunggah ke folder S3 '{folder_name}'. URL untuk Label Studio, YOLO, dan RF-DETR Colab siap digunakan."
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Gagal mengimpor dataset: {str(e)}")

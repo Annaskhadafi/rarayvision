@@ -19,6 +19,7 @@ const isImporting = ref(false)
 const importResult = ref(null)
 const errorMessage = ref('')
 const copiedKey = ref('')
+const activeTrainingTab = ref('yolo')
 
 // Real-time Upload Progress & Zero-Timeout state
 const uploadProgress = ref({
@@ -352,6 +353,36 @@ onMounted(() => {
           </div>
         </div>
 
+        <!-- Field 4: YOLO data.yaml URL (Colab / Local Training) -->
+        <div v-if="importResult.yolo_yaml_url" class="copy-field-item">
+          <div class="field-label-row">
+            <span class="field-title font-semibold text-amber-700">YOLO data.yaml URL (Untuk Google Colab Training)</span>
+            <span v-if="copiedKey === 'yolo_yaml'" class="copied-indicator">✓ Tersalin!</span>
+          </div>
+          <div class="copy-input-group">
+            <input type="text" readonly :value="getFullUrl(importResult.yolo_yaml_url)" class="copy-input text-amber-700 font-mono" />
+            <button class="btn-copy bg-amber-600 hover:bg-amber-700" @click="copyToClipboard(getFullUrl(importResult.yolo_yaml_url), 'yolo_yaml')">
+              <svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+              Salin data.yaml
+            </button>
+          </div>
+        </div>
+
+        <!-- Field 5: COCO Annotations JSON URL (RF-DETR / PyTorch Training) -->
+        <div v-if="importResult.coco_json_url" class="copy-field-item">
+          <div class="field-label-row">
+            <span class="field-title font-semibold text-purple-700">COCO Annotations URL (Untuk RF-DETR Training & Validasi)</span>
+            <span v-if="copiedKey === 'coco_url'" class="copied-indicator">✓ Tersalin!</span>
+          </div>
+          <div class="copy-input-group">
+            <input type="text" readonly :value="getFullUrl(importResult.coco_json_url)" class="copy-input text-purple-700 font-mono" />
+            <button class="btn-copy bg-purple-600 hover:bg-purple-700" @click="copyToClipboard(getFullUrl(importResult.coco_json_url), 'coco_url')">
+              <svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+              Salin COCO URL
+            </button>
+          </div>
+        </div>
+
       </div>
 
       <!-- Quick Setup Guide for Label Studio -->
@@ -380,6 +411,66 @@ onMounted(() => {
               <li>Centang <em>"Treat every bucket object as a source file"</em> lalu klik <strong>Sync Storage</strong>.</li>
             </ol>
           </div>
+        </div>
+      </div>
+
+      <!-- Google Colab Training & Validation Guide Card -->
+      <div v-if="importResult.colab_training" class="colab-training-card">
+        <div class="colab-header">
+          <div class="flex items-center gap-2">
+            <svg viewBox="0 0 24 24" width="18" height="18" stroke="#d97706" stroke-width="2" fill="none"><circle cx="12" cy="12" r="10"></circle><polygon points="10 8 16 12 10 16 10 8"></polygon></svg>
+            <h3 class="colab-title">Snippet Google Colab Training & Validasi (YOLO & RF-DETR)</h3>
+          </div>
+          <div class="colab-tabs">
+            <button 
+              type="button" 
+              class="colab-tab-btn" 
+              :class="{ 'active': activeTrainingTab === 'yolo' }" 
+              @click="activeTrainingTab = 'yolo'"
+            >
+              YOLOv8 / YOLO11
+            </button>
+            <button 
+              type="button" 
+              class="colab-tab-btn" 
+              :class="{ 'active': activeTrainingTab === 'rfdetr' }" 
+              @click="activeTrainingTab = 'rfdetr'"
+            >
+              RF-DETR / RT-DETR
+            </button>
+          </div>
+        </div>
+
+        <!-- YOLO Snippet -->
+        <div v-if="activeTrainingTab === 'yolo'" class="colab-code-box">
+          <div class="code-box-header">
+            <span class="text-xs text-amber-800 font-semibold">Script Training Ultralytics YOLO di Colab:</span>
+            <button 
+              class="btn-xs-copy" 
+              @click="copyToClipboard(importResult.colab_training.yolo_code, 'colab_yolo')"
+            >
+              {{ copiedKey === 'colab_yolo' ? '✓ Tersalin!' : 'Salin Script Colab' }}
+            </button>
+          </div>
+          <pre class="code-block"><code>{{ importResult.colab_training.yolo_code }}</code></pre>
+        </div>
+
+        <!-- RF-DETR Snippet -->
+        <div v-else class="colab-code-box">
+          <div class="code-box-header">
+            <span class="text-xs text-purple-800 font-semibold">Script Training RF-DETR / RT-DETR di Colab:</span>
+            <button 
+              class="btn-xs-copy" 
+              @click="copyToClipboard(importResult.colab_training.rfdetr_code, 'colab_rfdetr')"
+            >
+              {{ copiedKey === 'colab_rfdetr' ? '✓ Tersalin!' : 'Salin Script Colab' }}
+            </button>
+          </div>
+          <pre class="code-block"><code>{{ importResult.colab_training.rfdetr_code }}</code></pre>
+        </div>
+
+        <div class="colab-footer-hint">
+          💡 <strong>Alur Retraining Flywheel:</strong> Setelah selesai training di Google Colab, unduh <code>best.pt</code> atau <code>best.onnx</code> dari Colab, lalu buka tab <strong>Model Management</strong> di web ini untuk mengunggah model baru. Model baru langsung aktif tanpa mengganti endpoint API klien!
         </div>
       </div>
 
@@ -725,6 +816,103 @@ onMounted(() => {
   white-space: nowrap;
 }
 .btn-copy:hover { background: #1d4ed8; }
+
+/* Colab Training Card */
+.colab-training-card {
+  margin-top: 18px;
+  background: #fffbeb;
+  border: 1px solid #fef3c7;
+  border-left: 4px solid #d97706;
+  border-radius: 8px;
+  padding: 16px 20px;
+}
+
+.colab-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12px;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.colab-title {
+  font-size: 0.95rem;
+  font-weight: 700;
+  color: #92400e;
+  margin: 0;
+}
+
+.colab-tabs {
+  display: flex;
+  gap: 6px;
+}
+
+.colab-tab-btn {
+  background: #fef3c7;
+  border: 1px solid #fde68a;
+  color: #92400e;
+  font-size: 0.78rem;
+  font-weight: 600;
+  padding: 4px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.colab-tab-btn.active {
+  background: #d97706;
+  color: white;
+  border-color: #d97706;
+}
+
+.colab-code-box {
+  background: #1e293b;
+  border-radius: 8px;
+  overflow: hidden;
+  margin-top: 8px;
+}
+
+.code-box-header {
+  background: #0f172a;
+  padding: 8px 12px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  border-bottom: 1px solid #334155;
+}
+
+.btn-xs-copy {
+  background: #3b82f6;
+  color: white;
+  border: none;
+  font-size: 0.75rem;
+  font-weight: 600;
+  padding: 3px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.btn-xs-copy:hover { background: #2563eb; }
+
+.code-block {
+  margin: 0;
+  padding: 12px 14px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.78rem;
+  color: #f1f5f9;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 240px;
+  overflow-y: auto;
+}
+
+.colab-footer-hint {
+  font-size: 0.8rem;
+  color: #78350f;
+  margin-top: 10px;
+  line-height: 1.4;
+}
 
 .ls-guide-card {
   background: #f0fdf4;
