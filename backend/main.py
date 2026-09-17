@@ -26,7 +26,7 @@ from pathlib import Path
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import JSONResponse, HTMLResponse, StreamingResponse, FileResponse, Response, RedirectResponse
+from fastapi.responses import JSONResponse, HTMLResponse, StreamingResponse, FileResponse, Response
 from fastapi.openapi.docs import get_swagger_ui_html, get_redoc_html
 from starlette.exceptions import HTTPException as StarletteHTTPException
 import socketio
@@ -138,6 +138,14 @@ def stream_upload_file(filename: str, request: Request):
     Falls back to S3 presigned URL redirect if file is not stored on local disk.
     """
     from urllib.parse import unquote
+
+    cors_origin = request.headers.get("origin") or "*"
+    cors_headers = {
+        "Access-Control-Allow-Origin": cors_origin,
+        "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS",
+        "Access-Control-Allow-Headers": "*",
+        "Vary": "Origin",
+    }
     clean_filename = unquote(filename)
     file_path = os.path.join(uploads_dir, clean_filename)
     if not os.path.exists(file_path):
@@ -178,16 +186,47 @@ def stream_upload_file(filename: str, request: Request):
         print(f"[Uploads] Document DB lookup error: {_e}")
 
     if not os.path.exists(file_path):
-        # Fallback redirect to S3 Cloudhost Object Storage via authorized Presigned URL
+        # Proxy private S3 content through this app so cross-origin consumers such as
+        # Label Studio receive CORS headers instead of following a CORS-less redirect.
         from backend.app.services.s3_service import get_presigned_download_url
+        import requests
+
         presigned_url = (
             get_presigned_download_url(actual_s3_key) or
             get_presigned_download_url(clean_filename) or
             get_presigned_download_url(filename)
         )
         if presigned_url:
-            return RedirectResponse(url=presigned_url, status_code=302)
-        return JSONResponse(status_code=404, content={"status": "error", "message": f"File '{filename}' not found"})
+            try:
+                s3_response = requests.get(presigned_url, stream=True, timeout=(5, 60))
+                if s3_response.ok:
+                    s3_content_type = s3_response.headers.get("content-type", "application/octet-stream")
+                    s3_content_length = s3_response.headers.get("content-length")
+
+                    def iter_s3_content():
+                        try:
+                            for chunk in s3_response.iter_content(chunk_size=1024 * 1024):
+                                if chunk:
+                                    yield chunk
+                        finally:
+                            s3_response.close()
+
+                    stream_headers = {**cors_headers, "Cache-Control": "public, max-age=3600"}
+                    if s3_content_length:
+                        stream_headers["Content-Length"] = s3_content_length
+                    return StreamingResponse(
+                        iter_s3_content(),
+                        media_type=s3_content_type,
+                        headers=stream_headers,
+                    )
+                s3_response.close()
+            except Exception as _s3_error:
+                print(f"[Uploads] S3 proxy error: {_s3_error}")
+        return JSONResponse(
+            status_code=404,
+            content={"status": "error", "message": f"File '{filename}' not found"},
+            headers=cors_headers,
+        )
 
     file_size = os.path.getsize(file_path)
     range_header = request.headers.get("range")
@@ -205,7 +244,7 @@ def stream_upload_file(filename: str, request: Request):
             end = int(end_str) if end_str else file_size - 1
 
             if start >= file_size:
-                return Response(status_code=416, headers={"Content-Range": f"bytes */{file_size}"})
+                return Response(status_code=416, headers={**cors_headers, "Content-Range": f"bytes */{file_size}"})
 
             end = min(end, file_size - 1)
             chunk_size = (end - start) + 1
@@ -223,6 +262,7 @@ def stream_upload_file(filename: str, request: Request):
                         yield data
 
             headers = {
+                **cors_headers,
                 "Content-Range": f"bytes {start}-{end}/{file_size}",
                 "Accept-Ranges": "bytes",
                 "Content-Length": str(chunk_size),
@@ -232,7 +272,7 @@ def stream_upload_file(filename: str, request: Request):
         except Exception as e:
             print(f"[Main] Range streaming fallback error: {e}")
 
-    return FileResponse(file_path, media_type=content_type)
+    return FileResponse(file_path, media_type=content_type, headers=cors_headers)
 
 # Setup CORS
 _raw_origins = os.getenv("ALLOWED_ORIGINS", "")
