@@ -561,6 +561,17 @@ onMounted(() => {
           </div>
           
           <div class="flex items-center gap-2">
+            <!-- 1-Click Open in Google Colab -->
+            <a 
+              href="https://colab.research.google.com/github/Annaskhadafi/rarayvision/blob/main/raray_vision_training_colab.ipynb" 
+              target="_blank" 
+              class="btn-open-colab"
+              title="Buka langsung notebook training di Google Colab via GitHub"
+            >
+              <svg viewBox="0 0 24 24" width="13" height="13" stroke="currentColor" stroke-width="2" fill="none"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path><polyline points="15 3 21 3 21 9"></polyline><line x1="10" y1="14" x2="21" y2="3"></line></svg>
+              Buka di Colab (1-Klik)
+            </a>
+
             <!-- Download / Open .ipynb Button -->
             <a 
               v-if="importResult.colab_notebook_url"
@@ -654,7 +665,12 @@ onMounted(() => {
         </div>
 
         <div class="colab-footer-hint">
-          💡 <strong>Cara Membuka di Google Colab:</strong> Buka <a href="https://colab.research.google.com" target="_blank" class="font-bold underline text-amber-900">Google Colab</a> &gt; Klik tab <em>Upload</em> lalu pilih file <code>raray_vision_colab_training.ipynb</code> di atas. Atau copy paste script tab di atas ke cell Colab. Setelah 200 epochs selesai, download <code>best.pt</code> / <code>best.onnx</code> dan unggah ke tab <strong>Model Management</strong>!
+          💡 <strong>Panduan Menjalankan di Google Colab:</strong>
+          <ul class="mt-1.5 space-y-1 text-xs text-amber-950 list-disc list-inside">
+            <li><strong>Cara 1 (Paling Cepat &amp; Mudah 1-Klik):</strong> Klik tombol oranye <strong>"Buka di Colab (1-Klik)"</strong> di atas. Notebook akan langsung terbuka di Google Colab tanpa perlu download/upload file.</li>
+            <li><strong>Cara 2 (Upload File Notebook .ipynb):</strong> Klik tombol <strong>"Unduh File (.ipynb)"</strong>. Di Google Colab, pilih menu <em>File &gt; Upload notebook</em> lalu pilih file <code>raray_vision_colab_training.ipynb</code> yang berformat JSON (jangan mengunggah file script .py).</li>
+            <li><strong>Cara 3 (Salin Script Manual):</strong> Buka Google Colab baru, klik <code>+ Code</code>, lalu <strong>Paste (Ctrl+V)</strong> script dari tab di atas langsung ke dalam cell Colab, lalu jalankan.</li>
+          </ul>
         </div>
       </div>
 
@@ -1056,6 +1072,44 @@ onMounted(() => {
   font-weight: 700;
   color: #92400e;
   margin: 0;
+}
+
+.btn-open-colab {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  background: #ea580c;
+  color: white;
+  border: 1px solid #c2410c;
+  font-size: 0.78rem;
+  font-weight: 600;
+  padding: 4px 10px;
+  border-radius: 6px;
+  text-decoration: none;
+  transition: all 0.2s;
+}
+.btn-open-colab:hover {
+  background: #c2410c;
+  color: white;
+}
+
+.btn-download-ipynb {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  background: #ffffff;
+  color: #92400e;
+  border: 1px solid #d97706;
+  font-size: 0.78rem;
+  font-weight: 600;
+  padding: 4px 10px;
+  border-radius: 6px;
+  text-decoration: none;
+  transition: all 0.2s;
+}
+.btn-download-ipynb:hover {
+  background: #fef3c7;
+  color: #78350f;
 }
 
 .colab-tabs {
