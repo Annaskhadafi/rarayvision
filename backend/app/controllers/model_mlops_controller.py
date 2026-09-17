@@ -11,7 +11,7 @@ from datetime import datetime
 from typing import Optional, List, Dict, Any
 from urllib.parse import quote, unquote, urlparse
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Query, status, BackgroundTasks
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
 
@@ -94,10 +94,25 @@ def _dataset_image_url(
 
 
 def build_colab_snippets(folder_name: str, yolo_yaml_url: str, tasks_url: str, coco_url: str) -> Dict[str, str]:
-    dataset_setup_script = f"""import os, glob, shutil, requests, yaml
+    dataset_setup_script = f"""import os, glob, shutil, time, requests, yaml
 from concurrent.futures import ThreadPoolExecutor
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+from tqdm import tqdm
 
-# 1. Setup dataset dirs
+# 1. Setup persistent session with retries & connection pooling
+session = requests.Session()
+retries = Retry(
+    total=5,
+    backoff_factor=1.5,
+    status_forcelist=[429, 500, 502, 503, 504],
+    raise_on_status=False
+)
+adapter = HTTPAdapter(max_retries=retries, pool_connections=10, pool_maxsize=10)
+session.mount('https://', adapter)
+session.mount('http://', adapter)
+
+# 2. Setup dataset dirs
 base_dir = os.path.abspath('dataset')
 train_img = os.path.join(base_dir, 'images', 'train')
 val_img = os.path.join(base_dir, 'images', 'val')
@@ -106,41 +121,75 @@ val_lbl = os.path.join(base_dir, 'labels', 'val')
 for p in [train_img, val_img, train_lbl, val_lbl]:
     os.makedirs(p, exist_ok=True)
 
-# 2. Download data.yaml & tasks
-r_yaml = requests.get('{yolo_yaml_url}')
-if r_yaml.status_code == 200:
-    with open('data.yaml', 'wb') as f:
-        f.write(r_yaml.content)
+# 3. Download data.yaml & tasks
+try:
+    r_yaml = session.get('{yolo_yaml_url}', timeout=(10, 60))
+    if r_yaml.status_code == 200:
+        with open('data.yaml', 'wb') as f:
+            f.write(r_yaml.content)
+except Exception as e:
+    print(f'Warning downloading data.yaml: {{e}}')
+
 with open('data.yaml', 'r') as f:
     cfg = yaml.safe_load(f) or {{}}
 raw_names = cfg.get('names', {{0: 'object'}})
-name_to_id = {{str(v).lower(): int(k) for k, v in raw_names.items()}} if isinstance(raw_names, dict) else {{'object': 0}}
+if isinstance(raw_names, dict):
+    name_to_id = {{str(v).lower(): int(k) for k, v in raw_names.items()}}
+elif isinstance(raw_names, list):
+    name_to_id = {{str(v).lower(): i for i, v in enumerate(raw_names)}}
+else:
+    name_to_id = {{'object': 0}}
 
-tasks = requests.get('{tasks_url}').json() if requests.get('{tasks_url}').status_code == 200 else []
+tasks = []
+try:
+    r_tasks = session.get('{tasks_url}', timeout=(15, 90))
+    if r_tasks.status_code == 200:
+        tasks = r_tasks.json()
+except Exception as e:
+    print(f'Warning downloading tasks: {{e}}')
+
+print(f'Loaded {{len(tasks)}} tasks from S3')
 
 def dl_item(idx_item):
     idx, item = idx_item
     img_url = item.get('data', {{}}).get('image', '')
+    if not img_url:
+        return
     fname = item.get('data', {{}}).get('original_filename') or os.path.basename(img_url.split('?')[0]) or f'img_{{idx}}.jpg'
+    if not fname.lower().endswith(('.jpg', '.jpeg', '.png', '.webp', '.bmp')):
+        fname = f'img_{{idx}}.jpg'
     split = 'val' if (len(tasks) > 1 and idx % 5 == 0) else 'train'
-    res = requests.get(img_url, timeout=20)
-    if res.status_code == 200:
-        with open(os.path.join(base_dir, 'images', split, fname), 'wb') as f:
-            f.write(res.content)
-        lines = []
-        for ann in item.get('annotations', [{{}}])[0].get('result', []):
-            v = ann.get('value', {{}})
-            lbls = v.get('rectanglelabels', ['object'])
-            first_lbl = str(lbls[0]).lower() if lbls else 'object'
-            cid = name_to_id.get(first_lbl, 0)
-            xc = (v.get('x', 0) + v.get('width', 0) / 2.0) / 100.0
-            yc = (v.get('y', 0) + v.get('height', 0) / 2.0) / 100.0
-            lines.append(f"{{cid}} {{xc:.6f}} {{yc:.6f}} {{v.get('width',0)/100.0:.6f}} {{v.get('height',0)/100.0:.6f}}")
-        with open(os.path.join(base_dir, 'labels', split, os.path.splitext(fname)[0] + '.txt'), 'w') as lf:
-            lf.write('\\n'.join(lines))
+    dest_img = os.path.join(base_dir, 'images', split, fname)
+    dest_lbl = os.path.join(base_dir, 'labels', split, os.path.splitext(fname)[0] + '.txt')
 
-with ThreadPoolExecutor(max_workers=16) as ex:
-    list(ex.map(dl_item, enumerate(tasks)))
+    for attempt in range(3):
+        try:
+            res = session.get(img_url, timeout=(10, 60), stream=True)
+            if res.status_code == 200:
+                with open(dest_img, 'wb') as f:
+                    for chunk in res.iter_content(chunk_size=65536):
+                        if chunk:
+                            f.write(chunk)
+                lines = []
+                for ann in item.get('annotations', [{{}}])[0].get('result', []):
+                    v = ann.get('value', {{}})
+                    lbls = v.get('rectanglelabels', ['object'])
+                    first_lbl = str(lbls[0]).lower() if lbls else 'object'
+                    cid = name_to_id.get(first_lbl, 0)
+                    xc = (v.get('x', 0) + v.get('width', 0) / 2.0) / 100.0
+                    yc = (v.get('y', 0) + v.get('height', 0) / 2.0) / 100.0
+                    lines.append(f"{{cid}} {{xc:.6f}} {{yc:.6f}} {{v.get('width',0)/100.0:.6f}} {{v.get('height',0)/100.0:.6f}}")
+                with open(dest_lbl, 'w') as lf:
+                    lf.write('\\n'.join(lines))
+                return
+            elif res.status_code == 404:
+                return
+        except Exception:
+            if attempt < 2:
+                time.sleep(1 + attempt)
+
+with ThreadPoolExecutor(max_workers=6) as ex:
+    list(tqdm(ex.map(dl_item, enumerate(tasks)), total=len(tasks)))
 
 # Fallback ensure both train and val have files
 t_imgs = glob.glob(os.path.join(train_img, '*.*'))
@@ -168,7 +217,7 @@ print('Dataset Ready! Train:', len(glob.glob(os.path.join(train_img, '*.*'))), '
 # 🚀 GOOGLE COLAB TRAINING PIPELINE (YOLO-X / YOLO11-X: 200 EPOCHS, T4 GPU)
 # Dataset: {folder_name}
 # ==========================================
-!pip install -q ultralytics pyyaml requests
+!pip install -q ultralytics pyyaml requests tqdm
 
 # 1. Download & Prepare Dataset Locally
 {dataset_setup_script}
@@ -191,7 +240,7 @@ model.export(format="onnx")
 # 🔥 GOOGLE COLAB TRAINING PIPELINE (YOLO-26: 200 EPOCHS, T4 GPU)
 # Dataset: {folder_name}
 # ==========================================
-!pip install -q ultralytics pyyaml requests
+!pip install -q ultralytics pyyaml requests tqdm
 
 # 1. Download & Prepare Dataset Locally
 {dataset_setup_script}
@@ -214,7 +263,7 @@ model.export(format="onnx")
 # 🎯 GOOGLE COLAB TRAINING PIPELINE (RF-DETR / RT-DETR: 200 EPOCHS, T4 GPU)
 # Dataset: {folder_name}
 # ==========================================
-!pip install -q ultralytics pyyaml requests
+!pip install -q ultralytics pyyaml requests tqdm
 
 # 1. Download & Prepare Dataset Locally
 {dataset_setup_script}
@@ -236,6 +285,392 @@ model.export(format="onnx")
         "yolo_code": yolo_code,
         "yolo26_code": yolo26_code,
         "rfdetr_code": rfdetr_code
+    }
+
+
+def generate_colab_notebook_dict(folder_name: str, yolo_yaml_url: str, tasks_url: str, coco_url: str) -> dict:
+    colab_cells = [
+        {
+            "cell_type": "markdown",
+            "metadata": {},
+            "source": [
+                f"# 🚀 Raray Vision MLOps: Automated Model Training & Validation (Google Colab)\n",
+                f"**Dataset:** `{folder_name}`  \n",
+                f"**Target Hardware:** NVIDIA T4 GPU  \n",
+                f"**Epochs:** `200`  \n",
+                f"**Included Models:**\n",
+                f"1. ⚡ **YOLO-X / YOLO11-X** (High-Performance Real-Time Object Detection)\n",
+                f"2. 🔥 **YOLO-26 / Custom Resilient YOLO Variant** (Ultra Fast Edge Architecture)\n",
+                f"3. 🎯 **RF-DETR / RT-DETR** (Real-Time Transformer Object Detection)\n",
+                f"\n",
+                f"---\n",
+                f"Notebook ini otomatis mengunduh dataset yang telah diunggah ke S3 via **Raray Vision Data Studio**, melatih 3 arsitektur model hingga 200 epochs di GPU T4, melakukan validasi, dan mengekspor bobot `.pt` dan `.onnx` yang siap diunggah kembali ke sistem **Raray Vision** tanpa mengganti endpoint API klien!"
+            ]
+        },
+        {
+            "cell_type": "markdown",
+            "metadata": {},
+            "source": [
+                "### 1. Periksa Akselerasi GPU (NVIDIA T4)\n",
+                "Pastikan runtime Google Colab menggunakan **T4 GPU** (`Runtime > Change runtime type > T4 GPU`)."
+            ]
+        },
+        {
+            "cell_type": "code",
+            "execution_count": None,
+            "metadata": {},
+            "outputs": [],
+            "source": [
+                "!nvidia-smi\n",
+                "import torch\n",
+                "print(f'PyTorch Version: {torch.__version__}')\n",
+                "print(f'CUDA Available: {torch.cuda.is_available()}')\n",
+                "if torch.cuda.is_available():\n",
+                "    print(f'Device Name: {torch.cuda.get_device_name(0)}')\n"
+            ]
+        },
+        {
+            "cell_type": "markdown",
+            "metadata": {},
+            "source": [
+                "### 2. Instalasi Dependensi Ultralytics & Tooling"
+            ]
+        },
+        {
+            "cell_type": "code",
+            "execution_count": None,
+            "metadata": {},
+            "outputs": [],
+            "source": [
+                "# Install ultralytics, onnx, and supporting libraries\n",
+                "!pip install -q --upgrade ultralytics onnx onnxruntime onnxsim pyyaml requests tqdm\n",
+                "import ultralytics\n",
+                "ultralytics.checks()\n"
+            ]
+        },
+        {
+            "cell_type": "markdown",
+            "metadata": {},
+            "source": [
+                "### 3. Download Dataset & Konfigurasi dari Raray Vision S3\n",
+                "Download file `data.yaml`, `annotations_coco.json`, dan `label_studio_tasks.json` langsung dari Object Storage S3."
+            ]
+        },
+        {
+            "cell_type": "code",
+            "execution_count": None,
+            "metadata": {},
+            "outputs": [],
+            "source": [
+                "import os, glob, shutil, time, requests, yaml, json\n",
+                "from concurrent.futures import ThreadPoolExecutor\n",
+                "from requests.adapters import HTTPAdapter\n",
+                "from urllib3.util.retry import Retry\n",
+                "from tqdm import tqdm\n",
+                "\n",
+                f"YOLO_YAML_URL = \"{yolo_yaml_url}\"\n",
+                f"COCO_JSON_URL = \"{coco_url}\"\n",
+                f"TASKS_JSON_URL = \"{tasks_url}\"\n",
+                "\n",
+                "# 1. Setup persistent session with retries & connection pooling\n",
+                "session = requests.Session()\n",
+                "retries = Retry(\n",
+                "    total=5,\n",
+                "    backoff_factor=1.5,\n",
+                "    status_forcelist=[429, 500, 502, 503, 504],\n",
+                "    raise_on_status=False\n",
+                ")\n",
+                "adapter = HTTPAdapter(max_retries=retries, pool_connections=10, pool_maxsize=10)\n",
+                "session.mount('https://', adapter)\n",
+                "session.mount('http://', adapter)\n",
+                "\n",
+                "# 2. Setup direktori lokal dataset di Colab\n",
+                "base_dir = os.path.abspath('dataset')\n",
+                "train_img_dir = os.path.join(base_dir, 'images', 'train')\n",
+                "val_img_dir = os.path.join(base_dir, 'images', 'val')\n",
+                "train_lbl_dir = os.path.join(base_dir, 'labels', 'train')\n",
+                "val_lbl_dir = os.path.join(base_dir, 'labels', 'val')\n",
+                "for p in [train_img_dir, val_img_dir, train_lbl_dir, val_lbl_dir]:\n",
+                "    os.makedirs(p, exist_ok=True)\n",
+                "\n",
+                "# 3. Download data.yaml\n",
+                "print('[1/3] Downloading data.yaml...')\n",
+                "try:\n",
+                "    r = session.get(YOLO_YAML_URL, timeout=(10, 60))\n",
+                "    if r.status_code == 200:\n",
+                "        with open('data.yaml', 'wb') as f:\n",
+                "            f.write(r.content)\n",
+                "        print('✓ data.yaml downloaded successfully!')\n",
+                "    else:\n",
+                "        print(f'Warning: HTTP {r.status_code} downloading data.yaml')\n",
+                "except Exception as e:\n",
+                "    print(f'Warning downloading data.yaml: {e}')\n",
+                "\n",
+                "# 4. Download tasks.json\n",
+                "print('[2/3] Downloading dataset annotations...')\n",
+                "tasks = []\n",
+                "try:\n",
+                "    r_tasks = session.get(TASKS_JSON_URL, timeout=(15, 90))\n",
+                "    if r_tasks.status_code == 200:\n",
+                "        tasks = r_tasks.json()\n",
+                "except Exception as e:\n",
+                "    print(f'Warning downloading tasks: {e}')\n",
+                "print(f'✓ Loaded {len(tasks)} tasks from Raray Vision S3!')\n",
+                "\n",
+                "# Load category mapping from data.yaml\n",
+                "with open('data.yaml', 'r') as f:\n",
+                "    data_cfg = yaml.safe_load(f) or {}\n",
+                "raw_names = data_cfg.get('names', {0: 'object'})\n",
+                "if isinstance(raw_names, dict):\n",
+                "    name_to_id = {str(v).lower(): int(k) for k, v in raw_names.items()}\n",
+                "elif isinstance(raw_names, list):\n",
+                "    name_to_id = {str(v).lower(): i for i, v in enumerate(raw_names)}\n",
+                "else:\n",
+                "    name_to_id = {'object': 0}\n",
+                "\n",
+                "# 5. Download & Persiapan Gambar secara Paralel (max 6 workers)\n",
+                "print('[3/3] Downloading dataset images into Colab local disk...')\n",
+                "def download_and_save(item_data):\n",
+                "    idx, item = item_data\n",
+                "    img_url = item.get('data', {}).get('image', '')\n",
+                "    if not img_url:\n",
+                "        return\n",
+                "    fname = item.get('data', {}).get('original_filename') or os.path.basename(img_url.split('?')[0])\n",
+                "    if not fname or not fname.lower().endswith(('.jpg', '.jpeg', '.png', '.webp', '.bmp')):\n",
+                "        fname = f'img_{idx}.jpg'\n",
+                "    split = 'val' if (len(tasks) > 1 and idx % 5 == 0) else 'train'\n",
+                "    dest_img = os.path.join(base_dir, 'images', split, fname)\n",
+                "    dest_lbl = os.path.join(base_dir, 'labels', split, os.path.splitext(fname)[0] + '.txt')\n",
+                "    for attempt in range(3):\n",
+                "        try:\n",
+                "            res = session.get(img_url, timeout=(10, 60), stream=True)\n",
+                "            if res.status_code == 200:\n",
+                "                with open(dest_img, 'wb') as f:\n",
+                "                    for chunk in res.iter_content(chunk_size=65536):\n",
+                "                        if chunk:\n",
+                "                            f.write(chunk)\n",
+                "                lines = []\n",
+                "                anns = item.get('annotations', [{}])[0].get('result', [])\n",
+                "                for ann in anns:\n",
+                "                    val = ann.get('value', {})\n",
+                "                    x_pct = val.get('x', 0) / 100.0\n",
+                "                    y_pct = val.get('y', 0) / 100.0\n",
+                "                    w_pct = val.get('width', 0) / 100.0\n",
+                "                    h_pct = val.get('height', 0) / 100.0\n",
+                "                    lbls = val.get('rectanglelabels', ['object'])\n",
+                "                    first_lbl = str(lbls[0]).lower() if lbls else 'object'\n",
+                "                    cat_id = name_to_id.get(first_lbl, 0)\n",
+                "                    x_center = x_pct + (w_pct / 2.0)\n",
+                "                    y_center = y_pct + (h_pct / 2.0)\n",
+                "                    lines.append(f\"{cat_id} {x_center:.6f} {y_center:.6f} {w_pct:.6f} {h_pct:.6f}\")\n",
+                "                with open(dest_lbl, 'w') as lf:\n",
+                "                    lf.write('\\n'.join(lines))\n",
+                "                return\n",
+                "            elif res.status_code == 404:\n",
+                "                return\n",
+                "        except Exception:\n",
+                "            if attempt < 2:\n",
+                "                time.sleep(1 + attempt)\n",
+                "\n",
+                "with ThreadPoolExecutor(max_workers=6) as ex:\n",
+                "    list(tqdm(ex.map(download_and_save, enumerate(tasks)), total=len(tasks)))\n",
+                "\n",
+                "# Fallback: pastikan train dan val selalu memiliki minimal 1 file gambar & label\n",
+                "train_imgs = glob.glob(os.path.join(train_img_dir, '*.*'))\n",
+                "val_imgs = glob.glob(os.path.join(val_img_dir, '*.*'))\n",
+                "if not val_imgs and train_imgs:\n",
+                "    for f in train_imgs[:max(1, len(train_imgs)//5)]:\n",
+                "        shutil.copy(f, val_img_dir)\n",
+                "        lbl_src = os.path.join(train_lbl_dir, os.path.splitext(os.path.basename(f))[0] + '.txt')\n",
+                "        if os.path.exists(lbl_src):\n",
+                "            shutil.copy(lbl_src, val_lbl_dir)\n",
+                "elif not train_imgs and val_imgs:\n",
+                "    for f in val_imgs:\n",
+                "        shutil.copy(f, train_img_dir)\n",
+                "        lbl_src = os.path.join(val_lbl_dir, os.path.splitext(os.path.basename(f))[0] + '.txt')\n",
+                "        if os.path.exists(lbl_src):\n",
+                "            shutil.copy(lbl_src, train_lbl_dir)\n",
+                "\n",
+                "# Update data.yaml path ke absolute path dataset\n",
+                "data_cfg['path'] = base_dir\n",
+                "data_cfg['train'] = 'images/train'\n",
+                "data_cfg['val'] = 'images/val'\n",
+                "with open('data.yaml', 'w') as f:\n",
+                "    yaml.dump(data_cfg, f, sort_keys=False)\n",
+                "print('✓ Dataset ready! Train:', len(glob.glob(os.path.join(train_img_dir, '*.*'))), '| Val:', len(glob.glob(os.path.join(val_img_dir, '*.*'))))\n",
+                "!cat data.yaml\n"
+            ]
+        },
+        {
+            "cell_type": "markdown",
+            "metadata": {},
+            "source": [
+                "### 4. MODEL 1: Training YOLO-X / YOLO11-X (200 Epochs di T4 GPU)\n",
+                "Menggunakan arsitektur Ultralytics YOLO11x / YOLOv8x dengan optimasi NVIDIA T4."
+            ]
+        },
+        {
+            "cell_type": "code",
+            "execution_count": None,
+            "metadata": {},
+            "outputs": [],
+            "source": [
+                "from ultralytics import YOLO\n",
+                "\n",
+                "print('🚀 START TRAINING YOLO-X (200 EPOCHS)...')\n",
+                "model_yolox = YOLO('yolo11x.pt')\n",
+                "\n",
+                "results_yolox = model_yolox.train(\n",
+                "    data='data.yaml',\n",
+                "    epochs=200,\n",
+                "    imgsz=640,\n",
+                "    batch=16,\n",
+                "    device=0, # GPU 0 (NVIDIA T4)\n",
+                "    workers=4,\n",
+                "    optimizer='AdamW',\n",
+                "    lr0=0.001,\n",
+                "    patience=50,\n",
+                "    save=True,\n",
+                "    project='raray_vision_runs',\n",
+                "    name='yolo_x_200epochs'\n",
+                ")\n",
+                "\n",
+                "print('📊 VALIDASI YOLO-X:')\n",
+                "metrics_yolox = model_yolox.val()\n",
+                "print('mAP50:', metrics_yolox.box.map50)\n",
+                "print('mAP50-95:', metrics_yolox.box.map)\n",
+                "\n",
+                "# Export ke ONNX\n",
+                "model_yolox.export(format='onnx', dynamic=True, simplify=True)\n",
+                "print('✓ YOLO-X weights & ONNX exported!')\n"
+            ]
+        },
+        {
+            "cell_type": "markdown",
+            "metadata": {},
+            "source": [
+                "### 5. MODEL 2: Training YOLO-26 / Custom Variant (200 Epochs di T4 GPU)\n",
+                "Model YOLO dengan optimasi kecepatan inferensi edge."
+            ]
+        },
+        {
+            "cell_type": "code",
+            "execution_count": None,
+            "metadata": {},
+            "outputs": [],
+            "source": [
+                "from ultralytics import YOLO\n",
+                "\n",
+                "print('🔥 START TRAINING YOLO-26 VARIANT (200 EPOCHS)...')\n",
+                "model_yolo26 = YOLO('yolo11m.pt')\n",
+                "\n",
+                "results_yolo26 = model_yolo26.train(\n",
+                "    data='data.yaml',\n",
+                "    epochs=200,\n",
+                "    imgsz=640,\n",
+                "    batch=24,\n",
+                "    device=0,\n",
+                "    workers=4,\n",
+                "    optimizer='SGD',\n",
+                "    lr0=0.01,\n",
+                "    patience=50,\n",
+                "    save=True,\n",
+                "    project='raray_vision_runs',\n",
+                "    name='yolo_26_200epochs'\n",
+                ")\n",
+                "\n",
+                "print('📊 VALIDASI YOLO-26:')\n",
+                "metrics_yolo26 = model_yolo26.val()\n",
+                "print('mAP50:', metrics_yolo26.box.map50)\n",
+                "print('mAP50-95:', metrics_yolo26.box.map)\n",
+                "\n",
+                "# Export ke ONNX\n",
+                "model_yolo26.export(format='onnx', dynamic=True, simplify=True)\n",
+                "print('✓ YOLO-26 weights & ONNX exported!')\n"
+            ]
+        },
+        {
+            "cell_type": "markdown",
+            "metadata": {},
+            "source": [
+                "### 6. MODEL 3: Training RF-DETR / RT-DETR Transformer (200 Epochs di T4 GPU)\n",
+                "Arsitektur Real-Time DEtection TRansformer untuk akurasi state-of-the-art."
+            ]
+        },
+        {
+            "cell_type": "code",
+            "execution_count": None,
+            "metadata": {},
+            "outputs": [],
+            "source": [
+                "from ultralytics import RTDETR\n",
+                "\n",
+                "print('🎯 START TRAINING RF-DETR / RT-DETR (200 EPOCHS)...')\n",
+                "model_rfdetr = RTDETR('rtdetr-l.pt')\n",
+                "\n",
+                "results_rfdetr = model_rfdetr.train(\n",
+                "    data='data.yaml',\n",
+                "    epochs=200,\n",
+                "    imgsz=640,\n",
+                "    batch=12,\n",
+                "    device=0,\n",
+                "    workers=4,\n",
+                "    optimizer='AdamW',\n",
+                "    lr0=0.0001,\n",
+                "    patience=50,\n",
+                "    save=True,\n",
+                "    project='raray_vision_runs',\n",
+                "    name='rfdetr_200epochs'\n",
+                ")\n",
+                "\n",
+                "print('📊 VALIDASI RF-DETR:')\n",
+                "metrics_rfdetr = model_rfdetr.val()\n",
+                "print('Validation Results:', metrics_rfdetr)\n",
+                "\n",
+                "# Export ke ONNX\n",
+                "model_rfdetr.export(format='onnx', dynamic=True, simplify=True)\n",
+                "print('✓ RF-DETR weights & ONNX exported!')\n"
+            ]
+        },
+        {
+            "cell_type": "markdown",
+            "metadata": {},
+            "source": [
+                "### 7. Hasil Bobot & Panduan Integrasi ke Raray Vision\n",
+                "Setelah training selesai, file model hasil export berada di folder `raray_vision_runs/`. Anda dapat langsung mengunduh file `.pt` atau `.onnx` dan mengunggahnya ke menu **Model Management** di Raray Vision!"
+            ]
+        },
+        {
+            "cell_type": "code",
+            "execution_count": None,
+            "metadata": {},
+            "outputs": [],
+            "source": [
+                "import glob, os\n",
+                "print('Daftar file model yang dihasilkan:')\n",
+                "exported_files = glob.glob('raray_vision_runs/**/*.pt', recursive=True) + glob.glob('raray_vision_runs/**/*.onnx', recursive=True)\n",
+                "for f in exported_files:\n",
+                "    sz = os.path.getsize(f) / (1024 * 1024)\n",
+                "    print(f'  - {f} ({sz:.2f} MB)')\n",
+                "print('\\n💡 Unggah file best.pt dan best.onnx ke Model Management di web Raray Vision!')\n"
+            ]
+        }
+    ]
+
+    return {
+        "cells": colab_cells,
+        "metadata": {
+            "accelerator": "GPU",
+            "colab": {
+                "gpuType": "T4",
+                "provenance": []
+            },
+            "language_info": {
+                "name": "python"
+            }
+        },
+        "nbformat": 4,
+        "nbformat_minor": 0
     }
 
 
@@ -1001,354 +1436,12 @@ async def import_cvat_dataset(
         s3_uri = f"s3://{bucket}/{s3_folder_prefix}/"
 
         # Build Interactive .ipynb Notebook for Google Colab (YOLO-X, YOLO-26, RF-DETR, 200 Epochs, T4 GPU)
-        colab_cells = [
-            {
-                "cell_type": "markdown",
-                "metadata": {},
-                "source": [
-                    f"# 🚀 Raray Vision MLOps: Automated Model Training & Validation (Google Colab)\n",
-                    f"**Dataset:** `{folder_name}`  \n",
-                    f"**Target Hardware:** NVIDIA T4 GPU  \n",
-                    f"**Epochs:** `200`  \n",
-                    f"**Included Models:**\n",
-                    f"1. ⚡ **YOLO-X / YOLO11-X** (High-Performance Real-Time Object Detection)\n",
-                    f"2. 🔥 **YOLO-26 / Custom Resilient YOLO Variant** (Ultra Fast Edge Architecture)\n",
-                    f"3. 🎯 **RF-DETR / RT-DETR** (Real-Time Transformer Object Detection)\n",
-                    f"\n",
-                    f"---\n",
-                    f"Notebook ini otomatis mengunduh dataset yang telah diunggah ke S3 via **Raray Vision Data Studio**, melatih 3 arsitektur model hingga 200 epochs di GPU T4, melakukan validasi, dan mengekspor bobot `.pt` dan `.onnx` yang siap diunggah kembali ke sistem **Raray Vision** tanpa mengganti endpoint API klien!"
-                ]
-            },
-            {
-                "cell_type": "markdown",
-                "metadata": {},
-                "source": [
-                    "### 1. Periksa Akselerasi GPU (NVIDIA T4)\n",
-                    "Pastikan runtime Google Colab menggunakan **T4 GPU** (`Runtime > Change runtime type > T4 GPU`)."
-                ]
-            },
-            {
-                "cell_type": "code",
-                "execution_count": None,
-                "metadata": {},
-                "outputs": [],
-                "source": [
-                    "!nvidia-smi\n",
-                    "import torch\n",
-                    "print(f'PyTorch Version: {torch.__version__}')\n",
-                    "print(f'CUDA Available: {torch.cuda.is_available()}')\n",
-                    "if torch.cuda.is_available():\n",
-                    "    print(f'Device Name: {torch.cuda.get_device_name(0)}')\n"
-                ]
-            },
-            {
-                "cell_type": "markdown",
-                "metadata": {},
-                "source": [
-                    "### 2. Instalasi Dependensi Ultralytics & Tooling"
-                ]
-            },
-            {
-                "cell_type": "code",
-                "execution_count": None,
-                "metadata": {},
-                "outputs": [],
-                "source": [
-                    "# Install ultralytics, onnx, and supporting libraries\n",
-                    "!pip install -q --upgrade ultralytics onnx onnxruntime onnxsim pyyaml requests tqdm\n",
-                    "import ultralytics\n",
-                    "ultralytics.checks()\n"
-                ]
-            },
-            {
-                "cell_type": "markdown",
-                "metadata": {},
-                "source": [
-                    "### 3. Download Dataset & Konfigurasi dari Raray Vision S3\n",
-                    "Download file `data.yaml`, `annotations_coco.json`, dan `label_studio_tasks.json` langsung dari Object Storage S3."
-                ]
-            },
-            {
-                "cell_type": "code",
-                "execution_count": None,
-                "metadata": {},
-                "outputs": [],
-                "source": [
-                    "import os, requests, yaml, json\n",
-                    "from concurrent.futures import ThreadPoolExecutor\n",
-                    "from tqdm import tqdm\n",
-                    "\n",
-                    f"YOLO_YAML_URL = \"{yolo_yaml_url}\"\n",
-                    f"COCO_JSON_URL = \"{coco_url}\"\n",
-                    f"TASKS_JSON_URL = \"{tasks_url}\"\n",
-                    "\n",
-                    "# Setup direktori lokal dataset di Colab\n",
-                    "base_dir = os.path.abspath('dataset')\n",
-                    "train_img_dir = os.path.join(base_dir, 'images', 'train')\n",
-                    "val_img_dir = os.path.join(base_dir, 'images', 'val')\n",
-                    "train_lbl_dir = os.path.join(base_dir, 'labels', 'train')\n",
-                    "val_lbl_dir = os.path.join(base_dir, 'labels', 'val')\n",
-                    "for p in [train_img_dir, val_img_dir, train_lbl_dir, val_lbl_dir]:\n",
-                    "    os.makedirs(p, exist_ok=True)\n",
-                    "\n",
-                    "# 1. Download data.yaml\n",
-                    "print('[1/3] Downloading data.yaml...')\n",
-                    "r = requests.get(YOLO_YAML_URL)\n",
-                    "if r.status_code == 200:\n",
-                    "    with open('data.yaml', 'wb') as f:\n",
-                    "        f.write(r.content)\n",
-                    "    print('✓ data.yaml downloaded successfully!')\n",
-                    "\n",
-                    "# 2. Download tasks.json\n",
-                    "print('[2/3] Downloading tasks.json...')\n",
-                    "r_tasks = requests.get(TASKS_JSON_URL)\n",
-                    "tasks = r_tasks.json() if r_tasks.status_code == 200 else []\n",
-                    "print(f'✓ Loaded {len(tasks)} tasks from Raray Vision S3!')\n",
-                    "\n",
-                    "# Load category mapping from data.yaml\n",
-                    "with open('data.yaml', 'r') as f:\n",
-                    "    data_cfg = yaml.safe_load(f) or {}\n",
-                    "raw_names = data_cfg.get('names', {0: 'object'})\n",
-                    "if isinstance(raw_names, dict):\n",
-                    "    name_to_id = {str(v).lower(): int(k) for k, v in raw_names.items()}\n",
-                    "elif isinstance(raw_names, list):\n",
-                    "    name_to_id = {str(v).lower(): i for i, v in enumerate(raw_names)}\n",
-                    "else:\n",
-                    "    name_to_id = {'object': 0}\n",
-                    "\n",
-                    "# 3. Download & Persiapan Gambar secara Paralel (80% train, 20% val)\n",
-                    "print('[3/3] Downloading dataset images into Colab local disk...')\n",
-                    "def download_and_save(task_idx, item):\n",
-                    "    img_url = item.get('data', {}).get('image', '')\n",
-                    "    fname = item.get('data', {}).get('original_filename') or os.path.basename(img_url.split('?')[0])\n",
-                    "    if not fname or not fname.lower().endswith(('.jpg', '.jpeg', '.png', '.webp')):\n",
-                    "        fname = f'img_{task_idx}.jpg'\n",
-                    "    split = 'val' if (len(tasks) > 1 and task_idx % 5 == 0) else 'train'\n",
-                    "    dest_img = os.path.join(base_dir, 'images', split, fname)\n",
-                    "    dest_lbl = os.path.join(base_dir, 'labels', split, os.path.splitext(fname)[0] + '.txt')\n",
-                    "    try:\n",
-                    "        res = requests.get(img_url, timeout=20)\n",
-                    "        if res.status_code == 200:\n",
-                    "            with open(dest_img, 'wb') as f:\n",
-                    "                f.write(res.content)\n",
-                    "            lines = []\n",
-                    "            anns = item.get('annotations', [{}])[0].get('result', [])\n",
-                    "            for ann in anns:\n",
-                    "                val = ann.get('value', {})\n",
-                    "                x_pct = val.get('x', 0) / 100.0\n",
-                    "                y_pct = val.get('y', 0) / 100.0\n",
-                    "                w_pct = val.get('width', 0) / 100.0\n",
-                    "                h_pct = val.get('height', 0) / 100.0\n",
-                    "                lbls = val.get('rectanglelabels', ['object'])\n",
-                    "                first_lbl = str(lbls[0]).lower() if lbls else 'object'\n",
-                    "                cat_id = name_to_id.get(first_lbl, 0)\n",
-                    "                x_center = x_pct + (w_pct / 2.0)\n",
-                    "                y_center = y_pct + (h_pct / 2.0)\n",
-                    "                lines.append(f\"{cat_id} {x_center:.6f} {y_center:.6f} {w_pct:.6f} {h_pct:.6f}\")\n",
-                    "            with open(dest_lbl, 'w') as lf:\n",
-                    "                lf.write('\\n'.join(lines))\n",
-                    "    except Exception:\n",
-                    "        pass\n",
-                    "\n",
-                    "with ThreadPoolExecutor(max_workers=16) as ex:\n",
-                    "    list(tqdm(ex.map(lambda x: download_and_save(x[0], x[1]), enumerate(tasks)), total=len(tasks)))\n",
-                    "\n",
-                    "# Fallback: pastikan train dan val selalu memiliki minimal 1 file gambar & label\n",
-                    "import glob, shutil\n",
-                    "train_imgs = glob.glob(os.path.join(train_img_dir, '*.*'))\n",
-                    "val_imgs = glob.glob(os.path.join(val_img_dir, '*.*'))\n",
-                    "if not val_imgs and train_imgs:\n",
-                    "    for f in train_imgs[:max(1, len(train_imgs)//5)]:\n",
-                    "        shutil.copy(f, val_img_dir)\n",
-                    "        lbl_src = os.path.join(train_lbl_dir, os.path.splitext(os.path.basename(f))[0] + '.txt')\n",
-                    "        if os.path.exists(lbl_src):\n",
-                    "            shutil.copy(lbl_src, val_lbl_dir)\n",
-                    "elif not train_imgs and val_imgs:\n",
-                    "    for f in val_imgs:\n",
-                    "        shutil.copy(f, train_img_dir)\n",
-                    "        lbl_src = os.path.join(val_lbl_dir, os.path.splitext(os.path.basename(f))[0] + '.txt')\n",
-                    "        if os.path.exists(lbl_src):\n",
-                    "            shutil.copy(lbl_src, train_lbl_dir)\n",
-                    "\n",
-                    "# Update data.yaml path\n",
-                    "data_cfg['path'] = base_dir\n",
-                    "data_cfg['train'] = 'images/train'\n",
-                    "data_cfg['val'] = 'images/val'\n",
-                    "with open('data.yaml', 'w') as f:\n",
-                    "    yaml.dump(data_cfg, f, sort_keys=False)\n",
-                    "print('✓ Dataset ready! Train:', len(glob.glob(os.path.join(train_img_dir, '*.*'))), '| Val:', len(glob.glob(os.path.join(val_img_dir, '*.*'))))\n",
-                    "!cat data.yaml\n"
-                ]
-            },
-            {
-                "cell_type": "markdown",
-                "metadata": {},
-                "source": [
-                    "### 4. MODEL 1: Training YOLO-X / YOLO11-X (200 Epochs di T4 GPU)\n",
-                    "Menggunakan arsitektur Ultralytics YOLO11x / YOLOv8x dengan optimasi NVIDIA T4."
-                ]
-            },
-            {
-                "cell_type": "code",
-                "execution_count": None,
-                "metadata": {},
-                "outputs": [],
-                "source": [
-                    "from ultralytics import YOLO\n",
-                    "\n",
-                    "print('🚀 START TRAINING YOLO-X (200 EPOCHS)...')\n",
-                    "model_yolox = YOLO('yolo11x.pt')\n",
-                    "\n",
-                    "results_yolox = model_yolox.train(\n",
-                    "    data='data.yaml',\n",
-                    "    epochs=200,\n",
-                    "    imgsz=640,\n",
-                    "    batch=16,\n",
-                    "    device=0, # GPU 0 (NVIDIA T4)\n",
-                    "    workers=4,\n",
-                    "    optimizer='AdamW',\n",
-                    "    lr0=0.001,\n",
-                    "    patience=50,\n",
-                    "    save=True,\n",
-                    "    project='raray_vision_runs',\n",
-                    "    name='yolo_x_200epochs'\n",
-                    ")\n",
-                    "\n",
-                    "print('📊 VALIDASI YOLO-X:')\n",
-                    "metrics_yolox = model_yolox.val()\n",
-                    "print('mAP50:', metrics_yolox.box.map50)\n",
-                    "print('mAP50-95:', metrics_yolox.box.map)\n",
-                    "\n",
-                    "# Export ke ONNX\n",
-                    "model_yolox.export(format='onnx', dynamic=True, simplify=True)\n",
-                    "print('✓ YOLO-X weights & ONNX exported!')\n"
-                ]
-            },
-            {
-                "cell_type": "markdown",
-                "metadata": {},
-                "source": [
-                    "### 5. MODEL 2: Training YOLO-26 / Custom Variant (200 Epochs di T4 GPU)\n",
-                    "Model YOLO dengan optimasi kecepatan inferensi edge."
-                ]
-            },
-            {
-                "cell_type": "code",
-                "execution_count": None,
-                "metadata": {},
-                "outputs": [],
-                "source": [
-                    "print('🔥 START TRAINING YOLO-26 VARIANT (200 EPOCHS)...')\n",
-                    "model_yolo26 = YOLO('yolo11m.pt')\n",
-                    "\n",
-                    "results_yolo26 = model_yolo26.train(\n",
-                    "    data='data.yaml',\n",
-                    "    epochs=200,\n",
-                    "    imgsz=640,\n",
-                    "    batch=24,\n",
-                    "    device=0,\n",
-                    "    workers=4,\n",
-                    "    optimizer='SGD',\n",
-                    "    lr0=0.01,\n",
-                    "    patience=50,\n",
-                    "    save=True,\n",
-                    "    project='raray_vision_runs',\n",
-                    "    name='yolo_26_200epochs'\n",
-                    ")\n",
-                    "\n",
-                    "print('📊 VALIDASI YOLO-26:')\n",
-                    "metrics_yolo26 = model_yolo26.val()\n",
-                    "print('mAP50:', metrics_yolo26.box.map50)\n",
-                    "print('mAP50-95:', metrics_yolo26.box.map)\n",
-                    "\n",
-                    "# Export ke ONNX\n",
-                    "model_yolo26.export(format='onnx', dynamic=True, simplify=True)\n",
-                    "print('✓ YOLO-26 weights & ONNX exported!')\n"
-                ]
-            },
-            {
-                "cell_type": "markdown",
-                "metadata": {},
-                "source": [
-                    "### 6. MODEL 3: Training RF-DETR / RT-DETR Transformer (200 Epochs di T4 GPU)\n",
-                    "Model transformer object detector (Real-Time DEtection TRansformer)."
-                ]
-            },
-            {
-                "cell_type": "code",
-                "execution_count": None,
-                "metadata": {},
-                "outputs": [],
-                "source": [
-                    "from ultralytics import RTDETR\n",
-                    "\n",
-                    "print('🎯 START TRAINING RF-DETR / RT-DETR (200 EPOCHS)...')\n",
-                    "model_rfdetr = RTDETR('rtdetr-l.pt')\n",
-                    "\n",
-                    "results_rfdetr = model_rfdetr.train(\n",
-                    "    data='data.yaml',\n",
-                    "    epochs=200,\n",
-                    "    imgsz=640,\n",
-                    "    batch=12,\n",
-                    "    device=0,\n",
-                    "    workers=4,\n",
-                    "    optimizer='AdamW',\n",
-                    "    lr0=0.0001,\n",
-                    "    patience=50,\n",
-                    "    save=True,\n",
-                    "    project='raray_vision_runs',\n",
-                    "    name='rfdetr_200epochs'\n",
-                    ")\n",
-                    "\n",
-                    "print('📊 VALIDASI RF-DETR:')\n",
-                    "metrics_rfdetr = model_rfdetr.val()\n",
-                    "print('mAP50:', metrics_rfdetr.box.map50)\n",
-                    "print('mAP50-95:', metrics_rfdetr.box.map)\n",
-                    "\n",
-                    "# Export ke ONNX\n",
-                    "model_rfdetr.export(format='onnx', dynamic=True, simplify=True)\n",
-                    "print('✓ RF-DETR weights & ONNX exported!')\n"
-                ]
-            },
-            {
-                "cell_type": "markdown",
-                "metadata": {},
-                "source": [
-                    "### 7. Ringkasan & Download Bobot Model (.pt & .onnx)"
-                ]
-            },
-            {
-                "cell_type": "code",
-                "execution_count": None,
-                "metadata": {},
-                "outputs": [],
-                "source": [
-                    "import glob, os\n",
-                    "print('📁 DAFTAR BOBOT MODEL SIAP UNGGAH KE RARAY VISION:')\n",
-                    "for f in glob.glob('raray_vision_runs/**/weights/best.*', recursive=True):\n",
-                    "    sz = os.path.getsize(f) / (1024 * 1024)\n",
-                    "    print(f'  - {f} ({sz:.2f} MB)')\n",
-                    "print('\n💡 Unggah file best.pt dan best.onnx ke Model Management di web Raray Vision!')\n"
-                ]
-            }
-        ]
-
-        colab_nb_dict = {
-            "cells": colab_cells,
-            "metadata": {
-                "accelerator": "GPU",
-                "colab": {
-                    "gpuType": "T4",
-                    "provenance": []
-                },
-                "language_info": {
-                    "name": "python"
-                }
-            },
-            "nbformat": 4,
-            "nbformat_minor": 0
-        }
-
+        colab_nb_dict = generate_colab_notebook_dict(
+            folder_name=folder_name,
+            yolo_yaml_url=yolo_yaml_url,
+            tasks_url=tasks_url,
+            coco_url=coco_url
+        )
         colab_nb_bytes = json.dumps(colab_nb_dict, indent=2).encode("utf-8")
         colab_nb_s3_key = f"datasets/{folder_name}/raray_vision_colab_training.ipynb"
         colab_nb_url = _stable_dataset_url(s3_service.upload_bytes(colab_nb_bytes, colab_nb_s3_key, content_type="application/x-ipynb+json"))
@@ -1544,7 +1637,8 @@ def _dataset_payload(dataset: MLDataset, include_images: bool = False):
     yolo_yaml_url = artifacts.get("yolo_yaml_url")
     tasks_url = artifacts.get("tasks_json_url") or artifacts["label_studio_import_url"]
     coco_json_url = artifacts.get("coco_json_url")
-    colab_nb_url = artifacts.get("colab_notebook_url")
+    colab_nb_url = f"/api/v1/models/data/datasets/{dataset.id}/colab-notebook.ipynb"
+    artifacts["colab_notebook_url"] = colab_nb_url
 
     if yolo_yaml_url:
         fresh_snippets = build_colab_snippets(
@@ -1619,6 +1713,45 @@ def get_label_studio_tasks(dataset_id: str, db: Session = Depends(get_db)):
                 task["data"].get("original_filename"),
             )
     return tasks
+
+
+@router.get("/data/datasets/{dataset_id}/colab-notebook.ipynb")
+def get_dataset_colab_notebook(dataset_id: str, db: Session = Depends(get_db)):
+    dataset = db.query(MLDataset).filter(MLDataset.id == dataset_id).first()
+    if not dataset:
+        raise HTTPException(status_code=404, detail="Dataset tidak ditemukan.")
+    artifacts = json.loads(dataset.artifacts or "{}")
+    endpoint, bucket, _, _, _, _ = get_s3_credentials()
+
+    def refresh_url(value):
+        if not isinstance(value, str) or not value.startswith(f"{endpoint.rstrip('/')}/{bucket}/"):
+            return value
+        return get_storage_proxy_url(value) or value
+
+    for key, value in list(artifacts.items()):
+        if key.endswith("_url"):
+            artifacts[key] = _stable_dataset_url(refresh_url(value))
+
+    yolo_yaml_url = artifacts.get("yolo_yaml_url") or ""
+    tasks_url = artifacts.get("tasks_json_url") or _dataset_import_url(dataset.id)
+    coco_json_url = artifacts.get("coco_json_url") or ""
+
+    colab_nb = generate_colab_notebook_dict(
+        folder_name=dataset.folder,
+        yolo_yaml_url=yolo_yaml_url,
+        tasks_url=tasks_url,
+        coco_url=coco_json_url
+    )
+    content = json.dumps(colab_nb, indent=2)
+    filename = f"raray_vision_{dataset.folder}_colab.ipynb"
+    return Response(
+        content=content,
+        media_type="application/x-ipynb+json",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Cache-Control": "no-cache, no-store, must-revalidate"
+        }
+    )
 
 
 @router.get("/data/datasets")
