@@ -92,25 +92,6 @@ def get_presigned_download_url(filename: str, expires_in: int = 3600) -> Optiona
     if not access_key or not secret_key:
         return None
 
-
-def get_storage_proxy_url(filename: str) -> Optional[str]:
-    """Return a stable application URL for a private S3 object."""
-    endpoint, bucket, _, _, _, _ = get_s3_credentials()
-    if not filename or not endpoint or not bucket:
-        return None
-
-    clean_name = filename.lstrip("/")
-    if clean_name.startswith(("http://", "https://")):
-        parsed = urlparse(clean_name)
-        if parsed.netloc != urlparse(endpoint).netloc:
-            return None
-        clean_name = unquote(parsed.path).lstrip("/")
-    if clean_name.startswith(f"{bucket}/"):
-        clean_name = clean_name[len(bucket) + 1:]
-    if not clean_name:
-        return None
-    return f"/api/v1/uploads/{clean_name}"
-
     try:
         import boto3
         from botocore.client import Config
@@ -147,6 +128,25 @@ def get_storage_proxy_url(filename: str) -> Optional[str]:
     except Exception as e:
         logger.error(f"[S3] Failed to generate presigned GET url for {filename}: {e}")
         return None
+
+
+def get_storage_proxy_url(filename: str) -> Optional[str]:
+    """Return a stable application URL for a private S3 object."""
+    endpoint, bucket, _, _, _, _ = get_s3_credentials()
+    if not filename or not endpoint or not bucket:
+        return None
+
+    clean_name = filename.lstrip("/")
+    if clean_name.startswith(("http://", "https://")):
+        parsed = urlparse(clean_name)
+        if parsed.netloc != urlparse(endpoint).netloc:
+            return None
+        clean_name = unquote(parsed.path).lstrip("/")
+    if clean_name.startswith(f"{bucket}/"):
+        clean_name = clean_name[len(bucket) + 1:]
+    if not clean_name:
+        return None
+    return f"/api/v1/uploads/{clean_name}"
 
 
 class S3Service:
