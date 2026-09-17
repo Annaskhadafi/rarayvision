@@ -6,6 +6,7 @@ import logging
 import threading
 from typing import List, Dict, Any, Optional
 from datetime import datetime
+from urllib.parse import quote, urlparse
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 
@@ -16,6 +17,7 @@ try:
     )
     from .anydoc_service import AnyDocService
     from .redis_service import RedisService
+    from .s3_service import get_storage_proxy_url
 except ImportError:
     from backend.app.database.rag_models import (
         RagDocument, RagDocumentChunk,
@@ -23,8 +25,112 @@ except ImportError:
     )
     from backend.app.services.anydoc_service import AnyDocService
     from backend.app.services.redis_service import RedisService
+    from backend.app.services.s3_service import get_storage_proxy_url
 
 logger = logging.getLogger(__name__)
+PUBLIC_APP_URL = os.getenv("PUBLIC_APP_URL", "").rstrip("/")
+
+
+def _normalize_image_url(url: str) -> str:
+    """Return a stable app-proxy URL for private storage, preserving external URLs."""
+    value = str(url or "").strip()
+    if not value or value.startswith("data:"):
+        return value
+
+    if value.startswith("//"):
+        return value
+
+    if value.startswith("/api/v1/uploads/"):
+        path = quote(value.split("?", 1)[0], safe="/%")
+        return f"{PUBLIC_APP_URL}{path}"
+
+    parsed = urlparse(value)
+    if parsed.scheme in ("http", "https"):
+        if parsed.path.startswith("/api/v1/uploads/") and (
+            PUBLIC_APP_URL and parsed.netloc == urlparse(PUBLIC_APP_URL).netloc
+        ):
+            safe_path = quote(parsed.path, safe="/%")
+            return f"{PUBLIC_APP_URL}{safe_path}"
+        if parsed.path.startswith("/api/v1/uploads/"):
+            return value
+        proxy_path = get_storage_proxy_url(value)
+    else:
+        proxy_path = get_storage_proxy_url(value.split("?", 1)[0])
+
+    return f"{PUBLIC_APP_URL}{quote(proxy_path, safe='/%')}" if proxy_path else value
+
+
+def _normalize_markdown_image_urls(markdown: str) -> str:
+    """Normalize Markdown image destinations without changing ordinary Markdown text."""
+    if not markdown:
+        return markdown
+
+    output = []
+    cursor = 0
+
+    def find_close(start):
+        quote_char = None
+        escaped = False
+        for index in range(start, len(markdown)):
+            char = markdown[index]
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif quote_char:
+                if char == quote_char:
+                    quote_char = None
+            elif char in ('"', "'"):
+                quote_char = char
+            elif char == ")":
+                return index
+        return -1
+
+    while cursor < len(markdown):
+        start = markdown.find("![", cursor)
+        if start < 0:
+            output.append(markdown[cursor:])
+            break
+        open_pos = markdown.find("](", start + 2)
+        if open_pos < 0:
+            output.append(markdown[cursor:])
+            break
+        dest_start = open_pos + 2
+        while dest_start < len(markdown) and markdown[dest_start].isspace():
+            dest_start += 1
+        angle_wrapped = dest_start < len(markdown) and markdown[dest_start] == "<"
+        if angle_wrapped:
+            url_start = dest_start + 1
+            url_end = markdown.find(">", url_start)
+            if url_end < 0:
+                output.append(markdown[cursor:])
+                break
+            close_pos = find_close(url_end)
+        else:
+            url_start = dest_start
+            index = url_start
+            depth = 0
+            while index < len(markdown):
+                char = markdown[index]
+                if char == "(":
+                    depth += 1
+                elif char == ")":
+                    if depth == 0:
+                        break
+                    depth -= 1
+                elif char.isspace() and depth == 0:
+                    break
+                index += 1
+            url_end = index
+            close_pos = find_close(url_end)
+        if close_pos < 0:
+            output.append(markdown[cursor:])
+            break
+        alt = markdown[start + 2:open_pos]
+        output.append(markdown[cursor:start])
+        output.append(f"![{alt}]({_normalize_image_url(markdown[url_start:url_end].strip())})")
+        cursor = close_pos + 1
+    return "".join(output)
 
 # Lazy singleton for FastEmbed ONNX
 _fastembed_instance = None
@@ -1567,7 +1673,7 @@ class RagService:
             for s in sources:
                 if isinstance(s, dict) and s.get("images"):
                     for img in s["images"]:
-                        u = img.get("url", "").strip()
+                        u = _normalize_image_url(img.get("url", ""))
                         if u and u not in seen:
                             seen.add(u)
                             images.append({
@@ -1578,8 +1684,8 @@ class RagService:
                             })
         content = getattr(msg, "content", None) if hasattr(msg, "content") else (msg.get("content") if isinstance(msg, dict) else "")
         if content and isinstance(content, str):
-            for alt, u in re.findall(r'!\[(.*?)\]\((.*?)\)', content):
-                u_clean = u.strip()
+            for alt, u in re.findall(r'!\[(.*?)\]\((.*?)\)', _normalize_markdown_image_urls(content)):
+                u_clean = _normalize_image_url(u)
                 if u_clean and u_clean not in seen:
                     seen.add(u_clean)
                     images.append({
@@ -1599,8 +1705,8 @@ class RagService:
             {
                 "id": m.id,
                 "role": m.role,
-                "content": m.content,
-                "sources": m.sources or [],
+                "content": _normalize_markdown_image_urls(m.content or ""),
+                "sources": cls._normalize_sources(m.sources or []),
                 "attached_images": cls._extract_images_from_message(m),
                 "rating": m.rating,
                 "feedback_notes": m.feedback_notes,
@@ -1610,6 +1716,34 @@ class RagService:
             }
             for m in msgs
         ]
+
+    @staticmethod
+    def _normalize_sources(sources: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Normalize source and embedded image URLs at API/cache boundaries."""
+        normalized = []
+        for source in sources or []:
+            if not isinstance(source, dict):
+                normalized.append(source)
+                continue
+            item = dict(source)
+            for key in ("s3_url", "raw_s3_url"):
+                if item.get(key):
+                    item[key] = _normalize_image_url(item[key])
+            if isinstance(item.get("content_preview"), str):
+                preview = _normalize_markdown_image_urls(item["content_preview"])
+                item["content_preview"] = re.sub(
+                    r"https?://[^\s)]+",
+                    lambda match: _normalize_image_url(match.group(0)),
+                    preview,
+                )
+            if "images" in item:
+                item["images"] = [
+                    {**image, "url": _normalize_image_url(image.get("url", ""))}
+                    if isinstance(image, dict) else image
+                    for image in item.get("images", [])
+                ]
+            normalized.append(item)
+        return normalized
 
     @classmethod
     def delete_session(cls, db: Session, session_id: str) -> bool:
@@ -1758,6 +1892,13 @@ class RagService:
         if is_standalone:
             cached_res = RedisService.get_rag_cache(query, document_id)
             if cached_res:
+                cached_res["answer"] = _normalize_markdown_image_urls(cached_res.get("answer", ""))
+                cached_res["sources"] = cls._normalize_sources(cached_res.get("sources", []))
+                cached_res["attached_images"] = [
+                    {**image, "url": _normalize_image_url(image.get("url", ""))}
+                    for image in cached_res.get("attached_images", [])
+                    if isinstance(image, dict)
+                ]
                 cached_res["latency_ms"] = round((time.perf_counter() - start_time) * 1000, 2)
                 cached_res["from_cache"] = True
                 return cached_res
@@ -1799,13 +1940,13 @@ class RagService:
                 source_tag += f" - {c['heading']}"
             source_tag += "]"
 
-            c_content = c.get('content', '')
+            c_content = _normalize_markdown_image_urls(c.get('content', ''))
             context_parts.append(f"{source_tag}\n{c_content}")
 
             # Extract any embedded images from this chunk
             chunk_images = []
             for alt_text, img_url in re.findall(r'!\[(.*?)\]\((.*?)\)', c_content):
-                clean_url = img_url.strip()
+                clean_url = _normalize_image_url(img_url)
                 if clean_url:
                     clean_alt = alt_text.strip() or f"Diagram {c['filename']}"
                     chunk_images.append({
@@ -1825,8 +1966,8 @@ class RagService:
                 "source_id": idx,
                 "filename": c["filename"],
                 "heading": c.get("heading"),
-                "s3_url": f"/api/v1/uploads/{(c.get('s3_url') or '').split('/')[-1] or c.get('filename')}" if (c.get('s3_url') or c.get('filename')) else None,
-                "raw_s3_url": c.get("s3_url"),
+                "s3_url": _normalize_image_url(c.get("s3_url")) if c.get("s3_url") else _normalize_image_url(c.get("filename")) if c.get("filename") else None,
+                "raw_s3_url": _normalize_image_url(c.get("s3_url")) if c.get("s3_url") else None,
                 "similarity_score": c.get("similarity_score", 0.0),
                 "reranker_score": c.get("reranker_score"),
                 "vector_score": c.get("vector_score"),
@@ -1874,13 +2015,13 @@ Pertanyaan Pengguna:
                 if isinstance(m, dict) and m.get("role") in ["user", "assistant"] and m.get("content"):
                     llm_messages.append({
                         "role": m["role"],
-                        "content": str(m["content"]).strip()
+                        "content": _normalize_markdown_image_urls(str(m["content"]).strip())
                     })
 
         llm_messages.append({"role": "user", "content": current_prompt})
 
         # 8. Invoke LLM
-        answer = cls._call_llm_messages(llm_messages)
+        answer = _normalize_markdown_image_urls(cls._call_llm_messages(llm_messages))
 
         elapsed_ms = round((time.perf_counter() - start_time) * 1000, 2)
 
@@ -1899,7 +2040,7 @@ Pertanyaan Pengguna:
             session_id=session_id,
             role="assistant",
             content=answer,
-            sources=sources,
+            sources=cls._normalize_sources(sources),
             retrieved_chunks_count=len(chunks),
             latency_ms=elapsed_ms,
             user_id=user_id,
@@ -1907,6 +2048,7 @@ Pertanyaan Pengguna:
         )
 
         RedisService.save_chat_turn(session_id, "user", query)
+        sources = cls._normalize_sources(sources)
         RedisService.save_chat_turn(session_id, "assistant", answer, sources=sources)
 
         result = {

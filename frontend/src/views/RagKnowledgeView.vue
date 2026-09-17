@@ -94,12 +94,16 @@ const feedbackSuccessToast = ref('')
 const activeLightboxImg = ref(null) // { url, rawUrl, alt, source_doc }
 const lightboxScale = ref(1)
 
+const resolveImageUrl = (url) => {
+  const value = (url || '').trim()
+  if (!value || !value.startsWith('/api/v1/uploads/')) return value
+  const baseUrl = (API_BASE_URL || window.location.origin).replace(/\/$/, '')
+  return `${baseUrl}${value}`
+}
+
 const openLightbox = (url, alt = 'Pratinjau Gambar', sourceDoc = '') => {
   if (!url) return
-  let fullUrl = url
-  if (url.startsWith('/api/') && API_BASE_URL) {
-    fullUrl = `${API_BASE_URL}${url}`
-  }
+  const fullUrl = resolveImageUrl(url)
   activeLightboxImg.value = {
     url: fullUrl,
     rawUrl: url,
@@ -145,7 +149,7 @@ const getMsgImages = (msg) => {
       if (img?.url && !seen.has(img.url)) {
         seen.add(img.url)
         list.push({
-          url: img.url.startsWith('/api/') && API_BASE_URL ? `${API_BASE_URL}${img.url}` : img.url,
+          url: resolveImageUrl(img.url),
           rawUrl: img.url,
           alt: img.alt || 'Gambar Dokumen',
           source_doc: img.source_doc || ''
@@ -161,7 +165,7 @@ const getMsgImages = (msg) => {
           if (img?.url && !seen.has(img.url)) {
             seen.add(img.url)
             list.push({
-              url: img.url.startsWith('/api/') && API_BASE_URL ? `${API_BASE_URL}${img.url}` : img.url,
+              url: resolveImageUrl(img.url),
               rawUrl: img.url,
               alt: img.alt || 'Gambar Dokumen',
               source_doc: s.filename || ''
@@ -180,7 +184,7 @@ const getMsgImages = (msg) => {
       if (url && !seen.has(url)) {
         seen.add(url)
         list.push({
-          url: url.startsWith('/api/') && API_BASE_URL ? `${API_BASE_URL}${url}` : url,
+          url: resolveImageUrl(url),
           rawUrl: url,
           alt: alt,
           source_doc: ''
@@ -1089,10 +1093,7 @@ const formatMarkdown = (text) => {
 
   // Images: ![alt](url) -> <img> with click-to-preview data attributes and fallback
   html = html.replace(/!\[(.*?)\]\((.*?)\)/g, (_m, alt, url) => {
-    let cleanUrl = (url || '').trim()
-    if (cleanUrl.startsWith('/api/') && API_BASE_URL) {
-      cleanUrl = `${API_BASE_URL}${cleanUrl}`
-    }
+    const cleanUrl = resolveImageUrl(url)
     const cleanAlt = alt || 'Gambar / Diagram Dokumen'
     return `<div class="chat-inline-img-box"><img class="chat-image" src="${cleanUrl}" alt="${cleanAlt}" title="${cleanAlt} (Klik untuk perbesar)" data-fullsrc="${cleanUrl}" data-alt="${cleanAlt}" loading="lazy" onerror="this.parentElement.style.display='none'" /><div class="chat-image-caption">🔍 <span>${cleanAlt}</span> <span class="caption-hint">(Klik untuk perbesar)</span></div></div>`
   })
