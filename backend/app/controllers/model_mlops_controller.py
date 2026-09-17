@@ -94,11 +94,14 @@ def _dataset_image_url(
 
 
 def build_colab_snippets(folder_name: str, yolo_yaml_url: str, tasks_url: str, coco_url: str) -> Dict[str, str]:
+    app_base_url = PUBLIC_APP_URL
     dataset_setup_script = f"""import os, glob, shutil, time, requests, yaml
 from concurrent.futures import ThreadPoolExecutor
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from tqdm import tqdm
+
+APP_URL = "{app_base_url}"
 
 # 1. Setup persistent session with retries & connection pooling
 session = requests.Session()
@@ -155,6 +158,12 @@ def dl_item(idx_item):
     img_url = item.get('data', {{}}).get('image', '')
     if not img_url:
         return
+    # Convert private S3 URL to authenticated app proxy URL
+    if 'is3.cloudhost.id/onechitra/' in img_url:
+        img_url = img_url.replace('https://is3.cloudhost.id/onechitra/', f'{{APP_URL}}/api/v1/uploads/').replace('http://is3.cloudhost.id/onechitra/', f'{{APP_URL}}/api/v1/uploads/')
+    elif img_url.startswith('/api/v1/uploads/'):
+        img_url = f'{{APP_URL}}{{img_url}}'
+
     fname = item.get('data', {{}}).get('original_filename') or os.path.basename(img_url.split('?')[0]) or f'img_{{idx}}.jpg'
     if not fname.lower().endswith(('.jpg', '.jpeg', '.png', '.webp', '.bmp')):
         fname = f'img_{{idx}}.jpg'
@@ -164,7 +173,12 @@ def dl_item(idx_item):
 
     for attempt in range(3):
         try:
-            res = session.get(img_url, timeout=(10, 60), stream=True)
+            res = session.get(img_url, timeout=(15, 60), stream=True)
+            if res.status_code == 403 and ('is3.cloudhost.id' in img_url or 'onechitra' in img_url):
+                suffix = img_url.split('/onechitra/')[-1] if '/onechitra/' in img_url else img_url.split('.id/')[-1]
+                fallback_url = f"{{APP_URL}}/api/v1/uploads/{{suffix.lstrip('/')}}"
+                res = session.get(fallback_url, timeout=(15, 60), stream=True)
+
             if res.status_code == 200:
                 with open(dest_img, 'wb') as f:
                     for chunk in res.iter_content(chunk_size=65536):
@@ -210,7 +224,12 @@ cfg['train'] = 'images/train'
 cfg['val'] = 'images/val'
 with open('data.yaml', 'w') as f:
     yaml.dump(cfg, f, sort_keys=False)
-print('Dataset Ready! Train:', len(glob.glob(os.path.join(train_img, '*.*'))), '| Val:', len(glob.glob(os.path.join(val_img, '*.*'))))
+
+train_cnt = len(glob.glob(os.path.join(train_img, '*.*')))
+val_cnt = len(glob.glob(os.path.join(val_img, '*.*')))
+print(f'✓ Dataset Ready! Train: {{train_cnt}} | Val: {{val_cnt}}')
+if train_cnt == 0:
+    raise RuntimeError(f'Gagal mengunduh dataset: Tidak ada gambar di folder train (0 images). Pastikan server {{APP_URL}} dapat diakses.')
 """
 
     yolo_code = f"""# ==========================================
@@ -368,6 +387,7 @@ def generate_colab_notebook_dict(folder_name: str, yolo_yaml_url: str, tasks_url
                 "from urllib3.util.retry import Retry\n",
                 "from tqdm import tqdm\n",
                 "\n",
+                f"APP_URL = \"{PUBLIC_APP_URL}\"\n",
                 f"YOLO_YAML_URL = \"{yolo_yaml_url}\"\n",
                 f"COCO_JSON_URL = \"{coco_url}\"\n",
                 f"TASKS_JSON_URL = \"{tasks_url}\"\n",
@@ -435,6 +455,11 @@ def generate_colab_notebook_dict(folder_name: str, yolo_yaml_url: str, tasks_url
                 "    img_url = item.get('data', {}).get('image', '')\n",
                 "    if not img_url:\n",
                 "        return\n",
+                "    # Convert private S3 URL to authenticated app proxy URL\n",
+                "    if 'is3.cloudhost.id/onechitra/' in img_url:\n",
+                "        img_url = img_url.replace('https://is3.cloudhost.id/onechitra/', f'{APP_URL}/api/v1/uploads/').replace('http://is3.cloudhost.id/onechitra/', f'{APP_URL}/api/v1/uploads/')\n",
+                "    elif img_url.startswith('/api/v1/uploads/'):\n",
+                "        img_url = f'{APP_URL}{img_url}'\n",
                 "    fname = item.get('data', {}).get('original_filename') or os.path.basename(img_url.split('?')[0])\n",
                 "    if not fname or not fname.lower().endswith(('.jpg', '.jpeg', '.png', '.webp', '.bmp')):\n",
                 "        fname = f'img_{idx}.jpg'\n",
@@ -443,7 +468,11 @@ def generate_colab_notebook_dict(folder_name: str, yolo_yaml_url: str, tasks_url
                 "    dest_lbl = os.path.join(base_dir, 'labels', split, os.path.splitext(fname)[0] + '.txt')\n",
                 "    for attempt in range(3):\n",
                 "        try:\n",
-                "            res = session.get(img_url, timeout=(10, 60), stream=True)\n",
+                "            res = session.get(img_url, timeout=(15, 60), stream=True)\n",
+                "            if res.status_code == 403 and ('is3.cloudhost.id' in img_url or 'onechitra' in img_url):\n",
+                "                suffix = img_url.split('/onechitra/')[-1] if '/onechitra/' in img_url else img_url.split('.id/')[-1]\n",
+                "                fallback_url = f\"{APP_URL}/api/v1/uploads/{suffix.lstrip('/')}\"\n",
+                "                res = session.get(fallback_url, timeout=(15, 60), stream=True)\n",
                 "            if res.status_code == 200:\n",
                 "                with open(dest_img, 'wb') as f:\n",
                 "                    for chunk in res.iter_content(chunk_size=65536):\n",
@@ -497,7 +526,11 @@ def generate_colab_notebook_dict(folder_name: str, yolo_yaml_url: str, tasks_url
                 "data_cfg['val'] = 'images/val'\n",
                 "with open('data.yaml', 'w') as f:\n",
                 "    yaml.dump(data_cfg, f, sort_keys=False)\n",
-                "print('✓ Dataset ready! Train:', len(glob.glob(os.path.join(train_img_dir, '*.*'))), '| Val:', len(glob.glob(os.path.join(val_img_dir, '*.*'))))\n",
+                "train_cnt = len(glob.glob(os.path.join(train_img_dir, '*.*')))\n",
+                "val_cnt = len(glob.glob(os.path.join(val_img_dir, '*.*')))\n",
+                "print(f'✓ Dataset ready! Train: {train_cnt} | Val: {val_cnt}')\n",
+                "if train_cnt == 0:\n",
+                "    raise RuntimeError(f'Gagal mengunduh dataset: Tidak ada gambar di folder train (0 images). Pastikan server {APP_URL} dapat diakses.')\n",
                 "!cat data.yaml\n"
             ]
         },
