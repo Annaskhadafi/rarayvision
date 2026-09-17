@@ -308,30 +308,33 @@ model.export(format="onnx")
 
 
 def generate_colab_notebook_dict(folder_name: str, yolo_yaml_url: str, tasks_url: str, coco_url: str) -> dict:
+    public_app_url = PUBLIC_APP_URL
     colab_cells = [
+        # HEADER
         {
             "cell_type": "markdown",
             "metadata": {},
             "source": [
-                f"# 🚀 Raray Vision MLOps: Automated Model Training & Validation (Google Colab)\n",
+                f"# 📘 Tutorial & Panduan: Training Model Deep Learning di Google Colab\n",
                 f"**Dataset:** `{folder_name}`  \n",
                 f"**Target Hardware:** NVIDIA T4 GPU  \n",
-                f"**Epochs:** `200`  \n",
-                f"**Included Models:**\n",
+                f"**Mode Training:** Modular (Step-by-Step / Per-Code)  \n",
+                f"**Model Didukung:**\n",
                 f"1. ⚡ **YOLO-X / YOLO11-X** (High-Performance Real-Time Object Detection)\n",
-                f"2. 🔥 **YOLO-26 / Custom Resilient YOLO Variant** (Ultra Fast Edge Architecture)\n",
+                f"2. 🔥 **YOLO-26 / Edge Variant** (Ultra Fast Architecture for Edge Devices)\n",
                 f"3. 🎯 **RF-DETR / RT-DETR** (Real-Time Transformer Object Detection)\n",
                 f"\n",
                 f"---\n",
-                f"Notebook ini otomatis mengunduh dataset yang telah diunggah ke S3 via **Raray Vision Data Studio**, melatih 3 arsitektur model hingga 200 epochs di GPU T4, melakukan validasi, dan mengekspor bobot `.pt` dan `.onnx` yang siap diunggah kembali ke sistem **Raray Vision** tanpa mengganti endpoint API klien!"
+                f"Notebook ini dirancang secara **modular (per-code slice)**. Anda dapat menjalankan cell satu per satu untuk memantau proses, menguji coba sampel data terlebih dahulu, memahami cara kerja setiap tahapan, dan melakukan debugging jika diperlukan."
             ]
         },
+        # LANGKAH 0
         {
             "cell_type": "markdown",
             "metadata": {},
             "source": [
-                "### 1. Periksa Akselerasi GPU (NVIDIA T4)\n",
-                "Pastikan runtime Google Colab menggunakan **T4 GPU** (`Runtime > Change runtime type > T4 GPU`)."
+                "### 🖥️ Langkah 0: Cek Akses GPU (Runtime Check)\n",
+                "Sebelum memulai training model Deep Learning, kita harus memastikan bahwa runtime Google Colab menggunakan **GPU (Graphics Processing Unit)** seperti **Tesla T4** agar proses training berjalan cepat."
             ]
         },
         {
@@ -340,19 +343,32 @@ def generate_colab_notebook_dict(folder_name: str, yolo_yaml_url: str, tasks_url
             "metadata": {},
             "outputs": [],
             "source": [
-                "!nvidia-smi\n",
+                "# Cek apakah GPU tersedia menggunakan PyTorch dan command nvidia-smi\n",
                 "import torch\n",
-                "print(f'PyTorch Version: {torch.__version__}')\n",
-                "print(f'CUDA Available: {torch.cuda.is_available()}')\n",
-                "if torch.cuda.is_available():\n",
-                "    print(f'Device Name: {torch.cuda.get_device_name(0)}')\n"
+                "import subprocess\n",
+                "\n",
+                "gpu_available = torch.cuda.is_available()\n",
+                "print('=== STATUS RUNTIME GOOGLE COLAB ===')\n",
+                "if gpu_available:\n",
+                "    device_name = torch.cuda.get_device_name(0)\n",
+                "    print(f'[OK] GPU Terdeteksi: {device_name}')\n",
+                "    print('\\nDetail Spesifikasi GPU:')\n",
+                "    try:\n",
+                "        gpu_info = subprocess.check_output('nvidia-smi', shell=True).decode('utf-8')\n",
+                "        print(gpu_info)\n",
+                "    except Exception:\n",
+                "        print('Tidak dapat memanggil nvidia-smi, namun GPU CUDA tetap aktif.')\n",
+                "else:\n",
+                "    print('[WARNING] GPU tidak terdeteksi! Silakan ganti runtime ke T4 GPU via menu: Runtime > Change runtime type > T4 GPU.')\n"
             ]
         },
+        # LANGKAH 1
         {
             "cell_type": "markdown",
             "metadata": {},
             "source": [
-                "### 2. Instalasi Dependensi Ultralytics & Tooling"
+                "### 📦 Langkah 1: Instalasi Library & Dependensi\n",
+                "Menginstal library utama: `ultralytics` (untuk YOLO & RT-DETR), `onnx` (untuk export model), `pyyaml` (konfigurasi dataset), dan `tqdm` (indikator progress)."
             ]
         },
         {
@@ -361,18 +377,19 @@ def generate_colab_notebook_dict(folder_name: str, yolo_yaml_url: str, tasks_url
             "metadata": {},
             "outputs": [],
             "source": [
-                "# Install ultralytics, onnx, and supporting libraries\n",
-                "!pip install -q --upgrade ultralytics onnx onnxruntime onnxsim pyyaml requests tqdm\n",
+                "!pip install -q --upgrade ultralytics onnx onnxruntime onnxsim pyyaml requests urllib3 tqdm\n",
                 "import ultralytics\n",
+                "print(f'Ultralytics Version: {ultralytics.__version__}')\n",
                 "ultralytics.checks()\n"
             ]
         },
+        # LANGKAH 2
         {
             "cell_type": "markdown",
             "metadata": {},
             "source": [
-                "### 3. Download Dataset & Konfigurasi dari Raray Vision S3\n",
-                "Download file `data.yaml`, `annotations_coco.json`, dan `label_studio_tasks.json` langsung dari Object Storage S3."
+                "### ⚙️ Langkah 2: Konfigurasi URL & Inisialisasi Direktori Dataset\n",
+                "Menyiapkan folder lokal di Colab (`/content/dataset/images/train`, `/content/dataset/images/val`, dll) dan inisialisasi session HTTP dengan connection pool & auto-retry 5x."
             ]
         },
         {
@@ -382,64 +399,65 @@ def generate_colab_notebook_dict(folder_name: str, yolo_yaml_url: str, tasks_url
             "outputs": [],
             "source": [
                 "import os, glob, shutil, time, requests, yaml, json\n",
-                "from concurrent.futures import ThreadPoolExecutor\n",
                 "from requests.adapters import HTTPAdapter\n",
                 "from urllib3.util.retry import Retry\n",
-                "from tqdm import tqdm\n",
                 "\n",
-                f"APP_URL = \"{PUBLIC_APP_URL}\"\n",
+                f"APP_URL = \"{public_app_url}\"\n",
                 f"YOLO_YAML_URL = \"{yolo_yaml_url}\"\n",
                 f"COCO_JSON_URL = \"{coco_url}\"\n",
                 f"TASKS_JSON_URL = \"{tasks_url}\"\n",
                 "\n",
-                "# 1. Setup persistent session with retries & connection pooling\n",
+                "# Setup Session Jaringan dengan Auto-Retry\n",
                 "session = requests.Session()\n",
-                "retries = Retry(\n",
-                "    total=5,\n",
-                "    backoff_factor=1.5,\n",
-                "    status_forcelist=[429, 500, 502, 503, 504],\n",
-                "    raise_on_status=False\n",
-                ")\n",
+                "retries = Retry(total=5, backoff_factor=1.5, status_forcelist=[429, 500, 502, 503, 504], raise_on_status=False)\n",
                 "adapter = HTTPAdapter(max_retries=retries, pool_connections=10, pool_maxsize=10)\n",
                 "session.mount('https://', adapter)\n",
                 "session.mount('http://', adapter)\n",
                 "\n",
-                "# 2. Setup direktori lokal dataset di Colab\n",
+                "# Inisialisasi struktur direktori YOLO di Colab\n",
                 "base_dir = os.path.abspath('dataset')\n",
                 "train_img_dir = os.path.join(base_dir, 'images', 'train')\n",
                 "val_img_dir = os.path.join(base_dir, 'images', 'val')\n",
                 "train_lbl_dir = os.path.join(base_dir, 'labels', 'train')\n",
                 "val_lbl_dir = os.path.join(base_dir, 'labels', 'val')\n",
+                "\n",
                 "for p in [train_img_dir, val_img_dir, train_lbl_dir, val_lbl_dir]:\n",
                 "    os.makedirs(p, exist_ok=True)\n",
                 "\n",
-                "# 3. Download data.yaml\n",
-                "print('[1/3] Downloading data.yaml...')\n",
+                "print('✓ Direktori dataset siap di:', base_dir)\n"
+            ]
+        },
+        # LANGKAH 3
+        {
+            "cell_type": "markdown",
+            "metadata": {},
+            "source": [
+                "### 📄 Langkah 3: Unduh & Periksa File `data.yaml`\n",
+                "File `data.yaml` berisi definisi kelas/kategori objek dan pemetaan ID label."
+            ]
+        },
+        {
+            "cell_type": "code",
+            "execution_count": None,
+            "metadata": {},
+            "outputs": [],
+            "source": [
+                "print(f'Mengunduh data.yaml dari: {YOLO_YAML_URL}')\n",
                 "try:\n",
-                "    r = session.get(YOLO_YAML_URL, timeout=(10, 60))\n",
-                "    if r.status_code == 200:\n",
+                "    r_yaml = session.get(YOLO_YAML_URL, timeout=(10, 60))\n",
+                "    if r_yaml.status_code == 200:\n",
                 "        with open('data.yaml', 'wb') as f:\n",
-                "            f.write(r.content)\n",
-                "        print('✓ data.yaml downloaded successfully!')\n",
+                "            f.write(r_yaml.content)\n",
+                "        print('✓ File data.yaml berhasil diunduh!')\n",
                 "    else:\n",
-                "        print(f'Warning: HTTP {r.status_code} downloading data.yaml')\n",
+                "        print(f'Warning: HTTP {r_yaml.status_code} saat mengunduh data.yaml')\n",
                 "except Exception as e:\n",
-                "    print(f'Warning downloading data.yaml: {e}')\n",
+                "    print(f'Error: {e}')\n",
                 "\n",
-                "# 4. Download tasks.json\n",
-                "print('[2/3] Downloading dataset annotations...')\n",
-                "tasks = []\n",
-                "try:\n",
-                "    r_tasks = session.get(TASKS_JSON_URL, timeout=(15, 90))\n",
-                "    if r_tasks.status_code == 200:\n",
-                "        tasks = r_tasks.json()\n",
-                "except Exception as e:\n",
-                "    print(f'Warning downloading tasks: {e}')\n",
-                "print(f'✓ Loaded {len(tasks)} tasks from Raray Vision S3!')\n",
-                "\n",
-                "# Load category mapping from data.yaml\n",
+                "# Baca dan periksa pemetaan kelas\n",
                 "with open('data.yaml', 'r') as f:\n",
                 "    data_cfg = yaml.safe_load(f) or {}\n",
+                "\n",
                 "raw_names = data_cfg.get('names', {0: 'object'})\n",
                 "if isinstance(raw_names, dict):\n",
                 "    name_to_id = {str(v).lower(): int(k) for k, v in raw_names.items()}\n",
@@ -448,50 +466,171 @@ def generate_colab_notebook_dict(folder_name: str, yolo_yaml_url: str, tasks_url
                 "else:\n",
                 "    name_to_id = {'object': 0}\n",
                 "\n",
-                "# 5. Download & Persiapan Gambar secara Paralel (max 6 workers)\n",
-                "print('[3/3] Downloading dataset images into Colab local disk...')\n",
-                "def download_and_save(item_data):\n",
+                "print(f'Total Kelas Terdaftar: {len(name_to_id)}')\n",
+                "print('Daftar Kelas (ID -> Nama):')\n",
+                "items_to_show = list(raw_names.items() if isinstance(raw_names, dict) else enumerate(raw_names))\n",
+                "for k, v in items_to_show[:10]:\n",
+                "    print(f'  [{k}] {v}')\n",
+                "if len(items_to_show) > 10:\n",
+                "    print(f'  ... dan {len(items_to_show) - 10} kelas lainnya.')\n"
+            ]
+        },
+        # LANGKAH 4
+        {
+            "cell_type": "markdown",
+            "metadata": {},
+            "source": [
+                "### 📋 Langkah 4: Unduh Metadata Task Anotasi (`tasks.json`)\n",
+                "Mengunduh file metadata anotasi yang berisi informasi bounding box setiap gambar dari server Raray Vision."
+            ]
+        },
+        {
+            "cell_type": "code",
+            "execution_count": None,
+            "metadata": {},
+            "outputs": [],
+            "source": [
+                "print(f'Mengunduh metadata anotasi dari: {TASKS_JSON_URL}')\n",
+                "tasks = []\n",
+                "try:\n",
+                "    r_tasks = session.get(TASKS_JSON_URL, timeout=(15, 90))\n",
+                "    if r_tasks.status_code == 200:\n",
+                "        tasks = r_tasks.json()\n",
+                "        print(f'✓ Berhasil memuat {len(tasks)} total tasks anotasi!')\n",
+                "        if tasks:\n",
+                "            t0 = tasks[0]\n",
+                "            print('\\nPreview Task 0:')\n",
+                "            print('  - File Name      :', t0.get('data', {}).get('original_filename'))\n",
+                "            print('  - Raw Image URL  :', t0.get('data', {}).get('image'))\n",
+                "            print('  - Jumlah Anotasi :', len(t0.get('annotations', [{}])[0].get('result', [])))\n",
+                "    else:\n",
+                "        print(f'Warning: HTTP {r_tasks.status_code} saat mengunduh tasks.json')\n",
+                "except Exception as e:\n",
+                "    print(f'Error: {e}')\n"
+            ]
+        },
+        # LANGKAH 5
+        {
+            "cell_type": "markdown",
+            "metadata": {},
+            "source": [
+                "### 🧪 Langkah 5: Smoke Test (Uji Coba Unduh 5 Gambar Pertama)\n",
+                "**Langkah ini sangat penting!** Sebelum mendownload ribuan gambar selama puluhan menit, kita lakukan uji coba mengunduh 5 gambar pertama untuk memverifikasi koneksi, perutean proxy terautentikasi, dan status HTTP 200 OK."
+            ]
+        },
+        {
+            "cell_type": "code",
+            "execution_count": None,
+            "metadata": {},
+            "outputs": [],
+            "source": [
+                "# Fungsi pembantu untuk konversi URL S3 ke proxy publik terautentikasi\n",
+                "def resolve_image_url(raw_url):\n",
+                "    if not raw_url:\n",
+                "        return ''\n",
+                "    if 'is3.cloudhost.id/onechitra/' in raw_url:\n",
+                "        return raw_url.replace('https://is3.cloudhost.id/onechitra/', f'{APP_URL}/api/v1/uploads/').replace('http://is3.cloudhost.id/onechitra/', f'{APP_URL}/api/v1/uploads/')\n",
+                "    elif raw_url.startswith('/api/v1/uploads/'):\n",
+                "        return f'{APP_URL}{raw_url}'\n",
+                "    return raw_url\n",
+                "\n",
+                "print('=== SMOKE TEST: UJI COBA UNDUH 5 GAMBAR PERTAMA ===')\n",
+                "test_samples = tasks[:5]\n",
+                "success_cnt = 0\n",
+                "for i, t in enumerate(test_samples):\n",
+                "    orig_url = t.get('data', {}).get('image', '')\n",
+                "    resolved_url = resolve_image_url(orig_url)\n",
+                "    fname = t.get('data', {}).get('original_filename') or os.path.basename(orig_url.split('?')[0]) or f'test_{i}.jpg'\n",
+                "    try:\n",
+                "        res = session.get(resolved_url, timeout=(10, 30))\n",
+                "        if res.status_code == 200:\n",
+                "            success_cnt += 1\n",
+                "            print(f'[{i+1}/5] ✓ {fname} -> HTTP 200 OK ({len(res.content)/1024:.1f} KB)')\n",
+                "        elif res.status_code == 403 and ('is3.cloudhost.id' in orig_url or 'onechitra' in orig_url):\n",
+                "            suffix = orig_url.split('/onechitra/')[-1] if '/onechitra/' in orig_url else orig_url.split('.id/')[-1]\n",
+                "            fallback_url = f'{APP_URL}/api/v1/uploads/{suffix.lstrip(\"/\")}'\n",
+                "            res_fb = session.get(fallback_url, timeout=(10, 30))\n",
+                "            if res_fb.status_code == 200:\n",
+                "                success_cnt += 1\n",
+                "                print(f'[{i+1}/5] ✓ {fname} via Fallback Proxy -> HTTP 200 OK ({len(res_fb.content)/1024:.1f} KB)')\n",
+                "            else:\n",
+                "                print(f'[{i+1}/5] ✗ {fname} -> HTTP {res_fb.status_code}')\n",
+                "        else:\n",
+                "            print(f'[{i+1}/5] ✗ {fname} -> HTTP {res.status_code}')\n",
+                "    except Exception as err:\n",
+                "        print(f'[{i+1}/5] ✗ {fname} -> Error: {err}')\n",
+                "\n",
+                "print(f'\\nHasil Smoke Test: {success_cnt}/5 gambar berhasil terhubung!')\n",
+                "if success_cnt > 0:\n",
+                "    print('✓ Jalur pengunduhan terverifikasi! Anda dapat melanjutkan ke Langkah 6.')\n",
+                "else:\n",
+                "    print('✗ Gagal mengunduh sampel gambar. Periksa bahwa server Raray Vision aktif.')\n"
+            ]
+        },
+        # LANGKAH 6
+        {
+            "cell_type": "markdown",
+            "metadata": {},
+            "source": [
+                "### 📥 Langkah 6: Unduh Seluruh Gambar Dataset Secara Paralel\n",
+                "Mengunduh gambar dan membuat file anotasi label YOLO `.txt` (80% Train, 20% Val).\n",
+                "\n",
+                "> **Tips Belajar:** Anda dapat mengubah nilai `LIMIT_DOWNLOAD = None` menjadi angka tertentu (contoh: `100` atau `300`) jika ingin melakukan training uji coba cepat tanpa menunggu semua 3.500+ gambar."
+            ]
+        },
+        {
+            "cell_type": "code",
+            "execution_count": None,
+            "metadata": {},
+            "outputs": [],
+            "source": [
+                "from concurrent.futures import ThreadPoolExecutor\n",
+                "from tqdm import tqdm\n",
+                "\n",
+                "# Atur limit gambar jika ingin training cepat (misal: 200), atau None untuk seluruh dataset\n",
+                "LIMIT_DOWNLOAD = None  # Contoh: 200 untuk uji coba, atau None untuk semua gambar\n",
+                "\n",
+                "active_tasks = tasks[:LIMIT_DOWNLOAD] if LIMIT_DOWNLOAD else tasks\n",
+                "print(f'Memulai download {len(active_tasks)} gambar dengan 6 worker paralel...')\n",
+                "\n",
+                "def download_and_process_item(item_data):\n",
                 "    idx, item = item_data\n",
-                "    img_url = item.get('data', {}).get('image', '')\n",
+                "    img_url = resolve_image_url(item.get('data', {}).get('image', ''))\n",
                 "    if not img_url:\n",
                 "        return\n",
-                "    # Convert private S3 URL to authenticated app proxy URL\n",
-                "    if 'is3.cloudhost.id/onechitra/' in img_url:\n",
-                "        img_url = img_url.replace('https://is3.cloudhost.id/onechitra/', f'{APP_URL}/api/v1/uploads/').replace('http://is3.cloudhost.id/onechitra/', f'{APP_URL}/api/v1/uploads/')\n",
-                "    elif img_url.startswith('/api/v1/uploads/'):\n",
-                "        img_url = f'{APP_URL}{img_url}'\n",
-                "    fname = item.get('data', {}).get('original_filename') or os.path.basename(img_url.split('?')[0])\n",
-                "    if not fname or not fname.lower().endswith(('.jpg', '.jpeg', '.png', '.webp', '.bmp')):\n",
+                "    fname = item.get('data', {}).get('original_filename') or os.path.basename(img_url.split('?')[0]) or f'img_{idx}.jpg'\n",
+                "    if not fname.lower().endswith(('.jpg', '.jpeg', '.png', '.webp', '.bmp')):\n",
                 "        fname = f'img_{idx}.jpg'\n",
-                "    split = 'val' if (len(tasks) > 1 and idx % 5 == 0) else 'train'\n",
+                "    split = 'val' if (len(active_tasks) > 1 and idx % 5 == 0) else 'train'\n",
                 "    dest_img = os.path.join(base_dir, 'images', split, fname)\n",
                 "    dest_lbl = os.path.join(base_dir, 'labels', split, os.path.splitext(fname)[0] + '.txt')\n",
+                "\n",
                 "    for attempt in range(3):\n",
                 "        try:\n",
                 "            res = session.get(img_url, timeout=(15, 60), stream=True)\n",
                 "            if res.status_code == 403 and ('is3.cloudhost.id' in img_url or 'onechitra' in img_url):\n",
                 "                suffix = img_url.split('/onechitra/')[-1] if '/onechitra/' in img_url else img_url.split('.id/')[-1]\n",
-                "                fallback_url = f\"{APP_URL}/api/v1/uploads/{suffix.lstrip('/')}\"\n",
+                "                fallback_url = f'{APP_URL}/api/v1/uploads/{suffix.lstrip(\"/\")}'\n",
                 "                res = session.get(fallback_url, timeout=(15, 60), stream=True)\n",
+                "\n",
                 "            if res.status_code == 200:\n",
                 "                with open(dest_img, 'wb') as f:\n",
                 "                    for chunk in res.iter_content(chunk_size=65536):\n",
                 "                        if chunk:\n",
                 "                            f.write(chunk)\n",
                 "                lines = []\n",
-                "                anns = item.get('annotations', [{}])[0].get('result', [])\n",
-                "                for ann in anns:\n",
+                "                for ann in item.get('annotations', [{}])[0].get('result', []):\n",
                 "                    val = ann.get('value', {})\n",
+                "                    lbls = val.get('rectanglelabels', ['object'])\n",
+                "                    first_lbl = str(lbls[0]).lower() if lbls else 'object'\n",
+                "                    cid = name_to_id.get(first_lbl, 0)\n",
                 "                    x_pct = val.get('x', 0) / 100.0\n",
                 "                    y_pct = val.get('y', 0) / 100.0\n",
                 "                    w_pct = val.get('width', 0) / 100.0\n",
                 "                    h_pct = val.get('height', 0) / 100.0\n",
-                "                    lbls = val.get('rectanglelabels', ['object'])\n",
-                "                    first_lbl = str(lbls[0]).lower() if lbls else 'object'\n",
-                "                    cat_id = name_to_id.get(first_lbl, 0)\n",
-                "                    x_center = x_pct + (w_pct / 2.0)\n",
-                "                    y_center = y_pct + (h_pct / 2.0)\n",
-                "                    lines.append(f\"{cat_id} {x_center:.6f} {y_center:.6f} {w_pct:.6f} {h_pct:.6f}\")\n",
+                "                    xc = x_pct + (w_pct / 2.0)\n",
+                "                    yc = y_pct + (h_pct / 2.0)\n",
+                "                    lines.append(f'{cid} {xc:.6f} {yc:.6f} {w_pct:.6f} {h_pct:.6f}')\n",
                 "                with open(dest_lbl, 'w') as lf:\n",
                 "                    lf.write('\\n'.join(lines))\n",
                 "                return\n",
@@ -502,7 +641,7 @@ def generate_colab_notebook_dict(folder_name: str, yolo_yaml_url: str, tasks_url
                 "                time.sleep(1 + attempt)\n",
                 "\n",
                 "with ThreadPoolExecutor(max_workers=6) as ex:\n",
-                "    list(tqdm(ex.map(download_and_save, enumerate(tasks)), total=len(tasks)))\n",
+                "    list(tqdm(ex.map(download_and_process_item, enumerate(active_tasks)), total=len(active_tasks)))\n",
                 "\n",
                 "# Fallback: pastikan train dan val selalu memiliki minimal 1 file gambar & label\n",
                 "train_imgs = glob.glob(os.path.join(train_img_dir, '*.*'))\n",
@@ -511,14 +650,12 @@ def generate_colab_notebook_dict(folder_name: str, yolo_yaml_url: str, tasks_url
                 "    for f in train_imgs[:max(1, len(train_imgs)//5)]:\n",
                 "        shutil.copy(f, val_img_dir)\n",
                 "        lbl_src = os.path.join(train_lbl_dir, os.path.splitext(os.path.basename(f))[0] + '.txt')\n",
-                "        if os.path.exists(lbl_src):\n",
-                "            shutil.copy(lbl_src, val_lbl_dir)\n",
+                "        if os.path.exists(lbl_src): shutil.copy(lbl_src, val_lbl_dir)\n",
                 "elif not train_imgs and val_imgs:\n",
                 "    for f in val_imgs:\n",
                 "        shutil.copy(f, train_img_dir)\n",
                 "        lbl_src = os.path.join(val_lbl_dir, os.path.splitext(os.path.basename(f))[0] + '.txt')\n",
-                "        if os.path.exists(lbl_src):\n",
-                "            shutil.copy(lbl_src, train_lbl_dir)\n",
+                "        if os.path.exists(lbl_src): shutil.copy(lbl_src, train_lbl_dir)\n",
                 "\n",
                 "# Update data.yaml path ke absolute path dataset\n",
                 "data_cfg['path'] = base_dir\n",
@@ -526,20 +663,61 @@ def generate_colab_notebook_dict(folder_name: str, yolo_yaml_url: str, tasks_url
                 "data_cfg['val'] = 'images/val'\n",
                 "with open('data.yaml', 'w') as f:\n",
                 "    yaml.dump(data_cfg, f, sort_keys=False)\n",
-                "train_cnt = len(glob.glob(os.path.join(train_img_dir, '*.*')))\n",
-                "val_cnt = len(glob.glob(os.path.join(val_img_dir, '*.*')))\n",
-                "print(f'✓ Dataset ready! Train: {train_cnt} | Val: {val_cnt}')\n",
-                "if train_cnt == 0:\n",
-                "    raise RuntimeError(f'Gagal mengunduh dataset: Tidak ada gambar di folder train (0 images). Pastikan server {APP_URL} dapat diakses.')\n",
-                "!cat data.yaml\n"
+                "\n",
+                "print('✓ Pengunduhan selesai!')\n"
             ]
         },
+        # LANGKAH 7
         {
             "cell_type": "markdown",
             "metadata": {},
             "source": [
-                "### 4. MODEL 1: Training YOLO-X / YOLO11-X (200 Epochs di T4 GPU)\n",
-                "Menggunakan arsitektur Ultralytics YOLO11x / YOLOv8x dengan optimasi NVIDIA T4."
+                "### 🔍 Langkah 7: Verifikasi & Inspeksi Dataset Lokal\n",
+                "Memeriksa jumlah file gambar dan file label di folder `train` dan `val`, serta memastikan dataset siap dipakai untuk training."
+            ]
+        },
+        {
+            "cell_type": "code",
+            "execution_count": None,
+            "metadata": {},
+            "outputs": [],
+            "source": [
+                "train_imgs = glob.glob(os.path.join(train_img_dir, '*.*'))\n",
+                "val_imgs = glob.glob(os.path.join(val_img_dir, '*.*'))\n",
+                "train_lbls = glob.glob(os.path.join(train_lbl_dir, '*.txt'))\n",
+                "val_lbls = glob.glob(os.path.join(val_lbl_dir, '*.txt'))\n",
+                "\n",
+                "print('=== HASIL PERSIAPAN DATASET LOKAL ===')\n",
+                "print(f'Total Gambar Train : {len(train_imgs)}')\n",
+                "print(f'Total Label Train  : {len(train_lbls)}')\n",
+                "print(f'Total Gambar Val   : {len(val_imgs)}')\n",
+                "print(f'Total Label Val    : {len(val_lbls)}')\n",
+                "\n",
+                "if len(train_imgs) == 0:\n",
+                "    raise RuntimeError('Dataset train kosong (0 gambar)! Periksa kembali koneksi atau jalankan ulang Langkah 6.')\n",
+                "\n",
+                "# Tampilkan contoh isi file label txt\n",
+                "sample_lbl = train_lbls[0] if train_lbls else None\n",
+                "if sample_lbl:\n",
+                "    print(f'\\nContoh Format Label ({os.path.basename(sample_lbl)}):')\n",
+                "    with open(sample_lbl, 'r') as lf:\n",
+                "        print(lf.read().strip())\n",
+                "\n",
+                "print('\\n✓ Konfigurasi data.yaml akhir:')\n",
+                "!cat data.yaml\n"
+            ]
+        },
+        # LANGKAH 8: YOLO-X
+        {
+            "cell_type": "markdown",
+            "metadata": {},
+            "source": [
+                "### ⚡ Langkah 8: MODEL 1 - Training YOLO-X / YOLO11-X (200 Epochs, T4 GPU)\n",
+                "**YOLO-X** adalah model arsitektur besar untuk akurasi tertinggi dalam deteksi objek real-time.\n",
+                "- **Pretrained Weights:** `yolo11x.pt`\n",
+                "- **Epochs:** `200`\n",
+                "- **Optimizer:** `AdamW`\n",
+                "- **Batch Size:** `16` (Optimal untuk VRAM 16GB Tesla T4)"
             ]
         },
         {
@@ -550,7 +728,7 @@ def generate_colab_notebook_dict(folder_name: str, yolo_yaml_url: str, tasks_url
             "source": [
                 "from ultralytics import YOLO\n",
                 "\n",
-                "print('🚀 START TRAINING YOLO-X (200 EPOCHS)...')\n",
+                "print('🚀 MEMULAI TRAINING YOLO-X (200 EPOCHS)...')\n",
                 "model_yolox = YOLO('yolo11x.pt')\n",
                 "\n",
                 "results_yolox = model_yolox.train(\n",
@@ -558,7 +736,7 @@ def generate_colab_notebook_dict(folder_name: str, yolo_yaml_url: str, tasks_url
                 "    epochs=200,\n",
                 "    imgsz=640,\n",
                 "    batch=16,\n",
-                "    device=0, # GPU 0 (NVIDIA T4)\n",
+                "    device=0, # GPU 0 (Tesla T4)\n",
                 "    workers=4,\n",
                 "    optimizer='AdamW',\n",
                 "    lr0=0.001,\n",
@@ -568,22 +746,27 @@ def generate_colab_notebook_dict(folder_name: str, yolo_yaml_url: str, tasks_url
                 "    name='yolo_x_200epochs'\n",
                 ")\n",
                 "\n",
-                "print('📊 VALIDASI YOLO-X:')\n",
+                "print('\\n📊 VALIDASI YOLO-X:')\n",
                 "metrics_yolox = model_yolox.val()\n",
-                "print('mAP50:', metrics_yolox.box.map50)\n",
-                "print('mAP50-95:', metrics_yolox.box.map)\n",
+                "print('mAP50    :', metrics_yolox.box.map50)\n",
+                "print('mAP50-95 :', metrics_yolox.box.map)\n",
                 "\n",
-                "# Export ke ONNX\n",
+                "# Export ke format ONNX\n",
                 "model_yolox.export(format='onnx', dynamic=True, simplify=True)\n",
-                "print('✓ YOLO-X weights & ONNX exported!')\n"
+                "print('✓ YOLO-X weights & ONNX berhasil diekspor!')\n"
             ]
         },
+        # LANGKAH 9: YOLO-26
         {
             "cell_type": "markdown",
             "metadata": {},
             "source": [
-                "### 5. MODEL 2: Training YOLO-26 / Custom Variant (200 Epochs di T4 GPU)\n",
-                "Model YOLO dengan optimasi kecepatan inferensi edge."
+                "### 🔥 Langkah 9: MODEL 2 - Training YOLO-26 (Edge Variant, 200 Epochs, T4 GPU)\n",
+                "**YOLO-26** dirancang untuk perangkat Edge (Raspberry Pi, Jetson Nano, Mini PC) dengan FPS tinggi dan konsumsi memori rendah.\n",
+                "- **Pretrained Weights:** `yolo11m.pt`\n",
+                "- **Epochs:** `200`\n",
+                "- **Optimizer:** `SGD`\n",
+                "- **Batch Size:** `24`"
             ]
         },
         {
@@ -594,7 +777,7 @@ def generate_colab_notebook_dict(folder_name: str, yolo_yaml_url: str, tasks_url
             "source": [
                 "from ultralytics import YOLO\n",
                 "\n",
-                "print('🔥 START TRAINING YOLO-26 VARIANT (200 EPOCHS)...')\n",
+                "print('🔥 MEMULAI TRAINING YOLO-26 VARIANT (200 EPOCHS)...')\n",
                 "model_yolo26 = YOLO('yolo11m.pt')\n",
                 "\n",
                 "results_yolo26 = model_yolo26.train(\n",
@@ -612,22 +795,27 @@ def generate_colab_notebook_dict(folder_name: str, yolo_yaml_url: str, tasks_url
                 "    name='yolo_26_200epochs'\n",
                 ")\n",
                 "\n",
-                "print('📊 VALIDASI YOLO-26:')\n",
+                "print('\\n📊 VALIDASI YOLO-26:')\n",
                 "metrics_yolo26 = model_yolo26.val()\n",
-                "print('mAP50:', metrics_yolo26.box.map50)\n",
-                "print('mAP50-95:', metrics_yolo26.box.map)\n",
+                "print('mAP50    :', metrics_yolo26.box.map50)\n",
+                "print('mAP50-95 :', metrics_yolo26.box.map)\n",
                 "\n",
                 "# Export ke ONNX\n",
                 "model_yolo26.export(format='onnx', dynamic=True, simplify=True)\n",
-                "print('✓ YOLO-26 weights & ONNX exported!')\n"
+                "print('✓ YOLO-26 weights & ONNX berhasil diekspor!')\n"
             ]
         },
+        # LANGKAH 10: RF-DETR
         {
             "cell_type": "markdown",
             "metadata": {},
             "source": [
-                "### 6. MODEL 3: Training RF-DETR / RT-DETR Transformer (200 Epochs di T4 GPU)\n",
-                "Arsitektur Real-Time DEtection TRansformer untuk akurasi state-of-the-art."
+                "### 🎯 Langkah 10: MODEL 3 - Training RF-DETR / RT-DETR (Transformer, 200 Epochs, T4 GPU)\n",
+                "**RF-DETR / RT-DETR** adalah arsitektur Transformer Vision State-of-the-Art yang tidak membutuhkan Non-Maximum Suppression (NMS), sangat unggul untuk deteksi objek padat dan tumpang tindih.\n",
+                "- **Pretrained Weights:** `rtdetr-l.pt`\n",
+                "- **Epochs:** `200`\n",
+                "- **Optimizer:** `AdamW`\n",
+                "- **Batch Size:** `12`"
             ]
         },
         {
@@ -638,7 +826,7 @@ def generate_colab_notebook_dict(folder_name: str, yolo_yaml_url: str, tasks_url
             "source": [
                 "from ultralytics import RTDETR\n",
                 "\n",
-                "print('🎯 START TRAINING RF-DETR / RT-DETR (200 EPOCHS)...')\n",
+                "print('🎯 MEMULAI TRAINING RF-DETR / RT-DETR TRANSFORMER (200 EPOCHS)...')\n",
                 "model_rfdetr = RTDETR('rtdetr-l.pt')\n",
                 "\n",
                 "results_rfdetr = model_rfdetr.train(\n",
@@ -656,21 +844,22 @@ def generate_colab_notebook_dict(folder_name: str, yolo_yaml_url: str, tasks_url
                 "    name='rfdetr_200epochs'\n",
                 ")\n",
                 "\n",
-                "print('📊 VALIDASI RF-DETR:')\n",
+                "print('\\n📊 VALIDASI RF-DETR:')\n",
                 "metrics_rfdetr = model_rfdetr.val()\n",
                 "print('Validation Results:', metrics_rfdetr)\n",
                 "\n",
                 "# Export ke ONNX\n",
                 "model_rfdetr.export(format='onnx', dynamic=True, simplify=True)\n",
-                "print('✓ RF-DETR weights & ONNX exported!')\n"
+                "print('✓ RF-DETR weights & ONNX berhasil diekspor!')\n"
             ]
         },
+        # LANGKAH 11: RINGKASAN & HOT-SWAP
         {
             "cell_type": "markdown",
             "metadata": {},
             "source": [
-                "### 7. Hasil Bobot & Panduan Integrasi ke Raray Vision\n",
-                "Setelah training selesai, file model hasil export berada di folder `raray_vision_runs/`. Anda dapat langsung mengunduh file `.pt` atau `.onnx` dan mengunggahnya ke menu **Model Management** di Raray Vision!"
+                "### 🏆 Langkah 11: Ringkasan Bobot Model & Panduan Integrasi ke Raray Vision\n",
+                "Setelah model selesai dilatih, bobot model (`best.pt` dan `best.onnx`) siap diunduh dan diunggah ke menu **Model Management** di Raray Vision. Anda dapat melakukan **Hot-Swap** model tanpa mengubah endpoint API klien!"
             ]
         },
         {
@@ -680,12 +869,21 @@ def generate_colab_notebook_dict(folder_name: str, yolo_yaml_url: str, tasks_url
             "outputs": [],
             "source": [
                 "import glob, os\n",
-                "print('Daftar file model yang dihasilkan:')\n",
-                "exported_files = glob.glob('raray_vision_runs/**/*.pt', recursive=True) + glob.glob('raray_vision_runs/**/*.onnx', recursive=True)\n",
-                "for f in exported_files:\n",
-                "    sz = os.path.getsize(f) / (1024 * 1024)\n",
-                "    print(f'  - {f} ({sz:.2f} MB)')\n",
-                "print('\\n💡 Unggah file best.pt dan best.onnx ke Model Management di web Raray Vision!')\n"
+                "\n",
+                "print('📁 DAFTAR BOBOT MODEL YANG DIHASILKAN:')\n",
+                "exported_files = glob.glob('raray_vision_runs/**/weights/best.*', recursive=True) + glob.glob('raray_vision_runs/**/*.onnx', recursive=True)\n",
+                "\n",
+                "if exported_files:\n",
+                "    for f in exported_files:\n",
+                "        sz = os.path.getsize(f) / (1024 * 1024)\n",
+                "        print(f'  - {f} ({sz:.2f} MB)')\n",
+                "    print('\\n💡 Panduan Upload ke Raray Vision:')\n",
+                "    print('1. Buka sidebar kiri Google Colab (icon folder).')\n",
+                "    print('2. Klik kanan pada file best.pt atau best.onnx di folder raray_vision_runs > Download.')\n",
+                "    print('3. Buka web Raray Vision > Menu \"Model Management\" > Tambah/Update Model.')\n",
+                "    print('4. Model baru langsung aktif secara instan tanpa restart service!')\n",
+                "else:\n",
+                "    print('Belum ada bobot yang diekspor. Silakan jalankan salah satu cell training di Langkah 8, 9, atau 10.')\n"
             ]
         }
     ]
