@@ -1001,6 +1001,10 @@ def generate_colab_notebook_dict(folder_name: str, yolo_yaml_url: str, tasks_url
                 "gpuType": "T4",
                 "provenance": []
             },
+            "kernelspec": {
+                "display_name": "Python 3",
+                "name": "python3"
+            },
             "language_info": {
                 "name": "python"
             }
