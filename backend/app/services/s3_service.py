@@ -141,7 +141,7 @@ def get_storage_proxy_url(filename: str) -> Optional[str]:
         parsed = urlparse(clean_name)
         if parsed.netloc != urlparse(endpoint).netloc:
             return None
-        clean_name = unquote(parsed.path).lstrip("/")
+        clean_name = parsed.path.lstrip("/")
     if clean_name.startswith(f"{bucket}/"):
         clean_name = clean_name[len(bucket) + 1:]
     if not clean_name:

@@ -9,6 +9,7 @@ import threading
 import tempfile
 from datetime import datetime
 from typing import Optional, List, Dict, Any
+from urllib.parse import quote, unquote, urlparse
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Query, status, BackgroundTasks
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
@@ -19,7 +20,7 @@ try:
     from backend.app.database.models import MLModel, MLPrediction, MLEndpoint, MLDataset
     from backend.app.database.database import SessionLocal
     from backend.app.services.detection_service import detection_service
-    from backend.app.services.s3_service import s3_service, get_storage_proxy_url, get_s3_credentials
+    from backend.app.services.s3_service import s3_service, get_storage_proxy_url, get_presigned_download_url, get_s3_credentials
     from backend.app.services.label_studio_service import label_studio_service
     from backend.app.core.config import BASE_DIR
 except ImportError:
@@ -27,7 +28,7 @@ except ImportError:
     from app.database.models import MLModel, MLPrediction, MLEndpoint, MLDataset
     from app.database.database import SessionLocal
     from app.services.detection_service import detection_service
-    from app.services.s3_service import s3_service, get_storage_proxy_url, get_s3_credentials
+    from app.services.s3_service import s3_service, get_storage_proxy_url, get_presigned_download_url, get_s3_credentials
     from app.services.label_studio_service import label_studio_service
     from app.core.config import BASE_DIR
 
@@ -35,6 +36,61 @@ router = APIRouter(prefix="/api/v1/models", tags=["Object Detection & MLOps"])
 
 _dataset_jobs: Dict[str, Dict[str, Any]] = {}
 _dataset_jobs_lock = threading.Lock()
+PUBLIC_APP_URL = os.getenv("PUBLIC_APP_URL", "https://vision.chitraparatama.com").rstrip("/")
+
+
+def _stable_dataset_url(value: str) -> str:
+    """Convert this app's storage URLs to absolute, stable proxy URLs."""
+    if not isinstance(value, str) or not value:
+        return value
+    if value.startswith("/api/v1/uploads/"):
+        return f"{PUBLIC_APP_URL}{value}"
+    parsed = urlparse(value)
+    if parsed.scheme not in ("http", "https"):
+        return value
+    proxy_path = get_storage_proxy_url(value)
+    if proxy_path:
+        return f"{PUBLIC_APP_URL}{proxy_path}"
+    if parsed.netloc == urlparse(PUBLIC_APP_URL).netloc and parsed.path.startswith("/api/v1/uploads/"):
+        return f"{PUBLIC_APP_URL}{parsed.path}"
+    return value
+
+
+def _dataset_import_url(dataset_id: str) -> str:
+    return f"{PUBLIC_APP_URL}/api/v1/models/data/datasets/{dataset_id}/label-studio-tasks.json"
+
+
+def _dataset_image_url(
+    value: str,
+    folder: str,
+    image_urls: Optional[Dict[str, str]] = None,
+    original_filename: Optional[str] = None,
+) -> str:
+    filename = (original_filename or value).replace("\\", "/").rsplit("/", 1)[-1]
+    if image_urls:
+        for candidate in (filename, unquote(filename)):
+            if candidate in image_urls:
+                mapped_url = image_urls[candidate]
+                if mapped_url.startswith("/api/v1/uploads/"):
+                    directory = mapped_url.rsplit("/", 1)[0]
+                    return f"{PUBLIC_APP_URL}{directory}/{quote(candidate, safe='')}"
+                parsed_mapped = urlparse(mapped_url)
+                if (
+                    parsed_mapped.netloc == urlparse(PUBLIC_APP_URL).netloc
+                    and parsed_mapped.path.startswith("/api/v1/uploads/")
+                ):
+                    directory = parsed_mapped.path.rsplit("/", 1)[0]
+                    return f"{PUBLIC_APP_URL}{directory}/{quote(candidate, safe='')}"
+                return _stable_dataset_url(mapped_url)
+    stable_url = _stable_dataset_url(value)
+    if not value or stable_url != value or urlparse(value).scheme in ("http", "https"):
+        return stable_url
+    if not filename:
+        return value
+    _, _, prefix, _, access_key, secret_key = get_s3_credentials()
+    storage_root = prefix if access_key and secret_key else "s3_storage"
+    key = "/".join(part.strip("/") for part in (storage_root, "datasets", folder, "images", filename) if part)
+    return f"{PUBLIC_APP_URL}/api/v1/uploads/{quote(key, safe='/')}"
 
 class DatasetUpdateRequest(BaseModel):
     name: str
@@ -738,7 +794,7 @@ async def import_cvat_dataset(
                     try:
                         fname, accessible_url = future.result()
                         if accessible_url:
-                            image_url_mapping[fname] = accessible_url
+                            image_url_mapping[fname] = _stable_dataset_url(accessible_url)
                             uploaded_files.append(fname)
                     except Exception as err:
                         print(f"[CVATImport] Error uploading {future_to_member[future]}: {err}")
@@ -751,16 +807,22 @@ async def import_cvat_dataset(
 
         # Convert COCO annotations to Label Studio format
         tasks = label_studio_service.convert_coco_to_label_studio(coco_json, image_url_mapping)
+        for task in tasks:
+            if isinstance(task, dict) and isinstance(task.get("data"), dict):
+                task["data"]["image"] = _dataset_image_url(
+                    task["data"].get("image", ""), folder_name, image_url_mapping,
+                    task["data"].get("original_filename"),
+                )
 
         # Also save tasks.json in S3 folder for direct import in Label Studio
         tasks_json_bytes = json.dumps(tasks, indent=2).encode("utf-8")
         tasks_s3_key = f"datasets/{folder_name}/label_studio_tasks.json"
-        tasks_url = s3_service.upload_bytes(tasks_json_bytes, tasks_s3_key, content_type="application/json")
+        tasks_url = _stable_dataset_url(s3_service.upload_bytes(tasks_json_bytes, tasks_s3_key, content_type="application/json"))
 
         # Save COCO annotations (with S3 image URLs embedded) for RF-DETR & PyTorch COCO Evaluators
         coco_annotations_s3_key = f"datasets/{folder_name}/annotations_coco.json"
         coco_s3_bytes = json.dumps(coco_json, indent=2).encode("utf-8")
-        coco_url = s3_service.upload_bytes(coco_s3_bytes, coco_annotations_s3_key, content_type="application/json")
+        coco_url = _stable_dataset_url(s3_service.upload_bytes(coco_s3_bytes, coco_annotations_s3_key, content_type="application/json"))
 
         # Generate YOLO data.yaml configuration file
         import yaml
@@ -781,7 +843,7 @@ async def import_cvat_dataset(
         }
         yolo_yaml_bytes = yaml.dump(yolo_yaml_data, sort_keys=False).encode("utf-8")
         yolo_yaml_s3_key = f"datasets/{folder_name}/data.yaml"
-        yolo_yaml_url = s3_service.upload_bytes(yolo_yaml_bytes, yolo_yaml_s3_key, content_type="text/yaml")
+        yolo_yaml_url = _stable_dataset_url(s3_service.upload_bytes(yolo_yaml_bytes, yolo_yaml_s3_key, content_type="text/yaml"))
 
         # Optionally push directly if Label Studio instance is configured
         ls_push_result = None
@@ -1111,7 +1173,7 @@ async def import_cvat_dataset(
 
         colab_nb_bytes = json.dumps(colab_nb_dict, indent=2).encode("utf-8")
         colab_nb_s3_key = f"datasets/{folder_name}/raray_vision_colab_training.ipynb"
-        colab_nb_url = s3_service.upload_bytes(colab_nb_bytes, colab_nb_s3_key, content_type="application/x-ipynb+json")
+        colab_nb_url = _stable_dataset_url(s3_service.upload_bytes(colab_nb_bytes, colab_nb_s3_key, content_type="application/x-ipynb+json"))
 
         # Ready-to-run Colab code snippet
         colab_yolo_snippet = f"""# ==========================================
@@ -1252,10 +1314,12 @@ def _run_dataset_import(job_id: str, name: str, coco_path: str, zip_path: str, p
             ))
 
         dataset_id = str(uuid.uuid4())
+        result["label_studio_import_url"] = _dataset_import_url(dataset_id)
+        result["label_studio_instructions"]["method_2_direct_import_url"] = result["label_studio_import_url"]
         artifacts = {key: result.get(key) for key in (
             "s3_bucket", "s3_folder_prefix", "s3_uri", "s3_endpoint", "tasks_json_url",
             "coco_json_url", "yolo_yaml_url", "colab_notebook_url", "colab_training",
-            "label_studio_instructions"
+            "label_studio_instructions", "label_studio_import_url"
         )}
         db = SessionLocal()
         try:
@@ -1349,7 +1413,24 @@ def _dataset_payload(dataset: MLDataset, include_images: bool = False):
 
     for key, value in list(artifacts.items()):
         if key.endswith("_url"):
-            artifacts[key] = refresh_url(value)
+            artifacts[key] = _stable_dataset_url(refresh_url(value))
+    artifacts["label_studio_import_url"] = _dataset_import_url(dataset.id)
+
+    colab_training = artifacts.get("colab_training")
+    if isinstance(colab_training, dict):
+        for url_key in ("notebook_url", "data_yaml_url", "coco_json_url"):
+            old_url = colab_training.get(url_key)
+            new_url = _stable_dataset_url(refresh_url(old_url))
+            if isinstance(old_url, str) and old_url and old_url != new_url:
+                for code_key in ("yolo_code", "yolo26_code", "rfdetr_code"):
+                    if isinstance(colab_training.get(code_key), str):
+                        colab_training[code_key] = colab_training[code_key].replace(old_url, new_url)
+            colab_training[url_key] = new_url
+    instructions = artifacts.get("label_studio_instructions")
+    if not isinstance(instructions, dict):
+        instructions = {}
+        artifacts["label_studio_instructions"] = instructions
+    instructions["method_2_direct_import_url"] = artifacts["label_studio_import_url"]
 
     payload = {
         "id": dataset.id, "name": dataset.name, "dataset_folder": dataset.folder,
@@ -1362,9 +1443,52 @@ def _dataset_payload(dataset: MLDataset, include_images: bool = False):
     if include_images:
         images = json.loads(dataset.images or "[]")
         for image in images:
-            image["url"] = refresh_url(image.get("url", ""))
+            image["url"] = _stable_dataset_url(refresh_url(image.get("url", "")))
         payload["images"] = images
     return payload
+
+
+@router.get("/data/datasets/{dataset_id}/label-studio-tasks.json")
+def get_label_studio_tasks(dataset_id: str, db: Session = Depends(get_db)):
+    dataset = db.query(MLDataset).filter(MLDataset.id == dataset_id).first()
+    if not dataset:
+        raise HTTPException(status_code=404, detail="Dataset tidak ditemukan.")
+
+    tasks_key = f"datasets/{dataset.folder}/label_studio_tasks.json"
+    tasks = None
+    signed_url = get_presigned_download_url(tasks_key)
+    if signed_url:
+        try:
+            import requests
+            response = requests.get(signed_url, timeout=15)
+            response.raise_for_status()
+            tasks = response.json()
+        except Exception:
+            tasks = None
+
+    if tasks is None:
+        local_path = os.path.join(s3_service.local_s3_dir, *tasks_key.split("/"))
+        try:
+            with open(local_path, "r", encoding="utf-8") as tasks_file:
+                tasks = json.load(tasks_file)
+        except (OSError, json.JSONDecodeError) as exc:
+            raise HTTPException(status_code=404, detail="File Label Studio dataset tidak ditemukan.") from exc
+
+    if not isinstance(tasks, list):
+        raise HTTPException(status_code=502, detail="Format task Label Studio tidak valid.")
+    stored_images = json.loads(dataset.images or "[]")
+    image_urls = {
+        image.get("name"): image.get("url")
+        for image in stored_images
+        if isinstance(image, dict) and image.get("name") and image.get("url")
+    }
+    for task in tasks:
+        if isinstance(task, dict) and isinstance(task.get("data"), dict):
+            task["data"]["image"] = _dataset_image_url(
+                task["data"].get("image", ""), dataset.folder, image_urls,
+                task["data"].get("original_filename"),
+            )
+    return tasks
 
 
 @router.get("/data/datasets")

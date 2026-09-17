@@ -121,8 +121,8 @@ const copyToClipboard = async (text, key) => {
 
 const getFullUrl = (url) => {
   if (!url) return ''
-  if (url.startsWith('http://') || url.startsWith('https://')) return url
-  return `${API_BASE_URL}${url}`
+  if (/^https?:\/\//i.test(url)) return url
+  return new URL(url, API_BASE_URL || window.location.origin).toString()
 }
 
 const fetchDatasets = async () => {
@@ -479,12 +479,12 @@ onMounted(() => {
         <!-- Field 3: Tasks JSON Direct URL -->
         <div class="copy-field-item">
           <div class="field-label-row">
-            <span class="field-title">Tasks Anotasi URL (Untuk Tab 'Import' di Label Studio)</span>
+            <span class="field-title">Link Siap Import Label Studio</span>
             <span v-if="copiedKey === 'tasks_url'" class="copied-indicator">✓ Tersalin!</span>
           </div>
           <div class="copy-input-group">
-            <input type="text" readonly :value="getFullUrl(importResult.tasks_json_url)" class="copy-input text-blue-600" />
-            <button class="btn-copy" @click="copyToClipboard(getFullUrl(importResult.tasks_json_url), 'tasks_url')">
+            <input type="text" readonly :value="getFullUrl(importResult.label_studio_import_url || importResult.tasks_json_url)" class="copy-input text-blue-600" />
+            <button class="btn-copy" @click="copyToClipboard(getFullUrl(importResult.label_studio_import_url || importResult.tasks_json_url), 'tasks_url')">
               <svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
               Salin URL
             </button>
@@ -534,7 +534,7 @@ onMounted(() => {
             <strong>Opsi 1: Import Langsung via URL</strong>
             <ol>
               <li>Buka Project di Label Studio &gt; Klik <strong>Import</strong>.</li>
-              <li>Pilih tab <strong>URL</strong>, lalu paste <em>Tasks Anotasi URL</em> di atas.</li>
+              <li>Pilih tab <strong>URL</strong>, lalu paste <em>Link Siap Import Label Studio</em> di atas.</li>
               <li>Klik <strong>Load</strong>. Seluruh gambar dan bounding box CVAT langsung muncul sebagai task teranotasi!</li>
             </ol>
           </div>
