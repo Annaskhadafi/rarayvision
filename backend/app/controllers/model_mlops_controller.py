@@ -92,6 +92,153 @@ def _dataset_image_url(
     key = "/".join(part.strip("/") for part in (storage_root, "datasets", folder, "images", filename) if part)
     return f"{PUBLIC_APP_URL}/api/v1/uploads/{quote(key, safe='/')}"
 
+
+def build_colab_snippets(folder_name: str, yolo_yaml_url: str, tasks_url: str, coco_url: str) -> Dict[str, str]:
+    dataset_setup_script = f"""import os, glob, shutil, requests, yaml
+from concurrent.futures import ThreadPoolExecutor
+
+# 1. Setup dataset dirs
+base_dir = os.path.abspath('dataset')
+train_img = os.path.join(base_dir, 'images', 'train')
+val_img = os.path.join(base_dir, 'images', 'val')
+train_lbl = os.path.join(base_dir, 'labels', 'train')
+val_lbl = os.path.join(base_dir, 'labels', 'val')
+for p in [train_img, val_img, train_lbl, val_lbl]:
+    os.makedirs(p, exist_ok=True)
+
+# 2. Download data.yaml & tasks
+r_yaml = requests.get('{yolo_yaml_url}')
+if r_yaml.status_code == 200:
+    with open('data.yaml', 'wb') as f:
+        f.write(r_yaml.content)
+with open('data.yaml', 'r') as f:
+    cfg = yaml.safe_load(f) or {{}}
+raw_names = cfg.get('names', {{0: 'object'}})
+name_to_id = {{str(v).lower(): int(k) for k, v in raw_names.items()}} if isinstance(raw_names, dict) else {{'object': 0}}
+
+tasks = requests.get('{tasks_url}').json() if requests.get('{tasks_url}').status_code == 200 else []
+
+def dl_item(idx_item):
+    idx, item = idx_item
+    img_url = item.get('data', {{}}).get('image', '')
+    fname = item.get('data', {{}}).get('original_filename') or os.path.basename(img_url.split('?')[0]) or f'img_{{idx}}.jpg'
+    split = 'val' if (len(tasks) > 1 and idx % 5 == 0) else 'train'
+    res = requests.get(img_url, timeout=20)
+    if res.status_code == 200:
+        with open(os.path.join(base_dir, 'images', split, fname), 'wb') as f:
+            f.write(res.content)
+        lines = []
+        for ann in item.get('annotations', [{{}}])[0].get('result', []):
+            v = ann.get('value', {{}})
+            lbls = v.get('rectanglelabels', ['object'])
+            first_lbl = str(lbls[0]).lower() if lbls else 'object'
+            cid = name_to_id.get(first_lbl, 0)
+            xc = (v.get('x', 0) + v.get('width', 0) / 2.0) / 100.0
+            yc = (v.get('y', 0) + v.get('height', 0) / 2.0) / 100.0
+            lines.append(f"{{cid}} {{xc:.6f}} {{yc:.6f}} {{v.get('width',0)/100.0:.6f}} {{v.get('height',0)/100.0:.6f}}")
+        with open(os.path.join(base_dir, 'labels', split, os.path.splitext(fname)[0] + '.txt'), 'w') as lf:
+            lf.write('\\n'.join(lines))
+
+with ThreadPoolExecutor(max_workers=16) as ex:
+    list(ex.map(dl_item, enumerate(tasks)))
+
+# Fallback ensure both train and val have files
+t_imgs = glob.glob(os.path.join(train_img, '*.*'))
+v_imgs = glob.glob(os.path.join(val_img, '*.*'))
+if not v_imgs and t_imgs:
+    for f in t_imgs[:max(1, len(t_imgs)//5)]:
+        shutil.copy(f, val_img)
+        lbl = os.path.join(train_lbl, os.path.splitext(os.path.basename(f))[0] + '.txt')
+        if os.path.exists(lbl): shutil.copy(lbl, val_lbl)
+elif not t_imgs and v_imgs:
+    for f in v_imgs:
+        shutil.copy(f, train_img)
+        lbl = os.path.join(val_lbl, os.path.splitext(os.path.basename(f))[0] + '.txt')
+        if os.path.exists(lbl): shutil.copy(lbl, train_lbl)
+
+cfg['path'] = base_dir
+cfg['train'] = 'images/train'
+cfg['val'] = 'images/val'
+with open('data.yaml', 'w') as f:
+    yaml.dump(cfg, f, sort_keys=False)
+print('Dataset Ready! Train:', len(glob.glob(os.path.join(train_img, '*.*'))), '| Val:', len(glob.glob(os.path.join(val_img, '*.*'))))
+"""
+
+    yolo_code = f"""# ==========================================
+# 🚀 GOOGLE COLAB TRAINING PIPELINE (YOLO-X / YOLO11-X: 200 EPOCHS, T4 GPU)
+# Dataset: {folder_name}
+# ==========================================
+!pip install -q ultralytics pyyaml requests
+
+# 1. Download & Prepare Dataset Locally
+{dataset_setup_script}
+
+# 2. Train YOLO-X (200 Epochs, T4 GPU)
+from ultralytics import YOLO
+
+model = YOLO("yolo11x.pt") # YOLO-X architecture
+results = model.train(data="data.yaml", epochs=200, imgsz=640, device=0, batch=16, optimizer="AdamW")
+
+# 3. Validasi Model
+metrics = model.val()
+print("mAP50-95:", metrics.box.map)
+
+# 4. Export ONNX untuk Hot-Swap di Raray Vision
+model.export(format="onnx")
+"""
+
+    yolo26_code = f"""# ==========================================
+# 🔥 GOOGLE COLAB TRAINING PIPELINE (YOLO-26: 200 EPOCHS, T4 GPU)
+# Dataset: {folder_name}
+# ==========================================
+!pip install -q ultralytics pyyaml requests
+
+# 1. Download & Prepare Dataset Locally
+{dataset_setup_script}
+
+# 2. Train YOLO-26 (200 Epochs, T4 GPU)
+from ultralytics import YOLO
+
+model = YOLO("yolo11m.pt")
+results = model.train(data="data.yaml", epochs=200, imgsz=640, device=0, batch=24, optimizer="SGD")
+
+# 3. Validasi Model
+metrics = model.val()
+print("mAP50-95:", metrics.box.map)
+
+# 4. Export ONNX untuk Hot-Swap di Raray Vision
+model.export(format="onnx")
+"""
+
+    rfdetr_code = f"""# ==========================================
+# 🎯 GOOGLE COLAB TRAINING PIPELINE (RF-DETR / RT-DETR: 200 EPOCHS, T4 GPU)
+# Dataset: {folder_name}
+# ==========================================
+!pip install -q ultralytics pyyaml requests
+
+# 1. Download & Prepare Dataset Locally
+{dataset_setup_script}
+
+# 2. Train RF-DETR / RT-DETR (200 Epochs, T4 GPU)
+from ultralytics import RTDETR
+
+model = RTDETR("rtdetr-l.pt")
+results = model.train(data="data.yaml", epochs=200, imgsz=640, device=0, batch=12)
+
+# 3. Validasi Model
+metrics = model.val()
+print("Validation Results:", metrics)
+
+# 4. Export ONNX untuk Hot-Swap di Raray Vision
+model.export(format="onnx")
+"""
+    return {
+        "yolo_code": yolo_code,
+        "yolo26_code": yolo26_code,
+        "rfdetr_code": rfdetr_code
+    }
+
+
 class DatasetUpdateRequest(BaseModel):
     name: str
 
@@ -1206,145 +1353,16 @@ async def import_cvat_dataset(
         colab_nb_s3_key = f"datasets/{folder_name}/raray_vision_colab_training.ipynb"
         colab_nb_url = _stable_dataset_url(s3_service.upload_bytes(colab_nb_bytes, colab_nb_s3_key, content_type="application/x-ipynb+json"))
 
-        # Ready-to-run Colab code snippet with self-contained dataset setup
-        dataset_setup_script = f"""import os, glob, shutil, requests, yaml
-from concurrent.futures import ThreadPoolExecutor
-
-# 1. Setup dataset dirs
-base_dir = os.path.abspath('dataset')
-train_img = os.path.join(base_dir, 'images', 'train')
-val_img = os.path.join(base_dir, 'images', 'val')
-train_lbl = os.path.join(base_dir, 'labels', 'train')
-val_lbl = os.path.join(base_dir, 'labels', 'val')
-for p in [train_img, val_img, train_lbl, val_lbl]:
-    os.makedirs(p, exist_ok=True)
-
-# 2. Download data.yaml & tasks
-r_yaml = requests.get('{yolo_yaml_url}')
-if r_yaml.status_code == 200:
-    with open('data.yaml', 'wb') as f:
-        f.write(r_yaml.content)
-with open('data.yaml', 'r') as f:
-    cfg = yaml.safe_load(f) or {{}}
-raw_names = cfg.get('names', {{0: 'object'}})
-name_to_id = {{str(v).lower(): int(k) for k, v in raw_names.items()}} if isinstance(raw_names, dict) else {{'object': 0}}
-
-tasks = requests.get('{tasks_url}').json() if requests.get('{tasks_url}').status_code == 200 else []
-
-def dl_item(idx_item):
-    idx, item = idx_item
-    img_url = item.get('data', {{}}).get('image', '')
-    fname = item.get('data', {{}}).get('original_filename') or os.path.basename(img_url.split('?')[0]) or f'img_{{idx}}.jpg'
-    split = 'val' if (len(tasks) > 1 and idx % 5 == 0) else 'train'
-    res = requests.get(img_url, timeout=20)
-    if res.status_code == 200:
-        with open(os.path.join(base_dir, 'images', split, fname), 'wb') as f:
-            f.write(res.content)
-        lines = []
-        for ann in item.get('annotations', [{{}}])[0].get('result', []):
-            v = ann.get('value', {{}})
-            lbls = v.get('rectanglelabels', ['object'])
-            first_lbl = str(lbls[0]).lower() if lbls else 'object'
-            cid = name_to_id.get(first_lbl, 0)
-            xc = (v.get('x', 0) + v.get('width', 0) / 2.0) / 100.0
-            yc = (v.get('y', 0) + v.get('height', 0) / 2.0) / 100.0
-            lines.append(f"{{cid}} {{xc:.6f}} {{yc:.6f}} {{v.get('width',0)/100.0:.6f}} {{v.get('height',0)/100.0:.6f}}")
-        with open(os.path.join(base_dir, 'labels', split, os.path.splitext(fname)[0] + '.txt'), 'w') as lf:
-            lf.write('\\n'.join(lines))
-
-with ThreadPoolExecutor(max_workers=16) as ex:
-    list(ex.map(dl_item, enumerate(tasks)))
-
-# Fallback ensure both train and val have files
-t_imgs = glob.glob(os.path.join(train_img, '*.*'))
-v_imgs = glob.glob(os.path.join(val_img, '*.*'))
-if not v_imgs and t_imgs:
-    for f in t_imgs[:max(1, len(t_imgs)//5)]:
-        shutil.copy(f, val_img)
-        lbl = os.path.join(train_lbl, os.path.splitext(os.path.basename(f))[0] + '.txt')
-        if os.path.exists(lbl): shutil.copy(lbl, val_lbl)
-elif not t_imgs and v_imgs:
-    for f in v_imgs:
-        shutil.copy(f, train_img)
-        lbl = os.path.join(val_lbl, os.path.splitext(os.path.basename(f))[0] + '.txt')
-        if os.path.exists(lbl): shutil.copy(lbl, train_lbl)
-
-cfg['path'] = base_dir
-cfg['train'] = 'images/train'
-cfg['val'] = 'images/val'
-with open('data.yaml', 'w') as f:
-    yaml.dump(cfg, f, sort_keys=False)
-print('Dataset Ready! Train:', len(glob.glob(os.path.join(train_img, '*.*'))), '| Val:', len(glob.glob(os.path.join(val_img, '*.*'))))
-"""
-
-        colab_yolo_snippet = f"""# ==========================================
-# 🚀 GOOGLE COLAB TRAINING PIPELINE (YOLO-X / YOLO11-X: 200 EPOCHS, T4 GPU)
-# Dataset: {folder_name}
-# ==========================================
-!pip install -q ultralytics pyyaml requests
-
-# 1. Download & Prepare Dataset Locally
-{dataset_setup_script}
-
-# 2. Train YOLO-X (200 Epochs, T4 GPU)
-from ultralytics import YOLO
-
-model = YOLO("yolo11x.pt") # YOLO-X architecture
-results = model.train(data="data.yaml", epochs=200, imgsz=640, device=0, batch=16, optimizer="AdamW")
-
-# 3. Validasi Model
-metrics = model.val()
-print("mAP50-95:", metrics.box.map)
-
-# 4. Export ONNX untuk Hot-Swap di Raray Vision
-model.export(format="onnx")
-"""
-
-        colab_yolo26_snippet = f"""# ==========================================
-# 🔥 GOOGLE COLAB TRAINING PIPELINE (YOLO-26: 200 EPOCHS, T4 GPU)
-# Dataset: {folder_name}
-# ==========================================
-!pip install -q ultralytics pyyaml requests
-
-# 1. Download & Prepare Dataset Locally
-{dataset_setup_script}
-
-# 2. Train YOLO-26 (200 Epochs, T4 GPU)
-from ultralytics import YOLO
-
-model = YOLO("yolo11m.pt")
-results = model.train(data="data.yaml", epochs=200, imgsz=640, device=0, batch=24, optimizer="SGD")
-
-# 3. Validasi Model
-metrics = model.val()
-print("mAP50-95:", metrics.box.map)
-
-# 4. Export ONNX untuk Hot-Swap di Raray Vision
-model.export(format="onnx")
-"""
-
-        colab_rfdetr_snippet = f"""# ==========================================
-# 🎯 GOOGLE COLAB TRAINING PIPELINE (RF-DETR / RT-DETR: 200 EPOCHS, T4 GPU)
-# Dataset: {folder_name}
-# ==========================================
-!pip install -q ultralytics pyyaml requests
-
-# 1. Download & Prepare Dataset Locally
-{dataset_setup_script}
-
-# 2. Train RF-DETR / RT-DETR (200 Epochs, T4 GPU)
-from ultralytics import RTDETR
-
-model = RTDETR("rtdetr-l.pt")
-results = model.train(data="data.yaml", epochs=200, imgsz=640, device=0, batch=12)
-
-# 3. Validasi Model
-metrics = model.val()
-print("Validation Results:", metrics)
-
-# 4. Export ONNX untuk Hot-Swap di Raray Vision
-model.export(format="onnx")
-"""
+        # Ready-to-run Colab code snippets
+        snippets = build_colab_snippets(
+            folder_name=folder_name,
+            yolo_yaml_url=yolo_yaml_url,
+            tasks_url=tasks_url,
+            coco_url=coco_url
+        )
+        colab_yolo_snippet = snippets["yolo_code"]
+        colab_yolo26_snippet = snippets["yolo26_code"]
+        colab_rfdetr_snippet = snippets["rfdetr_code"]
 
         return {
             "success": True,
@@ -1516,21 +1534,33 @@ def _dataset_payload(dataset: MLDataset, include_images: bool = False):
             artifacts[key] = _stable_dataset_url(refresh_url(value))
     artifacts["label_studio_import_url"] = _dataset_import_url(dataset.id)
 
-    colab_training = artifacts.get("colab_training")
-    if isinstance(colab_training, dict):
-        for url_key in ("notebook_url", "data_yaml_url", "coco_json_url"):
-            old_url = colab_training.get(url_key)
-            new_url = _stable_dataset_url(refresh_url(old_url))
-            if isinstance(old_url, str) and old_url and old_url != new_url:
-                for code_key in ("yolo_code", "yolo26_code", "rfdetr_code"):
-                    if isinstance(colab_training.get(code_key), str):
-                        colab_training[code_key] = colab_training[code_key].replace(old_url, new_url)
-            colab_training[url_key] = new_url
     instructions = artifacts.get("label_studio_instructions")
     if not isinstance(instructions, dict):
         instructions = {}
         artifacts["label_studio_instructions"] = instructions
     instructions["method_2_direct_import_url"] = artifacts["label_studio_import_url"]
+
+    # Automatically generate / upgrade colab_training snippets with full dataset downloader
+    yolo_yaml_url = artifacts.get("yolo_yaml_url")
+    tasks_url = artifacts.get("tasks_json_url") or artifacts["label_studio_import_url"]
+    coco_json_url = artifacts.get("coco_json_url")
+    colab_nb_url = artifacts.get("colab_notebook_url")
+
+    if yolo_yaml_url:
+        fresh_snippets = build_colab_snippets(
+            folder_name=dataset.folder,
+            yolo_yaml_url=yolo_yaml_url,
+            tasks_url=tasks_url,
+            coco_url=coco_json_url or ""
+        )
+        artifacts["colab_training"] = {
+            "notebook_url": colab_nb_url,
+            "data_yaml_url": yolo_yaml_url,
+            "coco_json_url": coco_json_url,
+            "yolo_code": fresh_snippets["yolo_code"],
+            "yolo26_code": fresh_snippets["yolo26_code"],
+            "rfdetr_code": fresh_snippets["rfdetr_code"]
+        }
 
     payload = {
         "id": dataset.id, "name": dataset.name, "dataset_folder": dataset.folder,
