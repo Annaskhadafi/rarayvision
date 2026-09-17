@@ -19,7 +19,7 @@ try:
     from backend.app.database.models import MLModel, MLPrediction, MLEndpoint, MLDataset
     from backend.app.database.database import SessionLocal
     from backend.app.services.detection_service import detection_service
-    from backend.app.services.s3_service import s3_service
+    from backend.app.services.s3_service import s3_service, get_presigned_download_url, get_s3_credentials
     from backend.app.services.label_studio_service import label_studio_service
     from backend.app.core.config import BASE_DIR
 except ImportError:
@@ -27,7 +27,7 @@ except ImportError:
     from app.database.models import MLModel, MLPrediction, MLEndpoint, MLDataset
     from app.database.database import SessionLocal
     from app.services.detection_service import detection_service
-    from app.services.s3_service import s3_service
+    from app.services.s3_service import s3_service, get_presigned_download_url, get_s3_credentials
     from app.services.label_studio_service import label_studio_service
     from app.core.config import BASE_DIR
 
@@ -1340,6 +1340,17 @@ def get_dataset_job(job_id: str):
 
 def _dataset_payload(dataset: MLDataset, include_images: bool = False):
     artifacts = json.loads(dataset.artifacts or "{}")
+    endpoint, bucket, _, _, _, _ = get_s3_credentials()
+
+    def refresh_url(value):
+        if not isinstance(value, str) or not value.startswith(f"{endpoint.rstrip('/')}/{bucket}/"):
+            return value
+        return get_presigned_download_url(value) or value
+
+    for key, value in list(artifacts.items()):
+        if key.endswith("_url"):
+            artifacts[key] = refresh_url(value)
+
     payload = {
         "id": dataset.id, "name": dataset.name, "dataset_folder": dataset.folder,
         "status": dataset.status, "images_uploaded_count": dataset.image_count,
@@ -1349,7 +1360,10 @@ def _dataset_payload(dataset: MLDataset, include_images: bool = False):
         **artifacts,
     }
     if include_images:
-        payload["images"] = json.loads(dataset.images or "[]")
+        images = json.loads(dataset.images or "[]")
+        for image in images:
+            image["url"] = refresh_url(image.get("url", ""))
+        payload["images"] = images
     return payload
 
 

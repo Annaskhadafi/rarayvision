@@ -1,6 +1,7 @@
 import os
 import logging
 from typing import Optional
+from urllib.parse import unquote, urlparse
 
 logger = logging.getLogger(__name__)
 
@@ -65,9 +66,15 @@ def upload_file_to_s3(file_bytes: bytes, filename: str, content_type: str = "ima
         resp = requests.put(url, data=file_bytes, headers=headers, timeout=10)
         
         if resp.status_code in (200, 201):
-            public_url = f"{endpoint.rstrip('/')}/{bucket}/{s3_key}"
-            logger.info(f"[S3] Uploaded file to Cloudhost S3: {public_url}")
-            return public_url
+            # The bucket is private, so the raw object URL returns AccessDenied.
+            # Return a signed read URL for browser/Label Studio consumers.
+            download_url = s3_client.generate_presigned_url(
+                "get_object",
+                Params={"Bucket": bucket, "Key": s3_key},
+                ExpiresIn=3600,
+            )
+            logger.info(f"[S3] Uploaded file to Cloudhost S3: {s3_key}")
+            return download_url
         else:
             logger.error(f"[S3] Upload failed with status {resp.status_code}: {resp.text}")
             return None
@@ -102,6 +109,10 @@ def get_presigned_download_url(filename: str, expires_in: int = 3600) -> Optiona
         )
 
         clean_name = filename.lstrip("/")
+        if clean_name.startswith(("http://", "https://")):
+            clean_name = unquote(urlparse(clean_name).path).lstrip("/")
+        if clean_name.startswith(f"{bucket}/"):
+            clean_name = clean_name[len(bucket) + 1:]
         if prefix and clean_name.startswith(f"{prefix}/"):
             s3_key = clean_name
         elif prefix:
@@ -148,9 +159,9 @@ class S3Service:
 
     def get_url(self, s3_key: str) -> str:
         s3_key = s3_key.lstrip("/")
-        endpoint, bucket, prefix, _, access_key, _ = get_s3_credentials()
-        if access_key and endpoint:
-            return f"{endpoint.rstrip('/')}/{bucket}/{s3_key}"
+        signed_url = get_presigned_download_url(s3_key)
+        if signed_url:
+            return signed_url
         return f"/api/v1/uploads/s3_storage/{s3_key}"
 
 
