@@ -1,8 +1,6 @@
 <script setup>
-import { ref } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { API_BASE_URL } from '../../utils'
-
-import { onMounted } from 'vue'
 
 const datasetName = ref('')
 const cocoJsonFile = ref(null)
@@ -20,6 +18,53 @@ const importResult = ref(null)
 const errorMessage = ref('')
 const copiedKey = ref('')
 const activeTrainingTab = ref('yolo')
+
+const colabModelMap = {
+  yolo: {
+    key: 'yolox',
+    label: 'YOLO-X',
+    githubUrl: 'https://colab.research.google.com/github/Annaskhadafi/rarayvision/blob/main/raray_vision_yolox_colab.ipynb',
+    filename: 'raray_vision_yolox_colab.ipynb'
+  },
+  yolo26: {
+    key: 'yolo26',
+    label: 'YOLO-26',
+    githubUrl: 'https://colab.research.google.com/github/Annaskhadafi/rarayvision/blob/main/raray_vision_yolo26_colab.ipynb',
+    filename: 'raray_vision_yolo26_colab.ipynb'
+  },
+  rfdetr: {
+    key: 'rfdetr',
+    label: 'RF-DETR',
+    githubUrl: 'https://colab.research.google.com/github/Annaskhadafi/rarayvision/blob/main/raray_vision_rfdetr_colab.ipynb',
+    filename: 'raray_vision_rfdetr_colab.ipynb'
+  }
+}
+
+const currentColabModel = computed(() => {
+  return colabModelMap[activeTrainingTab.value] || colabModelMap.yolo
+})
+
+const currentColabGithubUrl = computed(() => {
+  return currentColabModel.value.githubUrl
+})
+
+const currentColabDownloadUrl = computed(() => {
+  if (!importResult.value) return ''
+  const m = currentColabModel.value
+  if (importResult.value.colab_notebooks && importResult.value.colab_notebooks[m.key]) {
+    return getFullUrl(importResult.value.colab_notebooks[m.key])
+  }
+  if (importResult.value.colab_training && importResult.value.colab_training.notebook_urls && importResult.value.colab_training.notebook_urls[m.key]) {
+    return getFullUrl(importResult.value.colab_training.notebook_urls[m.key])
+  }
+  if (importResult.value.dataset_id) {
+    return `${API_BASE_URL}/api/v1/models/data/datasets/${importResult.value.dataset_id}/colab-notebook.ipynb?model=${m.key}`
+  }
+  if (importResult.value.colab_notebook_url) {
+    return getFullUrl(importResult.value.colab_notebook_url)
+  }
+  return ''
+})
 const datasets = ref([])
 const selectedDataset = ref(null)
 const isLoadingDatasets = ref(false)
@@ -557,31 +602,32 @@ onMounted(() => {
         <div class="colab-header">
           <div class="flex items-center gap-2">
             <svg viewBox="0 0 24 24" width="18" height="18" stroke="#d97706" stroke-width="2" fill="none"><circle cx="12" cy="12" r="10"></circle><polygon points="10 8 16 12 10 16 10 8"></polygon></svg>
-            <h3 class="colab-title">Google Colab Training Hub (YOLO-X, YOLO-26, RF-DETR &bull; 200 Epochs T4 GPU)</h3>
+            <h3 class="colab-title">Google Colab Training Hub (Notebook Terpisah per Model &bull; T4 GPU 200 Epochs)</h3>
           </div>
           
           <div class="flex items-center gap-2">
-            <!-- 1-Click Open in Google Colab -->
+            <!-- 1-Click Open in Google Colab (Per Model Terpilih) -->
             <a 
-              href="https://colab.research.google.com/github/Annaskhadafi/rarayvision/blob/main/raray_vision_training_colab.ipynb" 
+              :href="currentColabGithubUrl" 
               target="_blank" 
               class="btn-open-colab"
-              title="Buka langsung notebook training di Google Colab via GitHub"
+              :title="`Buka langsung notebook training ${currentColabModel.label} di Google Colab via GitHub`"
             >
               <svg viewBox="0 0 24 24" width="13" height="13" stroke="currentColor" stroke-width="2" fill="none"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path><polyline points="15 3 21 3 21 9"></polyline><line x1="10" y1="14" x2="21" y2="3"></line></svg>
-              Buka di Colab (1-Klik)
+              Buka {{ currentColabModel.label }} di Colab (1-Klik)
             </a>
 
-            <!-- Download / Open .ipynb Button -->
+            <!-- Download / Open .ipynb Button (Per Model Terpilih) -->
             <a 
-              v-if="importResult.colab_notebook_url"
-              :href="getFullUrl(importResult.colab_notebook_url)" 
+              v-if="currentColabDownloadUrl"
+              :href="currentColabDownloadUrl" 
               target="_blank" 
-              download="raray_vision_colab_training.ipynb"
+              :download="currentColabModel.filename"
               class="btn-download-ipynb"
+              :title="`Unduh file notebook .ipynb khusus ${currentColabModel.label}`"
             >
               <svg viewBox="0 0 24 24" width="13" height="13" stroke="currentColor" stroke-width="2" fill="none"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
-              Unduh Notebook (.ipynb)
+              Unduh .ipynb ({{ currentColabModel.label }})
             </a>
 
             <div class="colab-tabs">
@@ -591,7 +637,7 @@ onMounted(() => {
                 :class="{ 'active': activeTrainingTab === 'yolo' }" 
                 @click="activeTrainingTab = 'yolo'"
               >
-                1. YOLO-X
+                ⚡ 1. YOLO-X
               </button>
               <button 
                 type="button" 
@@ -599,7 +645,7 @@ onMounted(() => {
                 :class="{ 'active': activeTrainingTab === 'yolo26' }" 
                 @click="activeTrainingTab = 'yolo26'"
               >
-                2. YOLO-26
+                🔥 2. YOLO-26
               </button>
               <button 
                 type="button" 
@@ -607,17 +653,17 @@ onMounted(() => {
                 :class="{ 'active': activeTrainingTab === 'rfdetr' }" 
                 @click="activeTrainingTab = 'rfdetr'"
               >
-                3. RF-DETR
+                🎯 3. RF-DETR
               </button>
             </div>
           </div>
         </div>
 
         <!-- Direct S3 Notebook URL Info Row -->
-        <div v-if="importResult.colab_notebook_url" class="ipynb-url-row">
-          <span class="text-xs text-amber-900 font-medium">Link Notebook S3:</span>
-          <input type="text" readonly :value="getFullUrl(importResult.colab_notebook_url)" class="copy-input text-xs font-mono py-1" />
-          <button class="btn-copy py-1 text-xs" @click="copyToClipboard(getFullUrl(importResult.colab_notebook_url), 'colab_ipynb_url')">
+        <div v-if="currentColabDownloadUrl" class="ipynb-url-row">
+          <span class="text-xs text-amber-900 font-medium">Link Notebook ({{ currentColabModel.label }}):</span>
+          <input type="text" readonly :value="currentColabDownloadUrl" class="copy-input text-xs font-mono py-1" />
+          <button class="btn-copy py-1 text-xs" @click="copyToClipboard(currentColabDownloadUrl, 'colab_ipynb_url')">
             {{ copiedKey === 'colab_ipynb_url' ? '✓ Tersalin!' : 'Salin URL .ipynb' }}
           </button>
         </div>
@@ -625,13 +671,22 @@ onMounted(() => {
         <!-- TAB 1: YOLO-X Snippet -->
         <div v-if="activeTrainingTab === 'yolo'" class="colab-code-box">
           <div class="code-box-header">
-            <span class="text-xs text-amber-300 font-semibold">1. YOLO-X Training (200 Epochs, T4 GPU, AdamW):</span>
-            <button 
-              class="btn-xs-copy" 
-              @click="copyToClipboard(importResult.colab_training.yolo_code, 'colab_yolo')"
-            >
-              {{ copiedKey === 'colab_yolo' ? '✓ Tersalin!' : 'Salin Script YOLO-X' }}
-            </button>
+            <span class="text-xs text-amber-300 font-semibold">⚡ 1. YOLO-X Training Pipeline (200 Epochs, T4 GPU, AdamW, Auto-Resume):</span>
+            <div class="flex items-center gap-2">
+              <a 
+                :href="currentColabGithubUrl" 
+                target="_blank" 
+                class="btn-xs-copy bg-amber-500 hover:bg-amber-600 text-neutral-950 font-bold"
+              >
+                🚀 Buka YOLO-X di Colab
+              </a>
+              <button 
+                class="btn-xs-copy" 
+                @click="copyToClipboard(importResult.colab_training.yolo_code, 'colab_yolo')"
+              >
+                {{ copiedKey === 'colab_yolo' ? '✓ Tersalin!' : 'Salin Script' }}
+              </button>
+            </div>
           </div>
           <pre class="code-block"><code>{{ importResult.colab_training.yolo_code }}</code></pre>
         </div>
@@ -639,13 +694,22 @@ onMounted(() => {
         <!-- TAB 2: YOLO-26 Snippet -->
         <div v-else-if="activeTrainingTab === 'yolo26'" class="colab-code-box">
           <div class="code-box-header">
-            <span class="text-xs text-sky-300 font-semibold">2. YOLO-26 Training (200 Epochs, T4 GPU, Fast Edge):</span>
-            <button 
-              class="btn-xs-copy bg-sky-600 hover:bg-sky-700" 
-              @click="copyToClipboard(importResult.colab_training.yolo26_code || importResult.colab_training.yolo_code, 'colab_yolo26')"
-            >
-              {{ copiedKey === 'colab_yolo26' ? '✓ Tersalin!' : 'Salin Script YOLO-26' }}
-            </button>
+            <span class="text-xs text-sky-300 font-semibold">🔥 2. YOLO-26 Training Pipeline (200 Epochs, T4 GPU, Fast Edge, Auto-Resume):</span>
+            <div class="flex items-center gap-2">
+              <a 
+                :href="currentColabGithubUrl" 
+                target="_blank" 
+                class="btn-xs-copy bg-sky-500 hover:bg-sky-600 text-neutral-950 font-bold"
+              >
+                🚀 Buka YOLO-26 di Colab
+              </a>
+              <button 
+                class="btn-xs-copy bg-sky-600 hover:bg-sky-700" 
+                @click="copyToClipboard(importResult.colab_training.yolo26_code || importResult.colab_training.yolo_code, 'colab_yolo26')"
+              >
+                {{ copiedKey === 'colab_yolo26' ? '✓ Tersalin!' : 'Salin Script' }}
+              </button>
+            </div>
           </div>
           <pre class="code-block"><code>{{ importResult.colab_training.yolo26_code || importResult.colab_training.yolo_code }}</code></pre>
         </div>
@@ -653,23 +717,32 @@ onMounted(() => {
         <!-- TAB 3: RF-DETR Snippet -->
         <div v-else class="colab-code-box">
           <div class="code-box-header">
-            <span class="text-xs text-purple-300 font-semibold">3. RF-DETR / RT-DETR Training (200 Epochs, T4 GPU, Transformer):</span>
-            <button 
-              class="btn-xs-copy bg-purple-600 hover:bg-purple-700" 
-              @click="copyToClipboard(importResult.colab_training.rfdetr_code, 'colab_rfdetr')"
-            >
-              {{ copiedKey === 'colab_rfdetr' ? '✓ Tersalin!' : 'Salin Script RF-DETR' }}
-            </button>
+            <span class="text-xs text-purple-300 font-semibold">🎯 3. RF-DETR Transformer Pipeline (200 Epochs, T4 GPU, Auto-Resume):</span>
+            <div class="flex items-center gap-2">
+              <a 
+                :href="currentColabGithubUrl" 
+                target="_blank" 
+                class="btn-xs-copy bg-purple-500 hover:bg-purple-600 text-neutral-950 font-bold"
+              >
+                🚀 Buka RF-DETR di Colab
+              </a>
+              <button 
+                class="btn-xs-copy bg-purple-600 hover:bg-purple-700" 
+                @click="copyToClipboard(importResult.colab_training.rfdetr_code, 'colab_rfdetr')"
+              >
+                {{ copiedKey === 'colab_rfdetr' ? '✓ Tersalin!' : 'Salin Script' }}
+              </button>
+            </div>
           </div>
           <pre class="code-block"><code>{{ importResult.colab_training.rfdetr_code }}</code></pre>
         </div>
 
         <div class="colab-footer-hint">
-          💡 <strong>Panduan Menjalankan di Google Colab:</strong>
+          💡 <strong>Panduan Menjalankan Notebook Terpisah di Google Colab:</strong>
           <ul class="mt-1.5 space-y-1 text-xs text-amber-950 list-disc list-inside">
-            <li><strong>Cara 1 (Paling Cepat &amp; Mudah 1-Klik):</strong> Klik tombol oranye <strong>"Buka di Colab (1-Klik)"</strong> di atas. Notebook akan langsung terbuka di Google Colab tanpa perlu download/upload file.</li>
-            <li><strong>Cara 2 (Upload File Notebook .ipynb):</strong> Klik tombol <strong>"Unduh File (.ipynb)"</strong>. Di Google Colab, pilih menu <em>File &gt; Upload notebook</em> lalu pilih file <code>raray_vision_colab_training.ipynb</code> yang berformat JSON (jangan mengunggah file script .py).</li>
-            <li><strong>Cara 3 (Salin Script Manual):</strong> Buka Google Colab baru, klik <code>+ Code</code>, lalu <strong>Paste (Ctrl+V)</strong> script dari tab di atas langsung ke dalam cell Colab, lalu jalankan.</li>
+            <li><strong>Cara 1 (Paling Cepat &amp; Mudah 1-Klik):</strong> Pilih tab model yang diinginkan (<strong>YOLO-X</strong>, <strong>YOLO-26</strong>, atau <strong>RF-DETR</strong>), lalu klik tombol <strong>"Buka [Model] di Colab (1-Klik)"</strong>. Notebook khusus model tersebut akan langsung terbuka tanpa tercampur dengan model lain.</li>
+            <li><strong>Cara 2 (Upload File .ipynb):</strong> Klik tombol <strong>"Unduh .ipynb ([Model])"</strong>. Di Google Colab, pilih menu <em>File &gt; Upload notebook</em> lalu upload file yang baru diunduh.</li>
+            <li><strong>Cara 3 (Salin Script Manual):</strong> Buka Google Colab baru, salin script dari kotak tab di atas, lalu jalankan langsung.</li>
           </ul>
         </div>
       </div>

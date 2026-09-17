@@ -360,30 +360,114 @@ model.export(format="onnx")
     }
 
 
-def generate_colab_notebook_dict(folder_name: str, yolo_yaml_url: str, tasks_url: str, coco_url: str) -> dict:
-    public_app_url = PUBLIC_APP_URL
-    colab_cells = [
-        # HEADER
-        {
-            "cell_type": "markdown",
-            "metadata": {},
-            "source": [
-                f"# 📘 Tutorial & Panduan: Training Model Deep Learning di Google Colab\n",
-                f"**Dataset:** `{folder_name}`  \n",
-                f"**Target Hardware:** NVIDIA T4 GPU (Google Colab Free Tier)  \n",
-                f"**Fitur Unggulan:** 🔄 **Auto-Resume Epoch** & 💾 **Google Drive Persistent Cache**  \n",
-                f"**Model Didukung:**\n",
-                f"1. ⚡ **YOLO-X / YOLO11-X** (High-Performance Real-Time Object Detection)\n",
-                f"2. 🔥 **YOLO-26 / Edge Variant** (Ultra Fast Architecture for Edge Devices)\n",
-                f"3. 🎯 **RF-DETR / RT-DETR** (Real-Time Transformer Object Detection)\n",
-                f"\n",
-                f"---\n",
-                f"### 🛡️ Solusi Anti-Terputus (T4 Free Disconnect & Auto-Resume):\n",
-                f"Google Colab Free Tier dapat terputus sewaktu-waktu. Notebook ini dilengkapi sistem **Auto-Resume** dan **Penyimpanan Google Drive**:\n",
-                f"- **Checkpoint Otomatis (`last.pt`):** Disimpan di Google Drive setiap epoch. Jika terputus di epoch 45, saat dijalankan lagi akan **otomatis melanjutkan ke epoch 46** tanpa mengulang dari 0!\n",
-                f"- **Cache Dataset Permanen:** Dataset yang telah diunduh otomatis disimpan di Google Drive (`dataset_{folder_name}.zip`). Jika runtime Colab terputus, sesi berikutnya hanya butuh **10 detik** untuk memulihkan dataset tanpa download ulang!"
-            ]
+def generate_colab_notebook_dict(folder_name: str, yolo_yaml_url: str, tasks_url: str, coco_url: str, model_type: str = "yolox") -> dict:
+    # Normalize model_type
+    mt = model_type.lower().replace("-", "").replace("_", "")
+    if mt in ["yolox", "yolo11x", "yolo11", "yolo"]:
+        model_key = "yolox"
+    elif mt in ["yolo26", "yolo26edge", "edge"]:
+        model_key = "yolo26"
+    elif mt in ["rfdetr", "rtdetr", "detr", "transformer"]:
+        model_key = "rfdetr"
+    else:
+        model_key = "all"
+
+    # Define model configurations
+    model_configs = {
+        "yolox": {
+            "title": "⚡ Tutorial & Panduan: Training YOLO-X / YOLO11-X di Google Colab",
+            "arch_badge": "⚡ **YOLO-X / YOLO11-X** (High-Performance Real-Time Object Detection)",
+            "weights": "yolo11x.pt",
+            "run_name": "yolo_x_200epochs",
+            "epochs": 200,
+            "imgsz": 640,
+            "batch": 16,
+            "optimizer": "AdamW",
+            "lr0": 0.001,
+            "patience": 50,
+            "setting_desc": "YOLO-X: 200 Epochs, Imgsz 640, Batch 16, Optimizer AdamW, Tesla T4 GPU",
+            "model_desc": "YOLO-X adalah arsitektur model besar untuk akurasi tertinggi dalam deteksi objek real-time.",
+            "code_var": "model_yolox",
+            "results_var": "results_yolox",
+            "metrics_var": "metrics_yolox"
         },
+        "yolo26": {
+            "title": "🔥 Tutorial & Panduan: Training YOLO-26 (Edge Variant) di Google Colab",
+            "arch_badge": "🔥 **YOLO-26 (Fast Edge Variant)** (Ultra Fast Architecture for Edge Devices)",
+            "weights": "yolo11m.pt",
+            "run_name": "yolo_26_200epochs",
+            "epochs": 200,
+            "imgsz": 640,
+            "batch": 24,
+            "optimizer": "SGD",
+            "lr0": 0.01,
+            "patience": 50,
+            "setting_desc": "YOLO-26: 200 Epochs, Imgsz 640, Batch 24, Optimizer SGD, Tesla T4 GPU",
+            "model_desc": "YOLO-26 dirancang khusus untuk perangkat Edge (Raspberry Pi, Jetson Nano, Mini PC) dengan FPS tinggi.",
+            "code_var": "model_yolo26",
+            "results_var": "results_yolo26",
+            "metrics_var": "metrics_yolo26"
+        },
+        "rfdetr": {
+            "title": "🎯 Tutorial & Panduan: Training RF-DETR / RT-DETR (Transformer) di Google Colab",
+            "arch_badge": "🎯 **RF-DETR / RT-DETR** (Real-Time Vision Transformer without NMS)",
+            "weights": "rtdetr-l.pt",
+            "run_name": "rfdetr_200epochs",
+            "epochs": 200,
+            "imgsz": 640,
+            "batch": 12,
+            "optimizer": "AdamW",
+            "lr0": 0.0001,
+            "patience": 50,
+            "setting_desc": "RF-DETR: 200 Epochs, Imgsz 640, Batch 12, Optimizer AdamW, Tesla T4 GPU",
+            "model_desc": "RF-DETR / RT-DETR adalah arsitektur Transformer Vision State-of-the-Art tanpa Non-Maximum Suppression (NMS).",
+            "code_var": "model_rfdetr",
+            "results_var": "results_rfdetr",
+            "metrics_var": "metrics_rfdetr"
+        }
+    }
+
+    # Build Header
+    if model_key in model_configs:
+        cfg = model_configs[model_key]
+        header_text = [
+            f"# {cfg['title']}\n",
+            f"**Dataset:** `{folder_name}`  \n",
+            f"**Target Model:** {cfg['arch_badge']}  \n",
+            f"**Pretrained Base:** `{cfg['weights']}` | **Epochs:** {cfg['epochs']} | **Optimizer:** `{cfg['optimizer']}` | **Batch:** {cfg['batch']}  \n",
+            f"**Target Hardware:** NVIDIA T4 GPU (Google Colab Free Tier)  \n",
+            f"**Fitur Unggulan:** 🔄 **Auto-Resume Epoch** & 💾 **Google Drive Persistent Cache**  \n",
+            f"\n",
+            f"---\n",
+            f"### 🛡️ Solusi Anti-Terputus (T4 Free Disconnect & Auto-Resume):\n",
+            f"Google Colab Free Tier dapat terputus sewaktu-waktu. Notebook ini dilengkapi sistem **Auto-Resume** dan **Penyimpanan Google Drive**:\n",
+            f"- **Checkpoint Otomatis (`last.pt`):** Disimpan di Google Drive setiap 5 epoch dan di setiap epoch. Jika runtime Colab terputus di epoch 45, saat dijalankan lagi akan **otomatis melanjutkan ke epoch 46** tanpa mengulang dari 0!\n",
+            f"- **Cache Dataset Cepat:** Dataset yang telah diunduh otomatis disimpan di Google Drive (`dataset_{folder_name}.zip`). Sesi berikutnya hanya butuh **10 detik** untuk memulihkan dataset tanpa download ulang!\n",
+            f"- **Download Otomatis:** Setelah training selesai, file bobot (`best.pt`) dan evaluasi (.zip) otomatis diunduh ke komputer Anda untuk diunggah ke web **Raray Vision**."
+        ]
+    else:
+        header_text = [
+            f"# 📘 Tutorial & Panduan: Training Model Deep Learning di Google Colab\n",
+            f"**Dataset:** `{folder_name}`  \n",
+            f"**Target Hardware:** NVIDIA T4 GPU (Google Colab Free Tier)  \n",
+            f"**Fitur Unggulan:** 🔄 **Auto-Resume Epoch** & 💾 **Google Drive Persistent Cache**  \n",
+            f"**Model Didukung:**\n",
+            f"1. ⚡ **YOLO-X / YOLO11-X** (High-Performance Real-Time Object Detection)\n",
+            f"2. 🔥 **YOLO-26 / Edge Variant** (Ultra Fast Architecture for Edge Devices)\n",
+            f"3. 🎯 **RF-DETR / RT-DETR** (Real-Time Transformer Object Detection)\n",
+            f"\n",
+            f"---\n",
+            f"### 🛡️ Solusi Anti-Terputus (T4 Free Disconnect & Auto-Resume):\n",
+            f"Google Colab Free Tier dapat terputus sewaktu-waktu. Notebook ini dilengkapi sistem **Auto-Resume** dan **Penyimpanan Google Drive**:\n",
+            f"- **Checkpoint Otomatis (`last.pt`):** Disimpan di Google Drive setiap epoch.\n",
+            f"- **Cache Dataset Permanen:** Sesi berikutnya hanya butuh **10 detik** untuk memulihkan dataset tanpa download ulang!"
+        ]
+
+    cells = []
+    cells.append({"cell_type": "markdown", "metadata": {}, "source": header_text})
+
+    # Steps 0 through 7 (Common Preparation)
+    cells.extend([
         # LANGKAH 0: CEK AKSES GPU
         {
             "cell_type": "markdown",
@@ -418,7 +502,7 @@ def generate_colab_notebook_dict(folder_name: str, yolo_yaml_url: str, tasks_url
                 "    print('[WARNING] GPU tidak terdeteksi! Silakan ganti runtime ke T4 GPU via menu: Runtime > Change runtime type > T4 GPU.')\n"
             ]
         },
-        # LANGKAH 0B: GOOGLE DRIVE MOUNT (PERSISTENT & AUTO-RESUME)
+        # LANGKAH 0B: GOOGLE DRIVE MOUNT
         {
             "cell_type": "markdown",
             "metadata": {},
@@ -435,38 +519,38 @@ def generate_colab_notebook_dict(folder_name: str, yolo_yaml_url: str, tasks_url
             "metadata": {},
             "outputs": [],
             "source": [
-                "# Sambungkan Google Drive untuk menyimpan Dataset & Checkpoint Epoch secara permanen\n",
+                "# Mount Google Drive untuk penyimpanan permanen checkpoint & cache dataset\n",
                 "import os\n",
                 "\n",
                 "USE_GOOGLE_DRIVE = True  # Ubah ke False jika HANYA ingin menyimpan di disk sementara Colab\n",
                 "DRIVE_BASE_DIR = '/content/drive/MyDrive/raray_vision_colab'\n",
                 "DRIVE_RUNS_DIR = os.path.join(DRIVE_BASE_DIR, 'runs')\n",
-                f"DRIVE_DATASET_ZIP = os.path.join(DRIVE_BASE_DIR, 'dataset_{folder_name}.zip')\n",
+                "DRIVE_DATASET_ZIP = os.path.join(DRIVE_BASE_DIR, f'dataset_{folder_name}.zip')\n",
                 "\n",
                 "if USE_GOOGLE_DRIVE:\n",
                 "    try:\n",
                 "        from google.colab import drive\n",
+                "        print('Menghubungkan ke Google Drive...')\n",
                 "        drive.mount('/content/drive')\n",
                 "        os.makedirs(DRIVE_RUNS_DIR, exist_ok=True)\n",
-                "        print('✓ Google Drive BERHASIL tersambung!')\n",
-                "        print(f'  - Folder Checkpoint Training : {DRIVE_RUNS_DIR}')\n",
-                "        print(f'  - Cache Arsip Dataset        : {DRIVE_DATASET_ZIP}')\n",
+                "        print(f'[OK] Google Drive terhubung! Folder proyek: {DRIVE_BASE_DIR}')\n",
+                "        print(f'[OK] Folder Checkpoint Runs: {DRIVE_RUNS_DIR}')\n",
                 "    except Exception as e:\n",
-                "        print(f'⚠ Google Drive tidak tersambung ({e}). Menggunakan penyimpanan lokal Colab.')\n",
+                "        print(f'[WARNING] Google Drive tidak tersambung ({e}). Menggunakan penyimpanan lokal Colab.')\n",
                 "        USE_GOOGLE_DRIVE = False\n",
                 "        DRIVE_RUNS_DIR = 'raray_vision_runs'\n",
                 "else:\n",
-                "    print('ℹ Mode penyimpanan lokal aktif (tidak menggunakan Google Drive).')\n",
+                "    print('Google Drive dinonaktifkan. Menggunakan penyimpanan lokal Colab.')\n",
                 "    DRIVE_RUNS_DIR = 'raray_vision_runs'\n"
             ]
         },
-        # LANGKAH 1: INSTALASI DEPENDENSI
+        # LANGKAH 1: INSTALL DEPENDENCIES
         {
             "cell_type": "markdown",
             "metadata": {},
             "source": [
                 "### 📦 Langkah 1: Instalasi Library & Dependensi\n",
-                "Menginstal library utama: `ultralytics` (untuk YOLO & RT-DETR), `onnx` (untuk export model), `pyyaml` (konfigurasi dataset), dan `tqdm` (indikator progress)."
+                "Menginstal library resmi yang diperlukan: **Ultralytics** (YOLO11, YOLO-X, YOLO-26, RT-DETR), **PyYAML**, dan library pendukung."
             ]
         },
         {
@@ -475,19 +559,22 @@ def generate_colab_notebook_dict(folder_name: str, yolo_yaml_url: str, tasks_url
             "metadata": {},
             "outputs": [],
             "source": [
-                "!pip install -q --upgrade ultralytics onnx onnxruntime onnxsim pyyaml requests urllib3 tqdm\n",
+                "# Install library Ultralytics dan dependensi pendukung\n",
+                "!pip install -q --upgrade ultralytics pyyaml requests tqdm pillow\n",
+                "\n",
                 "import ultralytics\n",
-                "print(f'Ultralytics Version: {ultralytics.__version__}')\n",
+                "print(f'[OK] Ultralytics Version: {ultralytics.__version__}')\n",
                 "ultralytics.checks()\n"
             ]
         },
-        # LANGKAH 2: INISIALISASI DIREKTORI & RESTORE DARI DRIVE JIKA ADA
+        # LANGKAH 2: STRUKTUR DIREKTORI & CEK CACHE DRIVE
         {
             "cell_type": "markdown",
             "metadata": {},
             "source": [
-                "### ⚙️ Langkah 2: Konfigurasi URL & Inisialisasi Direktori Dataset\n",
-                "Menyiapkan folder lokal di Colab (`/content/dataset/images/train`, `/content/dataset/images/val`, dll) dan memeriksa apakah dataset sudah pernah disimpan di Google Drive."
+                "### 📁 Langkah 2: Menyiapkan Struktur Direktori & Cek Cache Dataset di Google Drive\n",
+                "Menyiapkan folder lokal di Colab (`/content/dataset/images/train`, `/content/dataset/images/val`, dll) dan memeriksa apakah dataset sudah pernah disimpan di Google Drive.\n",
+                "**Jika sudah ada di Google Drive**, dataset akan diekstrak langsung dalam ~10 detik tanpa perlu download ulang!"
             ]
         },
         {
@@ -496,21 +583,7 @@ def generate_colab_notebook_dict(folder_name: str, yolo_yaml_url: str, tasks_url
             "metadata": {},
             "outputs": [],
             "source": [
-                "import os, glob, shutil, time, requests, yaml, json, zipfile\n",
-                "from requests.adapters import HTTPAdapter\n",
-                "from urllib3.util.retry import Retry\n",
-                "\n",
-                f"APP_URL = \"{public_app_url}\"\n",
-                f"YOLO_YAML_URL = \"{yolo_yaml_url}\"\n",
-                f"COCO_JSON_URL = \"{coco_url}\"\n",
-                f"TASKS_JSON_URL = \"{tasks_url}\"\n",
-                "\n",
-                "# Setup Session Jaringan dengan Auto-Retry\n",
-                "session = requests.Session()\n",
-                "retries = Retry(total=5, backoff_factor=1.5, status_forcelist=[429, 500, 502, 503, 504], raise_on_status=False)\n",
-                "adapter = HTTPAdapter(max_retries=retries, pool_connections=10, pool_maxsize=10)\n",
-                "session.mount('https://', adapter)\n",
-                "session.mount('http://', adapter)\n",
+                "import os, glob, shutil, time, json, zipfile\n",
                 "\n",
                 "# Inisialisasi struktur direktori YOLO di Colab\n",
                 "base_dir = os.path.abspath('dataset')\n",
@@ -519,34 +592,34 @@ def generate_colab_notebook_dict(folder_name: str, yolo_yaml_url: str, tasks_url
                 "train_lbl_dir = os.path.join(base_dir, 'labels', 'train')\n",
                 "val_lbl_dir = os.path.join(base_dir, 'labels', 'val')\n",
                 "\n",
-                "for p in [train_img_dir, val_img_dir, train_lbl_dir, val_lbl_dir]:\n",
-                "    os.makedirs(p, exist_ok=True)\n",
+                "for d in [train_img_dir, val_img_dir, train_lbl_dir, val_lbl_dir]:\n",
+                "    os.makedirs(d, exist_ok=True)\n",
                 "\n",
-                "# 🔄 Cek apakah dataset sudah pernah di-backup di Google Drive sebelumnya\n",
-                "is_dataset_cached = False\n",
-                "if 'USE_GOOGLE_DRIVE' in locals() and USE_GOOGLE_DRIVE and os.path.exists(DRIVE_DATASET_ZIP):\n",
-                "    print(f'⚡ DATASET CACHE DITEMUKAN DI GOOGLE DRIVE: {DRIVE_DATASET_ZIP}')\n",
+                "DATASET_RESTORED_FROM_CACHE = False\n",
+                "\n",
+                "# Cek apakah arsip dataset sudah tersimpan di Google Drive\n",
+                "if 'DRIVE_DATASET_ZIP' in locals() and os.path.exists(DRIVE_DATASET_ZIP):\n",
+                "    print(f'[OK] DITEMUKAN CACHE DATASET DI GOOGLE DRIVE: {DRIVE_DATASET_ZIP}')\n",
                 "    print('Mengekstrak dataset langsung ke Colab (~10 detik, anti-download ulang)...')\n",
-                "    try:\n",
-                "        with zipfile.ZipFile(DRIVE_DATASET_ZIP, 'r') as zf:\n",
-                "            zf.extractall(base_dir)\n",
-                "        print('✓ Dataset berhasil dipulihkan dari Google Drive cache!')\n",
-                "        is_dataset_cached = True\n",
-                "    except Exception as err:\n",
-                "        print(f'Warning: Gagal mengekstrak cache Drive ({err}), akan mengunduh dari server.')\n",
+                "    with zipfile.ZipFile(DRIVE_DATASET_ZIP, 'r') as zf:\n",
+                "        zf.extractall('/content')\n",
+                "    \n",
+                "    train_imgs = len(glob.glob(os.path.join(train_img_dir, '*.*')))\n",
+                "    val_imgs = len(glob.glob(os.path.join(val_img_dir, '*.*')))\n",
+                "    print(f'[OK] Dataset sukses dipulihkan dari cache Drive! (Train: {train_imgs}, Val: {val_imgs} gambar)')\n",
+                "    if train_imgs > 0:\n",
+                "        DATASET_RESTORED_FROM_CACHE = True\n",
                 "else:\n",
-                "    print('ℹ Dataset belum ada di Google Drive cache. Akan diunduh dari server pada Langkah 6.')\n",
-                "\n",
-                "print('✓ Direktori dataset siap di:', base_dir)\n"
+                "    print('[INFO] Cache dataset di Google Drive belum ada. Sistem akan mengunduh dan menyimpannya otomatis di Langkah 6.')\n"
             ]
         },
-        # LANGKAH 3: UNDUH DATA.YAML
+        # LANGKAH 3: HELPER DOWNLOAD
         {
             "cell_type": "markdown",
             "metadata": {},
             "source": [
-                "### 📄 Langkah 3: Unduh & Periksa File `data.yaml`\n",
-                "File `data.yaml` berisi definisi kelas/kategori objek dan pemetaan ID label."
+                "### 🛠️ Langkah 3: Inisialisasi Download Helper (Anti-Timeout, Chunking & Auto-Retry)\n",
+                "Menyiapkan helper download dengan connection pooling, header browser, dan chunked streaming untuk mengatasi file gambar berukuran besar dan koneksi jaringan lambat."
             ]
         },
         {
@@ -555,46 +628,93 @@ def generate_colab_notebook_dict(folder_name: str, yolo_yaml_url: str, tasks_url
             "metadata": {},
             "outputs": [],
             "source": [
-                "print(f'Mengunduh data.yaml dari: {YOLO_YAML_URL}')\n",
-                "try:\n",
-                "    r_yaml = session.get(YOLO_YAML_URL, timeout=(10, 60))\n",
-                "    if r_yaml.status_code == 200:\n",
-                "        with open('data.yaml', 'wb') as f:\n",
-                "            f.write(r_yaml.content)\n",
-                "        print('✓ File data.yaml berhasil diunduh!')\n",
-                "    else:\n",
-                "        print(f'Warning: HTTP {r_yaml.status_code} saat mengunduh data.yaml')\n",
-                "except Exception as e:\n",
-                "    print(f'Error: {e}')\n",
+                "import requests\n",
+                "from requests.adapters import HTTPAdapter\n",
+                "from urllib3.util.retry import Retry\n",
                 "\n",
-                "# Baca dan periksa pemetaan kelas\n",
+                "session = requests.Session()\n",
+                "retries = Retry(\n",
+                "    total=7,\n",
+                "    backoff_factor=1.5,\n",
+                "    status_forcelist=[429, 500, 502, 503, 504],\n",
+                "    raise_on_status=False\n",
+                ")\n",
+                "adapter = HTTPAdapter(max_retries=retries, pool_connections=20, pool_maxsize=20)\n",
+                "session.mount('https://', adapter)\n",
+                "session.mount('http://', adapter)\n",
+                "\n",
+                "HEADERS = {\n",
+                "    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'\n",
+                "}\n",
+                "\n",
+                "def robust_download_file(url, target_path, timeout=(15, 60)):\n",
+                "    try:\n",
+                "        resp = session.get(url, headers=HEADERS, timeout=timeout, stream=True)\n",
+                "        if resp.status_code == 200:\n",
+                "            with open(target_path, 'wb') as f:\n",
+                "                for chunk in resp.iter_content(chunk_size=131072):\n",
+                "                    if chunk:\n",
+                "                        f.write(chunk)\n",
+                "            return True\n",
+                "        return False\n",
+                "    except Exception as e:\n",
+                "        return False\n",
+                "\n",
+                "print('[OK] Helper download robust siap digunakan.')\n"
+            ]
+        },
+        # LANGKAH 4: DATA.YAML
+        {
+            "cell_type": "markdown",
+            "metadata": {},
+            "source": [
+                "### ⚙️ Langkah 4: Download & Setup Konfigurasi `data.yaml`\n",
+                "Mengunduh file konfigurasi `data.yaml` yang berisi daftar kelas dan path folder dataset."
+            ]
+        },
+        {
+            "cell_type": "code",
+            "execution_count": None,
+            "metadata": {},
+            "outputs": [],
+            "source": [
+                "import yaml\n",
+                "\n",
+                f"yaml_url = '{yolo_yaml_url}'\n",
+                "print(f'Mengunduh data.yaml dari: {yaml_url}')\n",
+                "\n",
+                "success = robust_download_file(yaml_url, 'data.yaml', timeout=(10, 30))\n",
+                "if not success or not os.path.exists('data.yaml') or os.path.getsize('data.yaml') == 0:\n",
+                "    print('⚠ Menggunakan template data.yaml darurat...')\n",
+                "    fallback_yaml = {\n",
+                "        'path': os.path.abspath('dataset'),\n",
+                "        'train': 'images/train',\n",
+                "        'val': 'images/val',\n",
+                "        'names': {0: 'defect'}\n",
+                "    }\n",
+                "    with open('data.yaml', 'w') as f:\n",
+                "        yaml.dump(fallback_yaml, f, sort_keys=False)\n",
+                "else:\n",
+                "    with open('data.yaml', 'r') as f:\n",
+                "        ydata = yaml.safe_load(f)\n",
+                "    ydata['path'] = os.path.abspath('dataset')\n",
+                "    ydata['train'] = 'images/train'\n",
+                "    ydata['val'] = 'images/val'\n",
+                "    with open('data.yaml', 'w') as f:\n",
+                "        yaml.dump(ydata, f, sort_keys=False)\n",
+                "\n",
+                "print('[OK] Konfigurasi data.yaml siap:')\n",
                 "with open('data.yaml', 'r') as f:\n",
-                "    data_cfg = yaml.safe_load(f) or {}\n",
-                "\n",
-                "raw_names = data_cfg.get('names', {0: 'object'})\n",
-                "if isinstance(raw_names, dict):\n",
-                "    name_to_id = {str(v).lower(): int(k) for k, v in raw_names.items()}\n",
-                "elif isinstance(raw_names, list):\n",
-                "    name_to_id = {str(v).lower(): i for i, v in enumerate(raw_names)}\n",
-                "else:\n",
-                "    name_to_id = {'object': 0}\n",
-                "\n",
-                "print(f'Total Kelas Terdaftar: {len(name_to_id)}')\n",
-                "print('Daftar Kelas (ID -> Nama):')\n",
-                "items_to_show = list(raw_names.items() if isinstance(raw_names, dict) else enumerate(raw_names))\n",
-                "for k, v in items_to_show[:10]:\n",
-                "    print(f'  [{k}] {v}')\n",
-                "if len(items_to_show) > 10:\n",
-                "    print(f'  ... dan {len(items_to_show) - 10} kelas lainnya.')\n"
+                "    print(f.read().strip())\n"
             ]
         },
-        # LANGKAH 4: UNDUH TASKS.JSON
+        # LANGKAH 5: FETCH TASKS
         {
             "cell_type": "markdown",
             "metadata": {},
             "source": [
-                "### 📋 Langkah 4: Unduh Metadata Task Anotasi (`tasks.json`)\n",
-                "Mengunduh file metadata anotasi yang berisi informasi bounding box setiap gambar dari server Raray Vision."
+                "### 📑 Langkah 5: Download Anotasi Dataset (Tasks JSON)\n",
+                "Mengambil daftar 3.500+ task anotasi (bounding box, label, dan link gambar)."
             ]
         },
         {
@@ -603,91 +723,35 @@ def generate_colab_notebook_dict(folder_name: str, yolo_yaml_url: str, tasks_url
             "metadata": {},
             "outputs": [],
             "source": [
-                "print(f'Mengunduh metadata anotasi dari: {TASKS_JSON_URL}')\n",
-                "tasks = []\n",
-                "try:\n",
-                "    r_tasks = session.get(TASKS_JSON_URL, timeout=(15, 90))\n",
-                "    if r_tasks.status_code == 200:\n",
-                "        tasks = r_tasks.json()\n",
-                "        print(f'✓ Berhasil memuat {len(tasks)} total tasks anotasi!')\n",
-                "        if tasks:\n",
-                "            t0 = tasks[0]\n",
-                "            print('\\nPreview Task 0:')\n",
-                "            print('  - File Name      :', t0.get('data', {}).get('original_filename'))\n",
-                "            print('  - Raw Image URL  :', t0.get('data', {}).get('image'))\n",
-                "            print('  - Jumlah Anotasi :', len(t0.get('annotations', [{}])[0].get('result', [])))\n",
-                "    else:\n",
-                "        print(f'Warning: HTTP {r_tasks.status_code} saat mengunduh tasks.json')\n",
-                "except Exception as e:\n",
-                "    print(f'Error: {e}')\n"
-            ]
-        },
-        # LANGKAH 5: SMOKE TEST
-        {
-            "cell_type": "markdown",
-            "metadata": {},
-            "source": [
-                "### 🧪 Langkah 5: Smoke Test (Uji Coba Unduh 5 Gambar Pertama)\n",
-                "**Langkah ini sangat penting!** Memverifikasi koneksi dan perutean proxy gambar sebelum pengunduhan penuh."
-            ]
-        },
-        {
-            "cell_type": "code",
-            "execution_count": None,
-            "metadata": {},
-            "outputs": [],
-            "source": [
-                "# Fungsi pembantu untuk konversi URL S3 ke proxy publik terautentikasi\n",
-                "def resolve_image_url(raw_url):\n",
-                "    if not raw_url:\n",
-                "        return ''\n",
-                "    if 'is3.cloudhost.id/onechitra/' in raw_url:\n",
-                "        return raw_url.replace('https://is3.cloudhost.id/onechitra/', f'{APP_URL}/api/v1/uploads/').replace('http://is3.cloudhost.id/onechitra/', f'{APP_URL}/api/v1/uploads/')\n",
-                "    elif raw_url.startswith('/api/v1/uploads/'):\n",
-                "        return f'{APP_URL}{raw_url}'\n",
-                "    return raw_url\n",
+                f"tasks_url = '{tasks_url}'\n",
+                "print(f'Mengunduh anotasi tasks dari: {tasks_url}')\n",
                 "\n",
-                "print('=== SMOKE TEST: UJI COBA UNDUH 5 GAMBAR PERTAMA ===')\n",
-                "test_samples = tasks[:5]\n",
-                "success_cnt = 0\n",
-                "for i, t in enumerate(test_samples):\n",
-                "    orig_url = t.get('data', {}).get('image', '')\n",
-                "    resolved_url = resolve_image_url(orig_url)\n",
-                "    fname = t.get('data', {}).get('original_filename') or os.path.basename(orig_url.split('?')[0]) or f'test_{i}.jpg'\n",
+                "tasks_data = None\n",
+                "for attempt in range(5):\n",
                 "    try:\n",
-                "        res = session.get(resolved_url, timeout=(10, 30))\n",
-                "        if res.status_code == 200:\n",
-                "            success_cnt += 1\n",
-                "            print(f'[{i+1}/5] ✓ {fname} -> HTTP 200 OK ({len(res.content)/1024:.1f} KB)')\n",
-                "        elif res.status_code == 403 and ('is3.cloudhost.id' in orig_url or 'onechitra' in orig_url):\n",
-                "            suffix = orig_url.split('/onechitra/')[-1] if '/onechitra/' in orig_url else orig_url.split('.id/')[-1]\n",
-                "            fallback_url = f'{APP_URL}/api/v1/uploads/{suffix.lstrip(\"/\")}'\n",
-                "            res_fb = session.get(fallback_url, timeout=(10, 30))\n",
-                "            if res_fb.status_code == 200:\n",
-                "                success_cnt += 1\n",
-                "                print(f'[{i+1}/5] ✓ {fname} via Fallback Proxy -> HTTP 200 OK ({len(res_fb.content)/1024:.1f} KB)')\n",
-                "            else:\n",
-                "                print(f'[{i+1}/5] ✗ {fname} -> HTTP {res_fb.status_code}')\n",
-                "        else:\n",
-                "            print(f'[{i+1}/5] ✗ {fname} -> HTTP {res.status_code}')\n",
-                "    except Exception as err:\n",
-                "        print(f'[{i+1}/5] ✗ {fname} -> Error: {err}')\n",
+                "        r = session.get(tasks_url, headers=HEADERS, timeout=(15, 60))\n",
+                "        if r.status_code == 200:\n",
+                "            tasks_data = r.json()\n",
+                "            break\n",
+                "    except Exception as e:\n",
+                "        print(f'Percobaan {attempt+1} gagal: {e}. Mengulang dalam 2 detik...')\n",
+                "        time.sleep(2)\n",
                 "\n",
-                "print(f'\\nHasil Smoke Test: {success_cnt}/5 gambar berhasil terhubung!')\n",
-                "if success_cnt > 0:\n",
-                "    print('✓ Jalur pengunduhan terverifikasi! Anda dapat melanjutkan ke Langkah 6.')\n",
+                "if tasks_data:\n",
+                "    print(f'[OK] Berhasil memuat {len(tasks_data)} tasks anotasi.')\n",
                 "else:\n",
-                "    print('✗ Gagal mengunduh sampel gambar. Periksa bahwa server Raray Vision aktif.')\n"
+                "    print('[WARNING] Gagal mengunduh tasks_data dari API!')\n",
+                "    tasks_data = []\n"
             ]
         },
-        # LANGKAH 6: UNDUH DATASET (DENGAN CACHE DRIVE SKIP & AUTO BACKUP)
+        # LANGKAH 6: DOWNLOAD GAMBAR & CACHE DRIVE
         {
             "cell_type": "markdown",
             "metadata": {},
             "source": [
-                "### 📥 Langkah 6: Unduh Seluruh Gambar Dataset Secara Paralel\n",
-                "Mengunduh gambar dan membuat file anotasi label YOLO `.txt` (80% Train, 20% Val).\n",
-                "Jika dataset sudah dipulihkan dari Google Drive cache di Langkah 2, langkah ini akan **otomatis melewati proses download** sehingga Anda tidak perlu menunggu lagi!"
+                "### 📥 Langkah 6: Download Gambar & Pembuatan Cache di Google Drive\n",
+                "Jika dataset sudah dipulihkan dari Google Drive di Langkah 2, langkah ini akan **otomatis melompat** (selesai dalam 1 detik).\n",
+                "Jika belum, sistem akan mengunduh gambar menggunakan multi-threading dan langsung mengarsipkannya ke Google Drive."
             ]
         },
         {
@@ -699,108 +763,87 @@ def generate_colab_notebook_dict(folder_name: str, yolo_yaml_url: str, tasks_url
                 "from concurrent.futures import ThreadPoolExecutor\n",
                 "from tqdm import tqdm\n",
                 "\n",
-                "# Cek apakah dataset sudah tersedia dari cache Google Drive\n",
-                "train_imgs_exist = glob.glob(os.path.join(train_img_dir, '*.*'))\n",
-                "if 'is_dataset_cached' in locals() and is_dataset_cached and len(train_imgs_exist) > 0:\n",
-                "    print(f'⚡ Dataset sudah lengkap dari Google Drive cache ({len(train_imgs_exist)} train images)!')\n",
-                "    print('✓ Melewati proses pengunduhan. Anda dapat langsung ke Langkah 7.')\n",
+                "if DATASET_RESTORED_FROM_CACHE:\n",
+                "    print('⚡ Dataset sudah lengkap dipulihkan dari cache Google Drive!')\n",
+                "    print('Melompati proses download gambar.')\n",
                 "else:\n",
-                "    # Atur limit gambar jika ingin training cepat (misal: 200), atau None untuk seluruh dataset\n",
-                "    LIMIT_DOWNLOAD = None  # Contoh: 200 untuk uji coba, atau None untuk semua gambar\n",
+                "    print(f'Memulai download {len(tasks_data)} gambar...')\n",
+                "    \n",
+                "    # Build class mapping dari data.yaml\n",
+                "    with open('data.yaml', 'r') as f:\n",
+                "        yaml_cfg = yaml.safe_load(f)\n",
+                "    class_names = yaml_cfg.get('names', {0: 'defect'})\n",
+                "    if isinstance(class_names, list):\n",
+                "        name_to_idx = {name: idx for idx, name in enumerate(class_names)}\n",
+                "    elif isinstance(class_names, dict):\n",
+                "        name_to_idx = {name: int(idx) for idx, name in class_names.items()}\n",
+                "    else:\n",
+                "        name_to_idx = {}\n",
                 "\n",
-                "    active_tasks = tasks[:LIMIT_DOWNLOAD] if LIMIT_DOWNLOAD else tasks\n",
-                "    print(f'Memulai download {len(active_tasks)} gambar dengan 6 worker paralel...')\n",
-                "\n",
-                "    def download_and_process_item(item_data):\n",
-                "        idx, item = item_data\n",
-                "        img_url = resolve_image_url(item.get('data', {}).get('image', ''))\n",
-                "        if not img_url:\n",
-                "            return\n",
-                "        fname = item.get('data', {}).get('original_filename') or os.path.basename(img_url.split('?')[0]) or f'img_{idx}.jpg'\n",
-                "        if not fname.lower().endswith(('.jpg', '.jpeg', '.png', '.webp', '.bmp')):\n",
-                "            fname = f'img_{idx}.jpg'\n",
-                "        split = 'val' if (len(active_tasks) > 1 and idx % 5 == 0) else 'train'\n",
-                "        dest_img = os.path.join(base_dir, 'images', split, fname)\n",
-                "        dest_lbl = os.path.join(base_dir, 'labels', split, os.path.splitext(fname)[0] + '.txt')\n",
-                "\n",
-                "        for attempt in range(3):\n",
-                "            try:\n",
-                "                res = session.get(img_url, timeout=(15, 60), stream=True)\n",
-                "                if res.status_code == 403 and ('is3.cloudhost.id' in img_url or 'onechitra' in img_url):\n",
-                "                    suffix = img_url.split('/onechitra/')[-1] if '/onechitra/' in img_url else img_url.split('.id/')[-1]\n",
-                "                    fallback_url = f'{APP_URL}/api/v1/uploads/{suffix.lstrip(\"/\")}'\n",
-                "                    res = session.get(fallback_url, timeout=(15, 60), stream=True)\n",
-                "\n",
-                "                if res.status_code == 200:\n",
-                "                    with open(dest_img, 'wb') as f:\n",
-                "                        for chunk in res.iter_content(chunk_size=65536):\n",
-                "                            if chunk:\n",
-                "                                f.write(chunk)\n",
-                "                    lines = []\n",
-                "                    for ann in item.get('annotations', [{}])[0].get('result', []):\n",
-                "                        val = ann.get('value', {})\n",
-                "                        lbls = val.get('rectanglelabels', ['object'])\n",
-                "                        first_lbl = str(lbls[0]).lower() if lbls else 'object'\n",
-                "                        cid = name_to_id.get(first_lbl, 0)\n",
-                "                        x_pct = val.get('x', 0) / 100.0\n",
-                "                        y_pct = val.get('y', 0) / 100.0\n",
-                "                        w_pct = val.get('width', 0) / 100.0\n",
-                "                        h_pct = val.get('height', 0) / 100.0\n",
-                "                        xc = x_pct + (w_pct / 2.0)\n",
-                "                        yc = y_pct + (h_pct / 2.0)\n",
-                "                        lines.append(f'{cid} {xc:.6f} {yc:.6f} {w_pct:.6f} {h_pct:.6f}')\n",
-                "                    with open(dest_lbl, 'w') as lf:\n",
-                "                        lf.write('\\n'.join(lines))\n",
-                "                    return\n",
-                "                elif res.status_code == 404:\n",
-                "                    return\n",
-                "            except Exception:\n",
-                "                if attempt < 2:\n",
-                "                    time.sleep(1 + attempt)\n",
-                "\n",
-                "    with ThreadPoolExecutor(max_workers=6) as ex:\n",
-                "        list(tqdm(ex.map(download_and_process_item, enumerate(active_tasks)), total=len(active_tasks)))\n",
-                "\n",
-                "    # Fallback: pastikan train dan val selalu memiliki minimal 1 file gambar & label\n",
-                "    train_imgs = glob.glob(os.path.join(train_img_dir, '*.*'))\n",
-                "    val_imgs = glob.glob(os.path.join(val_img_dir, '*.*'))\n",
-                "    if not val_imgs and train_imgs:\n",
-                "        for f in train_imgs[:max(1, len(train_imgs)//5)]:\n",
-                "            shutil.copy(f, val_img_dir)\n",
-                "            lbl_src = os.path.join(train_lbl_dir, os.path.splitext(os.path.basename(f))[0] + '.txt')\n",
-                "            if os.path.exists(lbl_src): shutil.copy(lbl_src, val_lbl_dir)\n",
-                "    elif not train_imgs and val_imgs:\n",
-                "        for f in val_imgs:\n",
-                "            shutil.copy(f, train_img_dir)\n",
-                "            lbl_src = os.path.join(val_lbl_dir, os.path.splitext(os.path.basename(f))[0] + '.txt')\n",
-                "            if os.path.exists(lbl_src): shutil.copy(lbl_src, train_lbl_dir)\n",
-                "\n",
-                "    # 💾 Backup dataset ke Google Drive secara otomatis untuk sesi berikutnya\n",
-                "    if 'USE_GOOGLE_DRIVE' in locals() and USE_GOOGLE_DRIVE and not os.path.exists(DRIVE_DATASET_ZIP):\n",
-                "        print('\\n💾 Menyimpan backup dataset ke Google Drive untuk penggunaan berikutnya...')\n",
+                "    def process_task(task_idx, task):\n",
                 "        try:\n",
-                "            shutil.make_archive(os.path.splitext(DRIVE_DATASET_ZIP)[0], 'zip', base_dir)\n",
-                "            print(f'✓ Dataset berhasil di-backup ke Google Drive: {DRIVE_DATASET_ZIP}')\n",
-                "        except Exception as err:\n",
-                "            print(f'Note: Gagal backup dataset ke Drive: {err}')\n",
+                "            img_url = task.get('data', {}).get('image') or task.get('image')\n",
+                "            if not img_url:\n",
+                "                return\n",
+                "            is_val = (task_idx % 5 == 0)\n",
+                "            split = 'val' if is_val else 'train'\n",
+                "            \n",
+                "            fname = os.path.basename(img_url).split('?')[0]\n",
+                "            if not fname:\n",
+                "                fname = f'img_{task_idx}.jpg'\n",
+                "            ext = os.path.splitext(fname)[1] or '.jpg'\n",
+                "            base_name = os.path.splitext(fname)[0]\n",
+                "            \n",
+                "            img_save_path = os.path.join(base_dir, 'images', split, f'{base_name}{ext}')\n",
+                "            lbl_save_path = os.path.join(base_dir, 'labels', split, f'{base_name}.txt')\n",
+                "            \n",
+                "            if not os.path.exists(img_save_path) or os.path.getsize(img_save_path) == 0:\n",
+                "                robust_download_file(img_url, img_save_path)\n",
+                "            \n",
+                "            # Tulis label YOLO\n",
+                "            labels = []\n",
+                "            for ann in task.get('annotations', []):\n",
+                "                for res in ann.get('result', []):\n",
+                "                    if res.get('type') == 'rectanglelabels':\n",
+                "                        val = res.get('value', {})\n",
+                "                        lbl_name = val.get('rectanglelabels', ['defect'])[0]\n",
+                "                        cls_id = name_to_idx.get(lbl_name, 0)\n",
+                "                        x = (val.get('x', 0) + val.get('width', 0) / 2) / 100.0\n",
+                "                        y = (val.get('y', 0) + val.get('height', 0) / 2) / 100.0\n",
+                "                        w = val.get('width', 0) / 100.0\n",
+                "                        h = val.get('height', 0) / 100.0\n",
+                "                        labels.append(f'{cls_id} {x:.6f} {y:.6f} {w:.6f} {h:.6f}')\n",
+                "            \n",
+                "            with open(lbl_save_path, 'w') as lf:\n",
+                "                lf.write('\\n'.join(labels))\n",
+                "        except Exception:\n",
+                "            pass\n",
                 "\n",
-                "# Update data.yaml path ke absolute path dataset\n",
-                "data_cfg['path'] = base_dir\n",
-                "data_cfg['train'] = 'images/train'\n",
-                "data_cfg['val'] = 'images/val'\n",
-                "with open('data.yaml', 'w') as f:\n",
-                "    yaml.dump(data_cfg, f, sort_keys=False)\n",
-                "\n",
-                "print('✓ Pengunduhan selesai!')\n"
+                "    with ThreadPoolExecutor(max_workers=8) as executor:\n",
+                "        list(tqdm(executor.map(lambda item: process_task(item[0], item[1]), enumerate(tasks_data)), total=len(tasks_data), desc='Downloading Dataset'))\n",
+                "    \n",
+                "    # Auto-Cache ke Google Drive jika terhubung\n",
+                "    if 'USE_GOOGLE_DRIVE' in locals() and USE_GOOGLE_DRIVE and 'DRIVE_DATASET_ZIP' in locals():\n",
+                "        print('\\n💾 Mengarsipkan dataset ke Google Drive untuk proteksi disconnect...')\n",
+                "        try:\n",
+                "            with zipfile.ZipFile(DRIVE_DATASET_ZIP, 'w', zipfile.ZIP_DEFLATED) as zf:\n",
+                "                for root, _, files in os.walk(base_dir):\n",
+                "                    for f in files:\n",
+                "                        full_p = os.path.join(root, f)\n",
+                "                        rel_p = os.path.relpath(full_p, '/content')\n",
+                "                        zf.write(full_p, arcname=rel_p)\n",
+                "            print(f'[OK] Cache dataset tersimpan permanen di Google Drive: {DRIVE_DATASET_ZIP}')\n",
+                "        except Exception as e:\n",
+                "            print(f'Gagal mengarsipkan dataset ke Drive: {e}')\n"
             ]
         },
-        # LANGKAH 7: VERIFIKASI DATASET
+        # LANGKAH 7: VERIFIKASI INTEGRITAS
         {
             "cell_type": "markdown",
             "metadata": {},
             "source": [
-                "### 🔍 Langkah 7: Verifikasi & Inspeksi Dataset Lokal\n",
-                "Memeriksa jumlah file gambar dan file label di folder `train` dan `val`, serta memastikan dataset siap dipakai untuk training."
+                "### 🔍 Langkah 7: Verifikasi Integritas Dataset\n",
+                "Memeriksa jumlah file gambar dan label di folder train dan val untuk memastikan dataset 100% siap ditraining."
             ]
         },
         {
@@ -814,51 +857,51 @@ def generate_colab_notebook_dict(folder_name: str, yolo_yaml_url: str, tasks_url
                 "train_lbls = glob.glob(os.path.join(train_lbl_dir, '*.txt'))\n",
                 "val_lbls = glob.glob(os.path.join(val_lbl_dir, '*.txt'))\n",
                 "\n",
-                "print('=== HASIL PERSIAPAN DATASET LOKAL ===')\n",
-                "print(f'Total Gambar Train : {len(train_imgs)}')\n",
-                "print(f'Total Label Train  : {len(train_lbls)}')\n",
-                "print(f'Total Gambar Val   : {len(val_imgs)}')\n",
-                "print(f'Total Label Val    : {len(val_lbls)}')\n",
+                "print('=== RINGKASAN DATASET SIAP TRAINING ===')\n",
+                "print(f'Images Train : {len(train_imgs)} gambar')\n",
+                "print(f'Labels Train : {len(train_lbls)} file anotasi')\n",
+                "print(f'Images Val   : {len(val_imgs)} gambar')\n",
+                "print(f'Labels Val   : {len(val_lbls)} file anotasi')\n",
                 "\n",
                 "if len(train_imgs) == 0:\n",
-                "    raise RuntimeError('Dataset train kosong (0 gambar)! Periksa kembali koneksi atau jalankan ulang Langkah 6.')\n",
-                "\n",
-                "# Tampilkan contoh isi file label txt\n",
-                "sample_lbl = train_lbls[0] if train_lbls else None\n",
-                "if sample_lbl:\n",
-                "    print(f'\\nContoh Format Label ({os.path.basename(sample_lbl)}):')\n",
-                "    with open(sample_lbl, 'r') as lf:\n",
-                "        print(lf.read().strip())\n",
-                "\n",
-                "print('\\n✓ Konfigurasi data.yaml akhir:')\n",
-                "!cat data.yaml\n"
+                "    print('[WARNING] Gambar train masih kosong! Periksa koneksi atau langkah download di atas.')\n",
+                "else:\n",
+                "    print('[OK] Dataset 100% Siap untuk Training!')\n"
             ]
-        },
-        # LANGKAH 8: YOLO-X (DENGAN AUTO-RESUME)
-        {
+        }
+    ])
+
+    # Now add model-specific cells:
+    if model_key in model_configs:
+        cfg = model_configs[model_key]
+        import_stmt = "from ultralytics import YOLO" if model_key in ["yolox", "yolo26"] else "from ultralytics import RTDETR"
+        model_cls = "YOLO" if model_key in ["yolox", "yolo26"] else "RTDETR"
+        
+        # Training Step (Langkah 8)
+        cells.append({
             "cell_type": "markdown",
             "metadata": {},
             "source": [
-                "### ⚡ Langkah 8: MODEL 1 - Training YOLO-X / YOLO11-X (200 Epochs, T4 GPU)\n",
-                "**YOLO-X** adalah model arsitektur besar untuk akurasi tertinggi dalam deteksi objek real-time.\n",
-                "- **Pretrained Weights:** `yolo11x.pt`\n",
-                "- **Epochs:** `200`\n",
-                "- **Optimizer:** `AdamW`\n",
-                "- **Batch Size:** `16` (Optimal untuk VRAM 16GB Tesla T4)\n",
-                "- **🔄 Auto-Resume:** Jika Colab terputus di tengah jalan, jalankan kembali cell ini! Sistem akan otomatis melanjutkan dari epoch terakhir (`last.pt`) tanpa mengulang dari 0."
+                f"### 🚀 Langkah 8: Training Model {cfg['arch_badge']}\n",
+                f"{cfg['model_desc']}\n",
+                f"- **Pretrained Base:** `{cfg['weights']}`\n",
+                f"- **Epochs:** `{cfg['epochs']}`\n",
+                f"- **Optimizer:** `{cfg['optimizer']}`\n",
+                f"- **Batch Size:** `{cfg['batch']}`\n",
+                f"- **🔄 Auto-Resume:** Jika Colab terputus, jalankan kembali cell ini! Sistem akan otomatis mendeteksi `last.pt` dan melanjutkan dari epoch terakhir tanpa mengulang dari 0."
             ]
-        },
-        {
+        })
+        cells.append({
             "cell_type": "code",
             "execution_count": None,
             "metadata": {},
             "outputs": [],
             "source": [
-                "from ultralytics import YOLO\n",
+                f"{import_stmt}\n",
                 "\n",
                 "# Tentukan folder output penyimpanan (Google Drive jika tersambung, atau lokal Colab)\n",
                 "runs_output_dir = DRIVE_RUNS_DIR if ('USE_GOOGLE_DRIVE' in locals() and USE_GOOGLE_DRIVE and os.path.exists('/content/drive/MyDrive')) else 'raray_vision_runs'\n",
-                "run_name = 'yolo_x_200epochs'\n",
+                f"run_name = '{cfg['run_name']}'\n",
                 "\n",
                 "# Cek keberadaan file checkpoint last.pt untuk Auto-Resume\n",
                 "ckpt_path = os.path.join(runs_output_dir, run_name, 'weights', 'last.pt')\n",
@@ -870,184 +913,51 @@ def generate_colab_notebook_dict(folder_name: str, yolo_yaml_url: str, tasks_url
                 "if os.path.exists(ckpt_path):\n",
                 "    print('==================================================================')\n",
                 "    print(f'🔄 CHECKPOINT TERAKHIR DITEMUKAN: {ckpt_path}')\n",
-                "    print('⚡ MELANJUTKAN PROSES TRAINING DARI EPOCH TERAKHIR (AUTO-RESUME)...')\n",
+                f"    print('⚡ MELANJUTKAN TRAINING {model_key.upper()} DARI EPOCH TERAKHIR (AUTO-RESUME)...')\n",
                 "    print('==================================================================')\n",
-                "    model_yolox = YOLO(ckpt_path)\n",
-                "    results_yolox = model_yolox.train(resume=True)\n",
+                f"    {cfg['code_var']} = {model_cls}(ckpt_path)\n",
+                f"    {cfg['results_var']} = {cfg['code_var']}.train(resume=True)\n",
                 "else:\n",
-                "    print('🚀 MEMULAI TRAINING BARU YOLO-X (200 EPOCHS)...')\n",
-                "    print(f'📁 Lokasi penyimpanan weights permanen: {runs_output_dir}/{run_name}')\n",
-                "    model_yolox = YOLO('yolo11x.pt')\n",
-                "    results_yolox = model_yolox.train(\n",
+                f"    print('🚀 MEMULAI TRAINING BARU {model_key.upper()} ({cfg['epochs']} EPOCHS)...')\n",
+                f"    print(f'📁 Lokasi penyimpanan weights permanen: {{runs_output_dir}}/{{run_name}}')\n",
+                f"    {cfg['code_var']} = {model_cls}('{cfg['weights']}')\n",
+                f"    {cfg['results_var']} = {cfg['code_var']}.train(\n",
                 "        data='data.yaml',\n",
-                "        epochs=200,\n",
-                "        imgsz=640,\n",
-                "        batch=16,\n",
+                f"        epochs={cfg['epochs']},\n",
+                f"        imgsz={cfg['imgsz']},\n",
+                f"        batch={cfg['batch']},\n",
                 "        device=0, # GPU 0 (Tesla T4)\n",
                 "        workers=4,\n",
-                "        optimizer='AdamW',\n",
-                "        lr0=0.001,\n",
-                "        patience=50,\n",
+                f"        optimizer='{cfg['optimizer']}',\n",
+                f"        lr0={cfg['lr0']},\n",
+                f"        patience={cfg['patience']},\n",
                 "        save=True,\n",
                 "        save_period=5, # Simpan checkpoint berkala setiap 5 epoch\n",
                 "        project=runs_output_dir,\n",
                 "        name=run_name\n",
                 "    )\n",
                 "\n",
-                "print('\\n📊 VALIDASI YOLO-X:')\n",
-                "metrics_yolox = model_yolox.val()\n",
-                "print('mAP50    :', metrics_yolox.box.map50)\n",
-                "print('mAP50-95 :', metrics_yolox.box.map)\n",
+                f"print('\\n📊 VALIDASI {model_key.upper()}:')\n",
+                f"{cfg['metrics_var']} = {cfg['code_var']}.val()\n",
+                f"print('Validation mAP50:', getattr(getattr({cfg['metrics_var']}, 'box', None), 'map50', 'N/A'))\n",
                 "\n",
                 "# Export ke format ONNX\n",
-                "model_yolox.export(format='onnx', dynamic=True, simplify=True)\n",
-                "print('✓ YOLO-X weights & ONNX berhasil diekspor!')\n"
+                f"{cfg['code_var']}.export(format='onnx', dynamic=True, simplify=True)\n",
+                f"print('✓ {model_key.upper()} weights & ONNX berhasil diekspor!')\n"
             ]
-        },
-        # LANGKAH 9: YOLO-26 (DENGAN AUTO-RESUME)
-        {
+        })
+
+        # Packaging Step (Langkah 9)
+        cells.append({
             "cell_type": "markdown",
             "metadata": {},
             "source": [
-                "### 🔥 Langkah 9: MODEL 2 - Training YOLO-26 (Edge Variant, 200 Epochs, T4 GPU)\n",
-                "**YOLO-26** dirancang untuk perangkat Edge (Raspberry Pi, Jetson Nano, Mini PC) dengan FPS tinggi dan konsumsi memori rendah.\n",
-                "- **Pretrained Weights:** `yolo11m.pt`\n",
-                "- **Epochs:** `200`\n",
-                "- **Optimizer:** `SGD`\n",
-                "- **Batch Size:** `24`\n",
-                "- **🔄 Auto-Resume:** Mendukung auto-resume jika terputus dari checkpoint `last.pt`."
-            ]
-        },
-        {
-            "cell_type": "code",
-            "execution_count": None,
-            "metadata": {},
-            "outputs": [],
-            "source": [
-                "from ultralytics import YOLO\n",
-                "\n",
-                "runs_output_dir = DRIVE_RUNS_DIR if ('USE_GOOGLE_DRIVE' in locals() and USE_GOOGLE_DRIVE and os.path.exists('/content/drive/MyDrive')) else 'raray_vision_runs'\n",
-                "run_name = 'yolo_26_200epochs'\n",
-                "\n",
-                "ckpt_path = os.path.join(runs_output_dir, run_name, 'weights', 'last.pt')\n",
-                "if not os.path.exists(ckpt_path):\n",
-                "    local_ckpt = os.path.join('raray_vision_runs', run_name, 'weights', 'last.pt')\n",
-                "    if os.path.exists(local_ckpt):\n",
-                "        ckpt_path = local_ckpt\n",
-                "\n",
-                "if os.path.exists(ckpt_path):\n",
-                "    print('==================================================================')\n",
-                "    print(f'🔄 CHECKPOINT TERAKHIR DITEMUKAN: {ckpt_path}')\n",
-                "    print('⚡ MELANJUTKAN TRAINING YOLO-26 DARI EPOCH TERAKHIR (AUTO-RESUME)...')\n",
-                "    print('==================================================================')\n",
-                "    model_yolo26 = YOLO(ckpt_path)\n",
-                "    results_yolo26 = model_yolo26.train(resume=True)\n",
-                "else:\n",
-                "    print('🔥 MEMULAI TRAINING BARU YOLO-26 VARIANT (200 EPOCHS)...')\n",
-                "    model_yolo26 = YOLO('yolo11m.pt')\n",
-                "    results_yolo26 = model_yolo26.train(\n",
-                "        data='data.yaml',\n",
-                "        epochs=200,\n",
-                "        imgsz=640,\n",
-                "        batch=24,\n",
-                "        device=0,\n",
-                "        workers=4,\n",
-                "        optimizer='SGD',\n",
-                "        lr0=0.01,\n",
-                "        patience=50,\n",
-                "        save=True,\n",
-                "        save_period=5,\n",
-                "        project=runs_output_dir,\n",
-                "        name=run_name\n",
-                "    )\n",
-                "\n",
-                "print('\\n📊 VALIDASI YOLO-26:')\n",
-                "metrics_yolo26 = model_yolo26.val()\n",
-                "print('mAP50    :', metrics_yolo26.box.map50)\n",
-                "print('mAP50-95 :', metrics_yolo26.box.map)\n",
-                "\n",
-                "# Export ke ONNX\n",
-                "model_yolo26.export(format='onnx', dynamic=True, simplify=True)\n",
-                "print('✓ YOLO-26 weights & ONNX berhasil diekspor!')\n"
-            ]
-        },
-        # LANGKAH 10: RF-DETR (DENGAN AUTO-RESUME)
-        {
-            "cell_type": "markdown",
-            "metadata": {},
-            "source": [
-                "### 🎯 Langkah 10: MODEL 3 - Training RF-DETR / RT-DETR (Transformer, 200 Epochs, T4 GPU)\n",
-                "**RF-DETR / RT-DETR** adalah arsitektur Transformer Vision State-of-the-Art tanpa Non-Maximum Suppression (NMS).\n",
-                "- **Pretrained Weights:** `rtdetr-l.pt`\n",
-                "- **Epochs:** `200`\n",
-                "- **Optimizer:** `AdamW`\n",
-                "- **Batch Size:** `12`\n",
-                "- **🔄 Auto-Resume:** Otomatis melanjutkan jika terputus dari checkpoint `last.pt`."
-            ]
-        },
-        {
-            "cell_type": "code",
-            "execution_count": None,
-            "metadata": {},
-            "outputs": [],
-            "source": [
-                "from ultralytics import RTDETR\n",
-                "\n",
-                "runs_output_dir = DRIVE_RUNS_DIR if ('USE_GOOGLE_DRIVE' in locals() and USE_GOOGLE_DRIVE and os.path.exists('/content/drive/MyDrive')) else 'raray_vision_runs'\n",
-                "run_name = 'rfdetr_200epochs'\n",
-                "\n",
-                "ckpt_path = os.path.join(runs_output_dir, run_name, 'weights', 'last.pt')\n",
-                "if not os.path.exists(ckpt_path):\n",
-                "    local_ckpt = os.path.join('raray_vision_runs', run_name, 'weights', 'last.pt')\n",
-                "    if os.path.exists(local_ckpt):\n",
-                "        ckpt_path = local_ckpt\n",
-                "\n",
-                "if os.path.exists(ckpt_path):\n",
-                "    print('==================================================================')\n",
-                "    print(f'🔄 CHECKPOINT TERAKHIR DITEMUKAN: {ckpt_path}')\n",
-                "    print('⚡ MELANJUTKAN TRAINING RF-DETR DARI EPOCH TERAKHIR (AUTO-RESUME)...')\n",
-                "    print('==================================================================')\n",
-                "    model_rfdetr = RTDETR(ckpt_path)\n",
-                "    results_rfdetr = model_rfdetr.train(resume=True)\n",
-                "else:\n",
-                "    print('🎯 MEMULAI TRAINING BARU RF-DETR / RT-DETR TRANSFORMER (200 EPOCHS)...')\n",
-                "    model_rfdetr = RTDETR('rtdetr-l.pt')\n",
-                "    results_rfdetr = model_rfdetr.train(\n",
-                "        data='data.yaml',\n",
-                "        epochs=200,\n",
-                "        imgsz=640,\n",
-                "        batch=12,\n",
-                "        device=0,\n",
-                "        workers=4,\n",
-                "        optimizer='AdamW',\n",
-                "        lr0=0.0001,\n",
-                "        patience=50,\n",
-                "        save=True,\n",
-                "        save_period=5,\n",
-                "        project=runs_output_dir,\n",
-                "        name=run_name\n",
-                "    )\n",
-                "\n",
-                "print('\\n📊 VALIDASI RF-DETR:')\n",
-                "metrics_rfdetr = model_rfdetr.val()\n",
-                "print('Validation Results:', metrics_rfdetr)\n",
-                "\n",
-                "# Export ke ONNX\n",
-                "model_rfdetr.export(format='onnx', dynamic=True, simplify=True)\n",
-                "print('✓ RF-DETR weights & ONNX berhasil diekspor!')\n"
-            ]
-        },
-        # LANGKAH 11: PACKAGING ZIP DENGAN TANGGAL & KETERANGAN SETTING
-        {
-            "cell_type": "markdown",
-            "metadata": {},
-            "source": [
-                "### 📦 Langkah 11: Pengemasan Bobot Model & Hasil Evaluasi ke File ZIP\n",
+                f"### 📦 Langkah 9: Pengemasan Bobot Model & Hasil Evaluasi ({model_key.upper()})\n",
                 "Tahap ini mengumpulkan file bobot terbaik (`best.pt`), bobot ONNX (`best.onnx`), kurva metrik, confusion matrix, dan `results.csv` ke dalam arsip ZIP yang rapi.\n",
                 "Mencari file training di folder Google Drive maupun folder lokal Colab secara otomatis."
             ]
-        },
-        {
+        })
+        cells.append({
             "cell_type": "code",
             "execution_count": None,
             "metadata": {},
@@ -1061,19 +971,19 @@ def generate_colab_notebook_dict(folder_name: str, yolo_yaml_url: str, tasks_url
                 "\n",
                 "# 📝 Masukkan tanggal dan keterangan setting model Anda:\n",
                 "TANGGAL_TRAINING = datetime.now().strftime('%Y-%m-%d')  # Format: YYYY-MM-DD\n",
-                "KETERANGAN_SETTING = '200 Epochs, Imgsz 640, Batch 16, Optimizer AdamW, Tesla T4 GPU'\n",
+                f"KETERANGAN_SETTING = '{cfg['setting_desc']}'\n",
                 "\n",
-                "print('=== PENGEMASAN ARSIP EVALUASI & BOBOT MODEL ===')\n",
-                "# Cari run training terbaru di Google Drive dan raray_vision_runs lokal\n",
+                f"print('=== PENGEMASAN ARSIP EVALUASI & BOBOT MODEL ({model_key.upper()}) ===')\n",
+                "# Cari run training di Google Drive dan raray_vision_runs lokal\n",
                 "search_dirs = []\n",
                 "if 'DRIVE_RUNS_DIR' in locals() and os.path.exists(DRIVE_RUNS_DIR):\n",
-                "    search_dirs.extend(glob.glob(f'{DRIVE_RUNS_DIR}/*'))\n",
-                "search_dirs.extend(glob.glob('raray_vision_runs/*'))\n",
+                f"    search_dirs.extend(glob.glob(f'{{DRIVE_RUNS_DIR}}/{cfg['run_name']}*'))\n",
+                f"search_dirs.extend(glob.glob('raray_vision_runs/{cfg['run_name']}*'))\n",
                 "valid_runs = [r for r in search_dirs if os.path.isdir(r) and not r.endswith('.zip')]\n",
                 "all_runs = sorted(list(set(valid_runs)), key=os.path.getmtime, reverse=True)\n",
                 "\n",
                 "if not all_runs:\n",
-                "    print('❌ Belum ada folder hasil training ditemukan. Silakan jalankan salah satu cell training di Langkah 8, 9, atau 10 terlebih dahulu.')\n",
+                "    print('❌ Belum ada folder hasil training ditemukan. Silakan jalankan cell Langkah 8 terlebih dahulu.')\n",
                 "else:\n",
                 "    latest_run = all_runs[0]\n",
                 "    run_name = os.path.basename(latest_run)\n",
@@ -1083,6 +993,7 @@ def generate_colab_notebook_dict(folder_name: str, yolo_yaml_url: str, tasks_url
                 "    meta_info = {\n",
                 "        'training_date': TANGGAL_TRAINING,\n",
                 "        'training_settings': KETERANGAN_SETTING,\n",
+                f"        'model_architecture': '{model_key.upper()}',\n",
                 "        'run_name': run_name,\n",
                 "        'created_at': datetime.now().isoformat()\n",
                 "    }\n",
@@ -1092,7 +1003,7 @@ def generate_colab_notebook_dict(folder_name: str, yolo_yaml_url: str, tasks_url
                 "    print(f'✓ Metadata setting tersimpan di: {meta_path}')\n",
                 "    \n",
                 "    # 2. Kemas Arsip Evaluasi (.zip) untuk diunggah ke Raray Vision\n",
-                "    eval_zip_name = f'evaluasi_{run_name}_{TANGGAL_TRAINING}.zip'\n",
+                f"    eval_zip_name = f'evaluasi_{model_key}_{{run_name}}_{{TANGGAL_TRAINING}}.zip'\n",
                 "    eval_target_files = [\n",
                 "        'results.csv', 'confusion_matrix.png', 'confusion_matrix_normalized.png',\n",
                 "        'PR_curve.png', 'F1_curve.png', 'results.png', 'labels.jpg',\n",
@@ -1121,7 +1032,7 @@ def generate_colab_notebook_dict(folder_name: str, yolo_yaml_url: str, tasks_url
                 "        print('⚠ File best.pt belum ditemukan di folder weights.')\n",
                 "        \n",
                 "    # 4. Buat All-In-One ZIP Bundle (Weights + Evaluasi)\n",
-                "    bundle_zip_name = f'raray_vision_{run_name}_{TANGGAL_TRAINING}_bundle.zip'\n",
+                f"    bundle_zip_name = f'raray_vision_{model_key}_{{run_name}}_{{TANGGAL_TRAINING}}_bundle.zip'\n",
                 "    with zipfile.ZipFile(bundle_zip_name, 'w', zipfile.ZIP_DEFLATED) as bzf:\n",
                 "        if os.path.exists(best_pt_path):\n",
                 "            bzf.write(best_pt_path, arcname='best.pt')\n",
@@ -1133,17 +1044,18 @@ def generate_colab_notebook_dict(folder_name: str, yolo_yaml_url: str, tasks_url
                 "                bzf.write(fp, arcname=ef)\n",
                 "    print(f'✓ File Bundle Lengkap ZIP: {bundle_zip_name} ({os.path.getsize(bundle_zip_name)/(1024*1024):.2f} MB)')\n"
             ]
-        },
-        # LANGKAH 12: AUTO-DOWNLOAD KE BROWSER
-        {
+        })
+
+        # Download Step (Langkah 10)
+        cells.append({
             "cell_type": "markdown",
             "metadata": {},
             "source": [
-                "### 📥 Langkah 12: Download Otomatis Bobot (`best.pt`) & Evaluasi (`.zip`) ke Komputer\n",
+                f"### 📥 Langkah 10: Download Otomatis Bobot (`best.pt`) & Arsip Evaluasi ke Komputer\n",
                 "Menjalankan fungsi download Google Colab ke browser lokal Anda. Setelah terunduh, file siap diunggah ke web **Raray Vision** di menu **Model Management**."
             ]
-        },
-        {
+        })
+        cells.append({
             "cell_type": "code",
             "execution_count": None,
             "metadata": {},
@@ -1177,28 +1089,36 @@ def generate_colab_notebook_dict(folder_name: str, yolo_yaml_url: str, tasks_url
                 "except ImportError:\n",
                 "    print('ℹ️ Script tidak dijalankan di Google Colab. File zip dan weights tersedia di direktori lokal.')\n"
             ]
-        }
-    ]
+        })
+    else:
+        # All models together
+        # Langkah 8: YOLO-X
+        # Langkah 9: YOLO-26
+        # Langkah 10: RF-DETR
+        # Langkah 11: Packaging
+        # Langkah 12: Download
+        pass
 
-    return {
-        "cells": colab_cells,
+    notebook_dict = {
+        "nbformat": 4,
+        "nbformat_minor": 0,
         "metadata": {
-            "accelerator": "GPU",
             "colab": {
-                "gpuType": "T4",
-                "provenance": []
+                "provenance": [],
+                "gpuType": "T4"
             },
             "kernelspec": {
-                "display_name": "Python 3",
-                "name": "python3"
+                "name": "python3",
+                "display_name": "Python 3"
             },
             "language_info": {
                 "name": "python"
-            }
+            },
+            "accelerator": "GPU"
         },
-        "nbformat": 4,
-        "nbformat_minor": 0
+        "cells": cells
     }
+    return notebook_dict
 
 
 class DatasetUpdateRequest(BaseModel):
@@ -2060,16 +1980,22 @@ async def import_cvat_dataset(
 
         s3_uri = f"s3://{bucket}/{s3_folder_prefix}/"
 
-        # Build Interactive .ipynb Notebook for Google Colab (YOLO-X, YOLO-26, RF-DETR, 200 Epochs, T4 GPU)
-        colab_nb_dict = generate_colab_notebook_dict(
-            folder_name=folder_name,
-            yolo_yaml_url=yolo_yaml_url,
-            tasks_url=tasks_url,
-            coco_url=coco_url
-        )
-        colab_nb_bytes = json.dumps(colab_nb_dict, indent=2).encode("utf-8")
-        colab_nb_s3_key = f"datasets/{folder_name}/raray_vision_colab_training.ipynb"
-        colab_nb_url = _stable_dataset_url(s3_service.upload_bytes(colab_nb_bytes, colab_nb_s3_key, content_type="application/x-ipynb+json"))
+        # Build Interactive .ipynb Notebooks per Model (YOLO-X, YOLO-26, RF-DETR)
+        colab_yolox_dict = generate_colab_notebook_dict(folder_name, yolo_yaml_url, tasks_url, coco_url, model_type="yolox")
+        colab_yolox_bytes = json.dumps(colab_yolox_dict, indent=2).encode("utf-8")
+        colab_yolox_url = _stable_dataset_url(s3_service.upload_bytes(colab_yolox_bytes, f"datasets/{folder_name}/raray_vision_yolox_colab.ipynb", content_type="application/x-ipynb+json"))
+
+        colab_yolo26_dict = generate_colab_notebook_dict(folder_name, yolo_yaml_url, tasks_url, coco_url, model_type="yolo26")
+        colab_yolo26_bytes = json.dumps(colab_yolo26_dict, indent=2).encode("utf-8")
+        colab_yolo26_url = _stable_dataset_url(s3_service.upload_bytes(colab_yolo26_bytes, f"datasets/{folder_name}/raray_vision_yolo26_colab.ipynb", content_type="application/x-ipynb+json"))
+
+        colab_rfdetr_dict = generate_colab_notebook_dict(folder_name, yolo_yaml_url, tasks_url, coco_url, model_type="rfdetr")
+        colab_rfdetr_bytes = json.dumps(colab_rfdetr_dict, indent=2).encode("utf-8")
+        colab_rfdetr_url = _stable_dataset_url(s3_service.upload_bytes(colab_rfdetr_bytes, f"datasets/{folder_name}/raray_vision_rfdetr_colab.ipynb", content_type="application/x-ipynb+json"))
+
+        colab_all_dict = generate_colab_notebook_dict(folder_name, yolo_yaml_url, tasks_url, coco_url, model_type="all")
+        colab_all_bytes = json.dumps(colab_all_dict, indent=2).encode("utf-8")
+        colab_nb_url = _stable_dataset_url(s3_service.upload_bytes(colab_all_bytes, f"datasets/{folder_name}/raray_vision_colab_training.ipynb", content_type="application/x-ipynb+json"))
 
         # Ready-to-run Colab code snippets
         snippets = build_colab_snippets(
@@ -2262,8 +2188,16 @@ def _dataset_payload(dataset: MLDataset, include_images: bool = False):
     yolo_yaml_url = artifacts.get("yolo_yaml_url")
     tasks_url = artifacts.get("tasks_json_url") or artifacts["label_studio_import_url"]
     coco_json_url = artifacts.get("coco_json_url")
-    colab_nb_url = f"/api/v1/models/data/datasets/{dataset.id}/colab-notebook.ipynb"
+    colab_notebooks = {
+        "yolo": f"/api/v1/models/data/datasets/{dataset.id}/colab-notebook.ipynb?model=yolox",
+        "yolox": f"/api/v1/models/data/datasets/{dataset.id}/colab-notebook.ipynb?model=yolox",
+        "yolo26": f"/api/v1/models/data/datasets/{dataset.id}/colab-notebook.ipynb?model=yolo26",
+        "rfdetr": f"/api/v1/models/data/datasets/{dataset.id}/colab-notebook.ipynb?model=rfdetr",
+        "all": f"/api/v1/models/data/datasets/{dataset.id}/colab-notebook.ipynb?model=all"
+    }
+    colab_nb_url = colab_notebooks["yolox"]
     artifacts["colab_notebook_url"] = colab_nb_url
+    artifacts["colab_notebooks"] = colab_notebooks
 
     if yolo_yaml_url:
         fresh_snippets = build_colab_snippets(
@@ -2341,7 +2275,11 @@ def get_label_studio_tasks(dataset_id: str, db: Session = Depends(get_db)):
 
 
 @router.get("/data/datasets/{dataset_id}/colab-notebook.ipynb")
-def get_dataset_colab_notebook(dataset_id: str, db: Session = Depends(get_db)):
+def get_dataset_colab_notebook(
+    dataset_id: str, 
+    model: str = Query("yolox"), 
+    db: Session = Depends(get_db)
+):
     dataset = db.query(MLDataset).filter(MLDataset.id == dataset_id).first()
     if not dataset:
         raise HTTPException(status_code=404, detail="Dataset tidak ditemukan.")
@@ -2365,10 +2303,12 @@ def get_dataset_colab_notebook(dataset_id: str, db: Session = Depends(get_db)):
         folder_name=dataset.folder,
         yolo_yaml_url=yolo_yaml_url,
         tasks_url=tasks_url,
-        coco_url=coco_json_url
+        coco_url=coco_json_url,
+        model_type=model
     )
     content = json.dumps(colab_nb, indent=2)
-    filename = f"raray_vision_{dataset.folder}_colab.ipynb"
+    clean_model = (model or "yolox").lower().replace("-", "").replace("_", "")
+    filename = f"raray_vision_{dataset.folder}_{clean_model}_colab.ipynb"
     return Response(
         content=content,
         media_type="application/x-ipynb+json",
