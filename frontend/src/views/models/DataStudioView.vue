@@ -127,12 +127,21 @@ const getFullUrl = (url) => {
 
 const fetchDatasets = async () => {
   isLoadingDatasets.value = true
+  errorMessage.value = ''
+  let lastError = null
   try {
-    const response = await fetch(`${API_BASE_URL}/api/v1/models/data/datasets`)
-    if (!response.ok) throw new Error('Gagal mengambil riwayat dataset.')
-    datasets.value = (await response.json()).datasets || []
-  } catch (error) {
-    errorMessage.value = error.message
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      try {
+        const response = await fetch(`${API_BASE_URL}/api/v1/models/data/datasets`)
+        if (!response.ok) throw new Error('Gagal mengambil riwayat dataset.')
+        datasets.value = (await response.json()).datasets || []
+        return
+      } catch (error) {
+        lastError = error
+        if (attempt < 2) await new Promise(resolve => setTimeout(resolve, 2000))
+      }
+    }
+    errorMessage.value = lastError?.message || 'Gagal mengambil riwayat dataset.'
   } finally {
     isLoadingDatasets.value = false
   }
