@@ -522,6 +522,7 @@ def generate_colab_notebook_dict(folder_name: str, yolo_yaml_url: str, tasks_url
                 "# Mount Google Drive untuk penyimpanan permanen checkpoint & cache dataset\n",
                 "import os\n",
                 "\n",
+                f"folder_name = '{folder_name}'\n",
                 "USE_GOOGLE_DRIVE = True  # Ubah ke False jika HANYA ingin menyimpan di disk sementara Colab\n",
                 "DRIVE_BASE_DIR = '/content/drive/MyDrive/raray_vision_colab'\n",
                 "DRIVE_RUNS_DIR = os.path.join(DRIVE_BASE_DIR, 'runs')\n",
