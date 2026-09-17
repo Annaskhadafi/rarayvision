@@ -828,14 +828,15 @@ async def import_cvat_dataset(
         import yaml
         cat_list = coco_json.get("categories", [])
         if cat_list:
-            cat_names = [c.get("name") for c in sorted(cat_list, key=lambda x: x.get("id", 0))]
-            yolo_names = {i: name for i, name in enumerate(cat_names)}
+            sorted_cats = sorted(cat_list, key=lambda x: x.get("id", 0))
+            yolo_names = {i: c.get("name") or f"class_{i}" for i, c in enumerate(sorted_cats)}
+            cat_names = list(yolo_names.values())
         else:
             cat_names = ["object"]
             yolo_names = {0: "object"}
 
         yolo_yaml_data = {
-            "path": f"./{folder_name}",
+            "path": "/content/dataset",
             "train": "images/train",
             "val": "images/val",
             "nc": len(cat_names),
@@ -934,11 +935,14 @@ async def import_cvat_dataset(
                     f"COCO_JSON_URL = \"{coco_url}\"\n",
                     f"TASKS_JSON_URL = \"{tasks_url}\"\n",
                     "\n",
-                    "# Buat direktori dataset lokal di Colab\n",
-                    "os.makedirs('dataset/images/train', exist_ok=True)\n",
-                    "os.makedirs('dataset/images/val', exist_ok=True)\n",
-                    "os.makedirs('dataset/labels/train', exist_ok=True)\n",
-                    "os.makedirs('dataset/labels/val', exist_ok=True)\n",
+                    "# Setup direktori lokal dataset di Colab\n",
+                    "base_dir = os.path.abspath('dataset')\n",
+                    "train_img_dir = os.path.join(base_dir, 'images', 'train')\n",
+                    "val_img_dir = os.path.join(base_dir, 'images', 'val')\n",
+                    "train_lbl_dir = os.path.join(base_dir, 'labels', 'train')\n",
+                    "val_lbl_dir = os.path.join(base_dir, 'labels', 'val')\n",
+                    "for p in [train_img_dir, val_img_dir, train_lbl_dir, val_lbl_dir]:\n",
+                    "    os.makedirs(p, exist_ok=True)\n",
                     "\n",
                     "# 1. Download data.yaml\n",
                     "print('[1/3] Downloading data.yaml...')\n",
@@ -954,6 +958,17 @@ async def import_cvat_dataset(
                     "tasks = r_tasks.json() if r_tasks.status_code == 200 else []\n",
                     "print(f'✓ Loaded {len(tasks)} tasks from Raray Vision S3!')\n",
                     "\n",
+                    "# Load category mapping from data.yaml\n",
+                    "with open('data.yaml', 'r') as f:\n",
+                    "    data_cfg = yaml.safe_load(f) or {}\n",
+                    "raw_names = data_cfg.get('names', {0: 'object'})\n",
+                    "if isinstance(raw_names, dict):\n",
+                    "    name_to_id = {str(v).lower(): int(k) for k, v in raw_names.items()}\n",
+                    "elif isinstance(raw_names, list):\n",
+                    "    name_to_id = {str(v).lower(): i for i, v in enumerate(raw_names)}\n",
+                    "else:\n",
+                    "    name_to_id = {'object': 0}\n",
+                    "\n",
                     "# 3. Download & Persiapan Gambar secara Paralel (80% train, 20% val)\n",
                     "print('[3/3] Downloading dataset images into Colab local disk...')\n",
                     "def download_and_save(task_idx, item):\n",
@@ -961,15 +976,14 @@ async def import_cvat_dataset(
                     "    fname = item.get('data', {}).get('original_filename') or os.path.basename(img_url.split('?')[0])\n",
                     "    if not fname or not fname.lower().endswith(('.jpg', '.jpeg', '.png', '.webp')):\n",
                     "        fname = f'img_{task_idx}.jpg'\n",
-                    "    split = 'val' if task_idx % 5 == 0 else 'train'\n",
-                    "    dest_img = os.path.join('dataset/images', split, fname)\n",
-                    "    dest_lbl = os.path.join('dataset/labels', split, os.path.splitext(fname)[0] + '.txt')\n",
+                    "    split = 'val' if (len(tasks) > 1 and task_idx % 5 == 0) else 'train'\n",
+                    "    dest_img = os.path.join(base_dir, 'images', split, fname)\n",
+                    "    dest_lbl = os.path.join(base_dir, 'labels', split, os.path.splitext(fname)[0] + '.txt')\n",
                     "    try:\n",
-                    "        res = requests.get(img_url, timeout=15)\n",
+                    "        res = requests.get(img_url, timeout=20)\n",
                     "        if res.status_code == 200:\n",
                     "            with open(dest_img, 'wb') as f:\n",
                     "                f.write(res.content)\n",
-                    "            # Generate YOLO labels dari Label Studio task\n",
                     "            lines = []\n",
                     "            anns = item.get('annotations', [{}])[0].get('result', [])\n",
                     "            for ann in anns:\n",
@@ -978,9 +992,11 @@ async def import_cvat_dataset(
                     "                y_pct = val.get('y', 0) / 100.0\n",
                     "                w_pct = val.get('width', 0) / 100.0\n",
                     "                h_pct = val.get('height', 0) / 100.0\n",
+                    "                lbls = val.get('rectanglelabels', ['object'])\n",
+                    "                first_lbl = str(lbls[0]).lower() if lbls else 'object'\n",
+                    "                cat_id = name_to_id.get(first_lbl, 0)\n",
                     "                x_center = x_pct + (w_pct / 2.0)\n",
                     "                y_center = y_pct + (h_pct / 2.0)\n",
-                    "                cat_id = 0\n",
                     "                lines.append(f\"{cat_id} {x_center:.6f} {y_center:.6f} {w_pct:.6f} {h_pct:.6f}\")\n",
                     "            with open(dest_lbl, 'w') as lf:\n",
                     "                lf.write('\\n'.join(lines))\n",
@@ -990,15 +1006,30 @@ async def import_cvat_dataset(
                     "with ThreadPoolExecutor(max_workers=16) as ex:\n",
                     "    list(tqdm(ex.map(lambda x: download_and_save(x[0], x[1]), enumerate(tasks)), total=len(tasks)))\n",
                     "\n",
+                    "# Fallback: pastikan train dan val selalu memiliki minimal 1 file gambar & label\n",
+                    "import glob, shutil\n",
+                    "train_imgs = glob.glob(os.path.join(train_img_dir, '*.*'))\n",
+                    "val_imgs = glob.glob(os.path.join(val_img_dir, '*.*'))\n",
+                    "if not val_imgs and train_imgs:\n",
+                    "    for f in train_imgs[:max(1, len(train_imgs)//5)]:\n",
+                    "        shutil.copy(f, val_img_dir)\n",
+                    "        lbl_src = os.path.join(train_lbl_dir, os.path.splitext(os.path.basename(f))[0] + '.txt')\n",
+                    "        if os.path.exists(lbl_src):\n",
+                    "            shutil.copy(lbl_src, val_lbl_dir)\n",
+                    "elif not train_imgs and val_imgs:\n",
+                    "    for f in val_imgs:\n",
+                    "        shutil.copy(f, train_img_dir)\n",
+                    "        lbl_src = os.path.join(val_lbl_dir, os.path.splitext(os.path.basename(f))[0] + '.txt')\n",
+                    "        if os.path.exists(lbl_src):\n",
+                    "            shutil.copy(lbl_src, train_lbl_dir)\n",
+                    "\n",
                     "# Update data.yaml path\n",
-                    "with open('data.yaml', 'r') as f:\n",
-                    "    data_cfg = yaml.safe_load(f) or {}\n",
-                    "data_cfg['path'] = os.path.abspath('dataset')\n",
+                    "data_cfg['path'] = base_dir\n",
                     "data_cfg['train'] = 'images/train'\n",
                     "data_cfg['val'] = 'images/val'\n",
                     "with open('data.yaml', 'w') as f:\n",
                     "    yaml.dump(data_cfg, f, sort_keys=False)\n",
-                    "print('✓ Dataset ready! Final data.yaml:')\n",
+                    "print('✓ Dataset ready! Train:', len(glob.glob(os.path.join(train_img_dir, '*.*'))), '| Val:', len(glob.glob(os.path.join(val_img_dir, '*.*'))))\n",
                     "!cat data.yaml\n"
                 ]
             },
@@ -1175,27 +1206,97 @@ async def import_cvat_dataset(
         colab_nb_s3_key = f"datasets/{folder_name}/raray_vision_colab_training.ipynb"
         colab_nb_url = _stable_dataset_url(s3_service.upload_bytes(colab_nb_bytes, colab_nb_s3_key, content_type="application/x-ipynb+json"))
 
-        # Ready-to-run Colab code snippet
+        # Ready-to-run Colab code snippet with self-contained dataset setup
+        dataset_setup_script = f"""import os, glob, shutil, requests, yaml
+from concurrent.futures import ThreadPoolExecutor
+
+# 1. Setup dataset dirs
+base_dir = os.path.abspath('dataset')
+train_img = os.path.join(base_dir, 'images', 'train')
+val_img = os.path.join(base_dir, 'images', 'val')
+train_lbl = os.path.join(base_dir, 'labels', 'train')
+val_lbl = os.path.join(base_dir, 'labels', 'val')
+for p in [train_img, val_img, train_lbl, val_lbl]:
+    os.makedirs(p, exist_ok=True)
+
+# 2. Download data.yaml & tasks
+r_yaml = requests.get('{yolo_yaml_url}')
+if r_yaml.status_code == 200:
+    with open('data.yaml', 'wb') as f:
+        f.write(r_yaml.content)
+with open('data.yaml', 'r') as f:
+    cfg = yaml.safe_load(f) or {{}}
+raw_names = cfg.get('names', {{0: 'object'}})
+name_to_id = {{str(v).lower(): int(k) for k, v in raw_names.items()}} if isinstance(raw_names, dict) else {{'object': 0}}
+
+tasks = requests.get('{tasks_url}').json() if requests.get('{tasks_url}').status_code == 200 else []
+
+def dl_item(idx_item):
+    idx, item = idx_item
+    img_url = item.get('data', {{}}).get('image', '')
+    fname = item.get('data', {{}}).get('original_filename') or os.path.basename(img_url.split('?')[0]) or f'img_{{idx}}.jpg'
+    split = 'val' if (len(tasks) > 1 and idx % 5 == 0) else 'train'
+    res = requests.get(img_url, timeout=20)
+    if res.status_code == 200:
+        with open(os.path.join(base_dir, 'images', split, fname), 'wb') as f:
+            f.write(res.content)
+        lines = []
+        for ann in item.get('annotations', [{{}}])[0].get('result', []):
+            v = ann.get('value', {{}})
+            lbls = v.get('rectanglelabels', ['object'])
+            first_lbl = str(lbls[0]).lower() if lbls else 'object'
+            cid = name_to_id.get(first_lbl, 0)
+            xc = (v.get('x', 0) + v.get('width', 0) / 2.0) / 100.0
+            yc = (v.get('y', 0) + v.get('height', 0) / 2.0) / 100.0
+            lines.append(f"{{cid}} {{xc:.6f}} {{yc:.6f}} {{v.get('width',0)/100.0:.6f}} {{v.get('height',0)/100.0:.6f}}")
+        with open(os.path.join(base_dir, 'labels', split, os.path.splitext(fname)[0] + '.txt'), 'w') as lf:
+            lf.write('\\n'.join(lines))
+
+with ThreadPoolExecutor(max_workers=16) as ex:
+    list(ex.map(dl_item, enumerate(tasks)))
+
+# Fallback ensure both train and val have files
+t_imgs = glob.glob(os.path.join(train_img, '*.*'))
+v_imgs = glob.glob(os.path.join(val_img, '*.*'))
+if not v_imgs and t_imgs:
+    for f in t_imgs[:max(1, len(t_imgs)//5)]:
+        shutil.copy(f, val_img)
+        lbl = os.path.join(train_lbl, os.path.splitext(os.path.basename(f))[0] + '.txt')
+        if os.path.exists(lbl): shutil.copy(lbl, val_lbl)
+elif not t_imgs and v_imgs:
+    for f in v_imgs:
+        shutil.copy(f, train_img)
+        lbl = os.path.join(val_lbl, os.path.splitext(os.path.basename(f))[0] + '.txt')
+        if os.path.exists(lbl): shutil.copy(lbl, train_lbl)
+
+cfg['path'] = base_dir
+cfg['train'] = 'images/train'
+cfg['val'] = 'images/val'
+with open('data.yaml', 'w') as f:
+    yaml.dump(cfg, f, sort_keys=False)
+print('Dataset Ready! Train:', len(glob.glob(os.path.join(train_img, '*.*'))), '| Val:', len(glob.glob(os.path.join(val_img, '*.*'))))
+"""
+
         colab_yolo_snippet = f"""# ==========================================
-# 🚀 GOOGLE COLAB TRAINING PIPELINE (YOLO-X / YOLO-26: 200 EPOCHS, T4 GPU)
+# 🚀 GOOGLE COLAB TRAINING PIPELINE (YOLO-X / YOLO11-X: 200 EPOCHS, T4 GPU)
 # Dataset: {folder_name}
 # ==========================================
-!pip install -q ultralytics
+!pip install -q ultralytics pyyaml requests
 
-# 1. Download data.yaml
-!curl -fsSL -o data.yaml "{yolo_yaml_url}"
+# 1. Download & Prepare Dataset Locally
+{dataset_setup_script}
 
 # 2. Train YOLO-X (200 Epochs, T4 GPU)
 from ultralytics import YOLO
 
 model = YOLO("yolo11x.pt") # YOLO-X architecture
-results = model.train(data="data.yaml", epochs=200, imgsz=640, device=0, batch=16)
+results = model.train(data="data.yaml", epochs=200, imgsz=640, device=0, batch=16, optimizer="AdamW")
 
 # 3. Validasi Model
 metrics = model.val()
 print("mAP50-95:", metrics.box.map)
 
-# 4. Export ONNX untuk Raray Vision
+# 4. Export ONNX untuk Hot-Swap di Raray Vision
 model.export(format="onnx")
 """
 
@@ -1203,10 +1304,10 @@ model.export(format="onnx")
 # 🔥 GOOGLE COLAB TRAINING PIPELINE (YOLO-26: 200 EPOCHS, T4 GPU)
 # Dataset: {folder_name}
 # ==========================================
-!pip install -q ultralytics
+!pip install -q ultralytics pyyaml requests
 
-# 1. Download data.yaml
-!curl -fsSL -o data.yaml "{yolo_yaml_url}"
+# 1. Download & Prepare Dataset Locally
+{dataset_setup_script}
 
 # 2. Train YOLO-26 (200 Epochs, T4 GPU)
 from ultralytics import YOLO
@@ -1218,19 +1319,18 @@ results = model.train(data="data.yaml", epochs=200, imgsz=640, device=0, batch=2
 metrics = model.val()
 print("mAP50-95:", metrics.box.map)
 
-# 4. Export ONNX untuk Raray Vision
+# 4. Export ONNX untuk Hot-Swap di Raray Vision
 model.export(format="onnx")
 """
 
         colab_rfdetr_snippet = f"""# ==========================================
-# 🎯 GOOGLE COLAB TRAINING PIPELINE (RF-DETR: 200 EPOCHS, T4 GPU)
+# 🎯 GOOGLE COLAB TRAINING PIPELINE (RF-DETR / RT-DETR: 200 EPOCHS, T4 GPU)
 # Dataset: {folder_name}
 # ==========================================
-!pip install -q ultralytics
+!pip install -q ultralytics pyyaml requests
 
-# 1. Download data.yaml & COCO annotations
-!curl -fsSL -o data.yaml "{yolo_yaml_url}"
-!curl -fsSL -o annotations_coco.json "{coco_url}"
+# 1. Download & Prepare Dataset Locally
+{dataset_setup_script}
 
 # 2. Train RF-DETR / RT-DETR (200 Epochs, T4 GPU)
 from ultralytics import RTDETR
