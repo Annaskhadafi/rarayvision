@@ -110,6 +110,16 @@ const triggerSyncToLabelStudio = async () => {
   }
 }
 
+const downloadModelWeights = () => {
+  if (!selectedModelId.value) return
+  window.open(`${API_BASE_URL}/api/v1/models/${selectedModelId.value}/download-weights`, '_blank')
+}
+
+const downloadEvaluationZip = () => {
+  if (!selectedModelId.value) return
+  window.open(`${API_BASE_URL}/api/v1/models/${selectedModelId.value}/download-evaluation`, '_blank')
+}
+
 const getFullAssetUrl = (url) => {
   if (!url) return ''
   if (url.startsWith('http://') || url.startsWith('https://')) return url
@@ -166,12 +176,35 @@ onMounted(async () => {
     <div v-if="activeTab === 'offline'" class="tab-content">
       <!-- Model Selector Bar -->
       <div class="selector-bar">
-        <label class="selector-label">Pilih Versi Model:</label>
-        <select v-model="selectedModelId" class="model-select">
-          <option v-for="m in models" :key="m.id" :value="m.id">
-            {{ m.name }} ({{ m.version }}) {{ m.is_active ? '— [AKTIF]' : '' }}
-          </option>
-        </select>
+        <div class="selector-left">
+          <label class="selector-label">Pilih Versi Model:</label>
+          <select v-model="selectedModelId" class="model-select">
+            <option v-for="m in models" :key="m.id" :value="m.id">
+              {{ m.name }} ({{ m.version }}) {{ m.is_active ? '— [AKTIF]' : '' }}
+            </option>
+          </select>
+        </div>
+
+        <div class="selector-actions" v-if="evaluationData">
+          <button 
+            v-if="evaluationData.has_weights !== false" 
+            class="btn btn-sm btn-outline-secondary" 
+            @click="downloadModelWeights"
+            title="Download file weights model (.pt)"
+          >
+            <svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
+            Download Weights (.pt)
+          </button>
+          <button 
+            v-if="evaluationData.has_evaluation" 
+            class="btn btn-sm btn-primary" 
+            @click="downloadEvaluationZip"
+            title="Download arsip hasil evaluasi training (.zip)"
+          >
+            <svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
+            Download Arsip Evaluasi (.zip)
+          </button>
+        </div>
       </div>
 
       <div v-if="isLoading" class="loading-state">
@@ -180,6 +213,34 @@ onMounted(async () => {
       </div>
 
       <div v-else-if="evaluationData">
+        <!-- Training Settings & Metadata Banner -->
+        <div class="model-meta-card">
+          <div class="meta-row">
+            <div class="meta-col">
+              <span class="meta-title">Nama & Versi Model</span>
+              <div class="meta-main">{{ evaluationData.name }} <span class="font-mono text-xs px-2 py-0.5 bg-slate-100 rounded ml-1">{{ evaluationData.version }}</span></div>
+            </div>
+            <div class="meta-col">
+              <span class="meta-title">Tanggal Training</span>
+              <div class="meta-main text-blue-600 font-semibold">
+                {{ evaluationData.metrics?.training_date || (evaluationData.created_at ? new Date(evaluationData.created_at).toLocaleDateString('id-ID', { day: 'numeric', month: 'short', year: 'numeric' }) : '-') }}
+              </div>
+            </div>
+            <div class="meta-col flex-2">
+              <span class="meta-title">Keterangan Setting / Hyperparameters</span>
+              <div class="meta-main text-slate-700">
+                {{ evaluationData.metrics?.training_settings || evaluationData.description || 'Pengaturan training default (200 Epochs, imgsz 640)' }}
+              </div>
+            </div>
+            <div class="meta-col" v-if="evaluationData.metrics?.epochs">
+              <span class="meta-title">Epochs Dilatih</span>
+              <div class="meta-main font-mono text-emerald-600 font-bold">
+                {{ evaluationData.metrics.epochs }} Epochs
+              </div>
+            </div>
+          </div>
+        </div>
+
         <!-- Metric KPI Cards -->
         <div class="kpi-grid">
           <div class="kpi-card">
@@ -500,12 +561,66 @@ onMounted(async () => {
 .selector-bar {
   display: flex;
   align-items: center;
-  gap: 12px;
-  margin-bottom: 20px;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 16px;
+  margin-bottom: 16px;
   background: white;
   padding: 12px 18px;
   border-radius: 8px;
   border: 1px solid #e2e8f0;
+}
+
+.selector-left {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.selector-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.model-meta-card {
+  background: white;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  padding: 14px 20px;
+  margin-bottom: 20px;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.02);
+}
+
+.meta-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 24px;
+}
+
+.meta-col {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.meta-col.flex-2 {
+  flex: 2;
+  min-width: 240px;
+}
+
+.meta-title {
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  color: #64748b;
+  letter-spacing: 0.04em;
+}
+
+.meta-main {
+  font-size: 0.88rem;
+  color: #1e293b;
 }
 
 .selector-label {

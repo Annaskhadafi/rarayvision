@@ -434,6 +434,19 @@ class DetectionService:
             except Exception as e:
                 print(f"[DetectionService] Error parsing results.csv: {e}")
 
+        meta_path = os.path.join(dest_dir, "training_meta.json")
+        if os.path.exists(meta_path):
+            try:
+                import json
+                with open(meta_path, "r", encoding="utf-8") as mf:
+                    meta_json = json.load(mf)
+                    if isinstance(meta_json, dict):
+                        for k, v in meta_json.items():
+                            if k not in metrics or not metrics[k]:
+                                metrics[k] = v
+            except Exception as e:
+                print(f"[DetectionService] Error parsing training_meta.json: {e}")
+
         eval_keys = [
             ("confusion_matrix", "confusion_matrix.png"),
             ("confusion_matrix_norm", "confusion_matrix_normalized.png"),

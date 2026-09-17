@@ -11,7 +11,7 @@ from datetime import datetime
 from typing import Optional, List, Dict, Any
 from urllib.parse import quote, unquote, urlparse
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Query, status, BackgroundTasks
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import JSONResponse, Response, FileResponse
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
 
@@ -853,13 +853,14 @@ def generate_colab_notebook_dict(folder_name: str, yolo_yaml_url: str, tasks_url
                 "print('✓ RF-DETR weights & ONNX berhasil diekspor!')\n"
             ]
         },
-        # LANGKAH 11: RINGKASAN & HOT-SWAP
+        # LANGKAH 11: PACKAGING ZIP DENGAN TANGGAL & KETERANGAN SETTING
         {
             "cell_type": "markdown",
             "metadata": {},
             "source": [
-                "### 🏆 Langkah 11: Ringkasan Bobot Model & Panduan Integrasi ke Raray Vision\n",
-                "Setelah model selesai dilatih, bobot model (`best.pt` dan `best.onnx`) siap diunduh dan diunggah ke menu **Model Management** di Raray Vision. Anda dapat melakukan **Hot-Swap** model tanpa mengubah endpoint API klien!"
+                "### 📦 Langkah 11: Pengemasan Bobot Model & Hasil Evaluasi ke File ZIP\n",
+                "Tahap ini mengumpulkan file bobot terbaik (`best.pt`), bobot ONNX (`best.onnx`), kurva metrik, confusion matrix, dan `results.csv` ke dalam arsip ZIP yang rapi.\n",
+                "Anda dapat menentukan **Tanggal Training** dan **Keterangan Setting / Hyperparameters** agar otomatis tercatat saat diunggah ke sistem Raray Vision."
             ]
         },
         {
@@ -868,22 +869,126 @@ def generate_colab_notebook_dict(folder_name: str, yolo_yaml_url: str, tasks_url
             "metadata": {},
             "outputs": [],
             "source": [
-                "import glob, os\n",
+                "# ==========================================================\n",
+                "# PENGATURAN METADATA & ARSIP ZIP TRAINING\n",
+                "# ==========================================================\n",
+                "import os, glob, shutil, json, zipfile\n",
+                "from datetime import datetime\n",
                 "\n",
-                "print('📁 DAFTAR BOBOT MODEL YANG DIHASILKAN:')\n",
-                "exported_files = glob.glob('raray_vision_runs/**/weights/best.*', recursive=True) + glob.glob('raray_vision_runs/**/*.onnx', recursive=True)\n",
+                "# 📝 Masukkan tanggal dan keterangan setting model Anda:\n",
+                "TANGGAL_TRAINING = datetime.now().strftime('%Y-%m-%d')  # Format: YYYY-MM-DD\n",
+                "KETERANGAN_SETTING = '200 Epochs, Imgsz 640, Batch 16, Optimizer AdamW, Tesla T4 GPU'\n",
                 "\n",
-                "if exported_files:\n",
-                "    for f in exported_files:\n",
-                "        sz = os.path.getsize(f) / (1024 * 1024)\n",
-                "        print(f'  - {f} ({sz:.2f} MB)')\n",
-                "    print('\\n💡 Panduan Upload ke Raray Vision:')\n",
-                "    print('1. Buka sidebar kiri Google Colab (icon folder).')\n",
-                "    print('2. Klik kanan pada file best.pt atau best.onnx di folder raray_vision_runs > Download.')\n",
-                "    print('3. Buka web Raray Vision > Menu \"Model Management\" > Tambah/Update Model.')\n",
-                "    print('4. Model baru langsung aktif secara instan tanpa restart service!')\n",
+                "print('=== PENGEMASAN ARSIP EVALUASI & BOBOT MODEL ===')\n",
+                "# Cari run training terbaru di raray_vision_runs\n",
+                "all_runs = sorted(glob.glob('raray_vision_runs/*'), key=os.path.getmtime, reverse=True)\n",
+                "# Filter hanya direktori run\n",
+                "valid_runs = [r for r in all_runs if os.path.isdir(r) and not r.endswith('.zip')]\n",
+                "\n",
+                "if not valid_runs:\n",
+                "    print('❌ Belum ada folder hasil training di \"raray_vision_runs\". Silakan jalankan salah satu cell training di Langkah 8, 9, atau 10 terlebih dahulu.')\n",
                 "else:\n",
-                "    print('Belum ada bobot yang diekspor. Silakan jalankan salah satu cell training di Langkah 8, 9, atau 10.')\n"
+                "    latest_run = valid_runs[0]\n",
+                "    run_name = os.path.basename(latest_run)\n",
+                "    print(f'📁 Direktori Training Terpilih: {latest_run}')\n",
+                "    \n",
+                "    # 1. Buat file metadata setting training\n",
+                "    meta_info = {\n",
+                "        'training_date': TANGGAL_TRAINING,\n",
+                "        'training_settings': KETERANGAN_SETTING,\n",
+                "        'run_name': run_name,\n",
+                "        'created_at': datetime.now().isoformat()\n",
+                "    }\n",
+                "    meta_path = os.path.join(latest_run, 'training_meta.json')\n",
+                "    with open(meta_path, 'w', encoding='utf-8') as mf:\n",
+                "        json.dump(meta_info, mf, indent=2)\n",
+                "    print(f'✓ Metadata setting tersimpan di: {meta_path}')\n",
+                "    \n",
+                "    # 2. Kemas Arsip Evaluasi (.zip) untuk diunggah ke Raray Vision\n",
+                "    eval_zip_name = f'evaluasi_{run_name}_{TANGGAL_TRAINING}.zip'\n",
+                "    eval_target_files = [\n",
+                "        'results.csv', 'confusion_matrix.png', 'confusion_matrix_normalized.png',\n",
+                "        'PR_curve.png', 'F1_curve.png', 'results.png', 'labels.jpg',\n",
+                "        'val_batch0_pred.jpg', 'training_meta.json'\n",
+                "    ]\n",
+                "    with zipfile.ZipFile(eval_zip_name, 'w', zipfile.ZIP_DEFLATED) as zf:\n",
+                "        for ef in eval_target_files:\n",
+                "            fp = os.path.join(latest_run, ef)\n",
+                "            if os.path.exists(fp):\n",
+                "                zf.write(fp, arcname=ef)\n",
+                "                print(f'  + Arsip Eval: {ef}')\n",
+                "    print(f'✓ File Evaluasi ZIP siap: {eval_zip_name} ({os.path.getsize(eval_zip_name)/1024:.1f} KB)')\n",
+                "    \n",
+                "    # 3. Identifikasi bobot best.pt dan best.onnx\n",
+                "    best_pt_path = os.path.join(latest_run, 'weights', 'best.pt')\n",
+                "    best_onnx_path = os.path.join(latest_run, 'weights', 'best.onnx')\n",
+                "    if not os.path.exists(best_onnx_path):\n",
+                "        pot_onnx = glob.glob(os.path.join(latest_run, '*.onnx'))\n",
+                "        if pot_onnx:\n",
+                "            best_onnx_path = pot_onnx[0]\n",
+                "    \n",
+                "    if os.path.exists(best_pt_path):\n",
+                "        sz_pt = os.path.getsize(best_pt_path) / (1024 * 1024)\n",
+                "        print(f'✓ File Bobot Model: {best_pt_path} ({sz_pt:.2f} MB)')\n",
+                "    else:\n",
+                "        print('⚠ File best.pt belum ditemukan di folder weights.')\n",
+                "        \n",
+                "    # 4. Buat All-In-One ZIP Bundle (Weights + Evaluasi)\n",
+                "    bundle_zip_name = f'raray_vision_{run_name}_{TANGGAL_TRAINING}_bundle.zip'\n",
+                "    with zipfile.ZipFile(bundle_zip_name, 'w', zipfile.ZIP_DEFLATED) as bzf:\n",
+                "        if os.path.exists(best_pt_path):\n",
+                "            bzf.write(best_pt_path, arcname='best.pt')\n",
+                "        if os.path.exists(best_onnx_path):\n",
+                "            bzf.write(best_onnx_path, arcname='best.onnx')\n",
+                "        for ef in eval_target_files:\n",
+                "            fp = os.path.join(latest_run, ef)\n",
+                "            if os.path.exists(fp):\n",
+                "                bzf.write(fp, arcname=ef)\n",
+                "    print(f'✓ File Bundle Lengkap ZIP: {bundle_zip_name} ({os.path.getsize(bundle_zip_name)/(1024*1024):.2f} MB)')\n"
+            ]
+        },
+        # LANGKAH 12: AUTO-DOWNLOAD KE BROWSER
+        {
+            "cell_type": "markdown",
+            "metadata": {},
+            "source": [
+                "### 📥 Langkah 12: Download Otomatis Bobot (`best.pt`) & Evaluasi (`.zip`) ke Komputer\n",
+                "Menjalankan fungsi download Google Colab ke browser lokal Anda. Setelah terunduh, file siap diunggah ke web **Raray Vision** di menu **Model Management**."
+            ]
+        },
+        {
+            "cell_type": "code",
+            "execution_count": None,
+            "metadata": {},
+            "outputs": [],
+            "source": [
+                "# ==========================================================\n",
+                "# DOWNLOAD LANGSUNG KE KOMPUTER ANDA\n",
+                "# ==========================================================\n",
+                "try:\n",
+                "    from google.colab import files\n",
+                "    print('📥 Memicu dialog pengunduhan browser...')\n",
+                "    \n",
+                "    if 'best_pt_path' in locals() and os.path.exists(best_pt_path):\n",
+                "        print(f'⬇️ Mengunduh model weights: best.pt ({os.path.getsize(best_pt_path)/(1024*1024):.2f} MB)...')\n",
+                "        files.download(best_pt_path)\n",
+                "    \n",
+                "    if 'eval_zip_name' in locals() and os.path.exists(eval_zip_name):\n",
+                "        print(f'⬇️ Mengunduh arsip evaluasi: {eval_zip_name}...')\n",
+                "        files.download(eval_zip_name)\n",
+                "        \n",
+                "    print('\\n🎉 Selesai! File sedang diunduh oleh browser Anda.')\n",
+                "    print('\\n📋 PANDUAN UNGGAH KE RARAY VISION:')\n",
+                "    print('1. Buka web Raray Vision > Menu \"Model Management\".')\n",
+                "    print('2. Klik tombol \"+ Upload Model (.pt / .onnx)\".')\n",
+                "    print('3. Isi formulir:')\n",
+                "    print('   - File Bobot Model (.pt): Pilih file best.pt yang baru diunduh.')\n",
+                "    print(f'   - File Arsip Evaluasi (.zip): Pilih file {eval_zip_name}.')\n",
+                "    print(f'   - Tanggal Training: {TANGGAL_TRAINING}')\n",
+                "    print(f'   - Keterangan Setting: {KETERANGAN_SETTING}')\n",
+                "    print('4. Klik \"Simpan Model\". Metrik mAP, Confusion Matrix, dan PR Curve akan langsung tampil!')\n",
+                "except ImportError:\n",
+                "    print('ℹ️ Script tidak dijalankan di Google Colab. File zip dan weights tersedia di direktori lokal.')\n"
             ]
         }
     ]
@@ -1096,12 +1201,16 @@ async def submit_feedback(
 
 @router.get("")
 def list_models(db: Session = Depends(get_db)):
-    """List all registered models with their active status and metrics."""
+    """List all registered models with their active status, metrics, and download flags."""
     models = db.query(MLModel).order_by(MLModel.created_at.desc()).all()
     results = []
     for m in models:
         metrics = json.loads(m.metrics_summary) if m.metrics_summary else {}
         classes = json.loads(m.classes) if m.classes else []
+        eval_dir = m.evaluation_dir or os.path.join(detection_service.evaluations_dir, f"model_{m.id}")
+        has_eval = bool(os.path.exists(eval_dir) and os.listdir(eval_dir))
+        has_w = bool(m.model_path and os.path.exists(m.model_path))
+        has_o = bool(m.onnx_path and os.path.exists(m.onnx_path))
         results.append({
             "id": m.id,
             "name": m.name,
@@ -1113,6 +1222,9 @@ def list_models(db: Session = Depends(get_db)):
             "classes": classes,
             "classes_count": len(classes),
             "metrics": metrics,
+            "has_weights": has_w,
+            "has_evaluation": has_eval,
+            "has_onnx": has_o,
             "created_at": m.created_at.isoformat() if m.created_at else None
         })
     return {"models": results}
@@ -1125,6 +1237,8 @@ async def upload_model(
     task_type: str = Form("detection"),
     framework: str = Form("yolo"),
     description: Optional[str] = Form(None),
+    training_date: Optional[str] = Form(None),
+    training_settings: Optional[str] = Form(None),
     model_file: UploadFile = File(...),
     onnx_file: Optional[UploadFile] = File(None),
     results_file: Optional[UploadFile] = File(None),
@@ -1132,7 +1246,7 @@ async def upload_model(
 ):
     """
     Upload a trained model (.pt or .onnx) and optional evaluation results zip.
-    Extracts metrics and creates registry entry.
+    Extracts metrics, stores training settings & date, and creates registry entry.
     """
     # Ensure model file extension
     m_ext = os.path.splitext(model_file.filename)[1].lower()
@@ -1163,6 +1277,13 @@ async def upload_model(
     except Exception as e:
         print(f"[ModelUpload] Note: could not extract classes automatically: {e}")
 
+    # Build initial metrics dict with date & settings if provided
+    initial_metrics = {}
+    if training_date and training_date.strip():
+        initial_metrics["training_date"] = training_date.strip()
+    if training_settings and training_settings.strip():
+        initial_metrics["training_settings"] = training_settings.strip()
+
     # Create DB entry first to get ID
     new_model = MLModel(
         name=name,
@@ -1174,14 +1295,14 @@ async def upload_model(
         classes=json.dumps(classes_list),
         is_active=False,
         description=description,
-        metrics_summary=json.dumps({})
+        metrics_summary=json.dumps(initial_metrics)
     )
     db.add(new_model)
     db.commit()
     db.refresh(new_model)
 
     # Process evaluation archive if provided
-    eval_metrics = {}
+    eval_metrics = dict(initial_metrics)
     if results_file:
         zip_temp_path = os.path.join(detection_service.evaluations_dir, f"temp_{new_model.id}.zip")
         with open(zip_temp_path, "wb") as f:
@@ -1189,7 +1310,17 @@ async def upload_model(
         
         try:
             eval_result = detection_service.process_evaluation_archive(zip_temp_path, new_model.id)
-            eval_metrics = eval_result["metrics"]
+            for k, v in eval_result["metrics"].items():
+                eval_metrics[k] = v
+            # Ensure form inputs take precedence if provided
+            if training_date and training_date.strip():
+                eval_metrics["training_date"] = training_date.strip()
+            if training_settings and training_settings.strip():
+                eval_metrics["training_settings"] = training_settings.strip()
+
+            if not new_model.description and eval_metrics.get("training_settings"):
+                new_model.description = str(eval_metrics["training_settings"])
+
             new_model.metrics_summary = json.dumps(eval_metrics)
             new_model.evaluation_dir = eval_result["evaluation_dir"]
             db.commit()
@@ -1201,7 +1332,7 @@ async def upload_model(
 
     return {
         "success": True,
-        "message": f"Model '{name}' ({version}) uploaded successfully.",
+        "message": f"Model '{name}' ({version}) berhasil diunggah.",
         "model": {
             "id": new_model.id,
             "name": new_model.name,
@@ -1334,7 +1465,9 @@ def get_model_evaluation(model_id: int, db: Session = Depends(get_db)):
     visuals = {}
 
     eval_dir = model.evaluation_dir or os.path.join(detection_service.evaluations_dir, f"model_{model_id}")
-    if os.path.exists(eval_dir):
+    has_eval = False
+    if os.path.exists(eval_dir) and os.listdir(eval_dir):
+        has_eval = True
         eval_keys = [
             ("confusion_matrix", "confusion_matrix.png"),
             ("confusion_matrix_norm", "confusion_matrix_normalized.png"),
@@ -1352,9 +1485,79 @@ def get_model_evaluation(model_id: int, db: Session = Depends(get_db)):
         "model_id": model.id,
         "name": model.name,
         "version": model.version,
+        "framework": model.framework,
+        "description": model.description,
+        "created_at": model.created_at.isoformat() if model.created_at else None,
+        "has_weights": bool(model.model_path and os.path.exists(model.model_path)),
+        "has_onnx": bool(model.onnx_path and os.path.exists(model.onnx_path)),
+        "has_evaluation": has_eval,
         "metrics": metrics,
         "visuals": visuals
     }
+
+
+@router.get("/{model_id}/download-weights")
+def download_model_weights(model_id: int, db: Session = Depends(get_db)):
+    """Download the trained model weights file (.pt or .onnx)."""
+    model = db.query(MLModel).filter(MLModel.id == model_id).first()
+    if not model:
+        raise HTTPException(status_code=404, detail="Model not found")
+    if not model.model_path or not os.path.exists(model.model_path):
+        raise HTTPException(status_code=404, detail="File bobot model tidak ditemukan di disk.")
+
+    ext = os.path.splitext(model.model_path)[1]
+    safe_name = f"{model.name.replace(' ', '_').lower()}_{model.version.replace(' ', '_').lower()}_best{ext}"
+    return FileResponse(
+        path=model.model_path,
+        filename=safe_name,
+        media_type="application/octet-stream"
+    )
+
+
+@router.get("/{model_id}/download-onnx")
+def download_model_onnx(model_id: int, db: Session = Depends(get_db)):
+    """Download the ONNX model file for CPU serving."""
+    model = db.query(MLModel).filter(MLModel.id == model_id).first()
+    if not model:
+        raise HTTPException(status_code=404, detail="Model not found")
+    if not model.onnx_path or not os.path.exists(model.onnx_path):
+        raise HTTPException(status_code=404, detail="File ONNX model tidak ditemukan di disk.")
+
+    safe_name = f"{model.name.replace(' ', '_').lower()}_{model.version.replace(' ', '_').lower()}_best.onnx"
+    return FileResponse(
+        path=model.onnx_path,
+        filename=safe_name,
+        media_type="application/octet-stream"
+    )
+
+
+@router.get("/{model_id}/download-evaluation")
+def download_model_evaluation(model_id: int, db: Session = Depends(get_db)):
+    """Package and download the evaluation directory as a zip archive."""
+    model = db.query(MLModel).filter(MLModel.id == model_id).first()
+    if not model:
+        raise HTTPException(status_code=404, detail="Model not found")
+
+    eval_dir = model.evaluation_dir or os.path.join(detection_service.evaluations_dir, f"model_{model_id}")
+    if not os.path.exists(eval_dir) or not os.listdir(eval_dir):
+        raise HTTPException(status_code=404, detail="Arsip hasil evaluasi tidak ditemukan untuk model ini.")
+
+    # Create zip archive in memory
+    zip_buffer = io.BytesIO()
+    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+        for root, dirs, files in os.walk(eval_dir):
+            for f in files:
+                full_p = os.path.join(root, f)
+                rel_p = os.path.relpath(full_p, eval_dir)
+                zf.write(full_p, arcname=rel_p)
+
+    zip_buffer.seek(0)
+    safe_name = f"{model.name.replace(' ', '_').lower()}_{model.version.replace(' ', '_').lower()}_evaluasi.zip"
+    return Response(
+        content=zip_buffer.getvalue(),
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{safe_name}"'}
+    )
 
 
 # ==========================================

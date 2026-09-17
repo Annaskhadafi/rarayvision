@@ -25,6 +25,8 @@ const uploadForm = ref({
   task_type: 'detection',
   framework: 'yolo',
   description: '',
+  training_date: new Date().toISOString().split('T')[0],
+  training_settings: '200 Epochs, Imgsz 640, Batch 16, Optimizer AdamW',
   model_file: null,
   onnx_file: null,
   results_file: null
@@ -195,6 +197,16 @@ const handleExportOnnx = async (modelId) => {
   }
 }
 
+const handleDownloadWeights = (model) => {
+  const url = `${API_BASE_URL}/api/v1/models/${model.id}/download-weights`
+  window.open(url, '_blank')
+}
+
+const handleDownloadEvaluation = (model) => {
+  const url = `${API_BASE_URL}/api/v1/models/${model.id}/download-evaluation`
+  window.open(url, '_blank')
+}
+
 const openEditModelModal = (model) => {
   editModelForm.value = {
     id: model.id,
@@ -332,6 +344,12 @@ const submitUpload = () => {
   formData.append('framework', uploadForm.value.framework)
   if (uploadForm.value.description) {
     formData.append('description', uploadForm.value.description)
+  }
+  if (uploadForm.value.training_date) {
+    formData.append('training_date', uploadForm.value.training_date)
+  }
+  if (uploadForm.value.training_settings) {
+    formData.append('training_settings', uploadForm.value.training_settings)
   }
   formData.append('model_file', uploadForm.value.model_file)
   if (uploadForm.value.onnx_file) {
@@ -801,7 +819,7 @@ onMounted(() => {
                 <th>Framework / Format</th>
                 <th>Kelas (Labels)</th>
                 <th>mAP50</th>
-                <th>Tanggal Ditambahkan</th>
+                <th>Tanggal & Setting</th>
                 <th class="text-right">Aksi</th>
               </tr>
             </thead>
@@ -815,7 +833,7 @@ onMounted(() => {
                 </td>
                 <td>
                   <div class="font-semibold text-slate-800">{{ m.name }}</div>
-                  <div class="text-xs text-slate-500 line-clamp-1">{{ m.description || 'Tidak ada deskripsi' }}</div>
+                  <div class="text-xs text-slate-500 line-clamp-1">{{ m.description || m.metrics?.training_settings || 'Tidak ada deskripsi' }}</div>
                 </td>
                 <td>
                   <span class="font-mono text-sm px-2 py-0.5 bg-slate-100 rounded">{{ m.version }}</span>
@@ -841,8 +859,13 @@ onMounted(() => {
                   </span>
                   <span v-else class="text-xs text-slate-400">-</span>
                 </td>
-                <td class="text-xs text-slate-500">
-                  {{ m.created_at ? new Date(m.created_at).toLocaleDateString('id-ID', { day: 'numeric', month: 'short', year: 'numeric' }) : '-' }}
+                <td class="text-xs text-slate-600">
+                  <div class="font-medium text-slate-800">
+                    {{ m.metrics?.training_date ? m.metrics.training_date : (m.created_at ? new Date(m.created_at).toLocaleDateString('id-ID', { day: 'numeric', month: 'short', year: 'numeric' }) : '-') }}
+                  </div>
+                  <div v-if="m.metrics?.training_settings" class="text-slate-500 font-mono text-[11px] mt-0.5 line-clamp-1" :title="m.metrics.training_settings">
+                    ⚙ {{ m.metrics.training_settings }}
+                  </div>
                 </td>
                 <td class="text-right">
                   <div class="actions-group">
@@ -854,6 +877,24 @@ onMounted(() => {
                       title="Jadikan model aktif utama untuk API global"
                     >
                       Aktifkan
+                    </button>
+                    <button 
+                      v-if="m.has_weights !== false"
+                      class="btn btn-sm btn-outline-secondary" 
+                      @click="handleDownloadWeights(m)"
+                      title="Download Bobot Model (.pt / .onnx)"
+                    >
+                      <svg viewBox="0 0 24 24" width="13" height="13" stroke="currentColor" stroke-width="2" fill="none"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
+                      Weights
+                    </button>
+                    <button 
+                      v-if="m.has_evaluation" 
+                      class="btn btn-sm btn-outline-secondary" 
+                      @click="handleDownloadEvaluation(m)"
+                      title="Download Arsip Evaluasi (.zip)"
+                    >
+                      <svg viewBox="0 0 24 24" width="13" height="13" stroke="currentColor" stroke-width="2" fill="none"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
+                      Eval (.zip)
                     </button>
                     <button 
                       v-if="m.framework === 'yolo'" 
@@ -1128,6 +1169,28 @@ onMounted(() => {
               @change="handleResultsFileChange" 
             />
             <span class="form-hint">Zip folder training YOLO yang berisi results.csv, confusion_matrix.png, PR_curve.png untuk otomatis ditampilkan di Halaman Evaluasi.</span>
+          </div>
+
+          <div class="form-row">
+            <div class="form-group flex-1">
+              <label class="form-label">Tanggal Training</label>
+              <input 
+                v-model="uploadForm.training_date" 
+                type="date" 
+                class="form-input" 
+              />
+              <span class="form-hint">Tanggal pelaksanaan training model di Colab/server.</span>
+            </div>
+            <div class="form-group flex-1">
+              <label class="form-label">Keterangan Setting / Hyperparameters</label>
+              <input 
+                v-model="uploadForm.training_settings" 
+                type="text" 
+                class="form-input" 
+                placeholder="Contoh: 200 Epochs, Imgsz 640, Batch 16, AdamW"
+              />
+              <span class="form-hint">Setting training yang digunakan.</span>
+            </div>
           </div>
 
           <div class="form-group">
