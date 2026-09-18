@@ -375,6 +375,10 @@ def generate_colab_notebook_dict(
     workers: int = None,         # None = use platform default
     patience: int = None,        # None = use model default
     weights: str = None,         # None = use model default (e.g. yolo11n.pt, yolo11s.pt, etc.)
+    cos_lr: bool = True,         # Cosine learning rate scheduler
+    close_mosaic: int = 10,      # Disable mosaic in last N epochs for tight bounding box
+    lrf: float = 0.01,           # Final learning rate fraction
+    box: float = 7.5,            # Bounding box loss weight (higher = tighter box)
 ) -> dict:
     # Normalize mode
     mode_norm = mode.lower().replace("-", "_")
@@ -499,6 +503,10 @@ def generate_colab_notebook_dict(
             cfg["lr0"] = lr0
         if patience is not None:
             cfg["patience"] = patience
+        cfg["cos_lr"] = bool(cos_lr) if cos_lr is not None else True
+        cfg["close_mosaic"] = int(close_mosaic) if close_mosaic is not None else 10
+        cfg["lrf"] = float(lrf) if lrf is not None else 0.01
+        cfg["box"] = float(box) if box is not None else 7.5
         cfg["workers"] = workers if workers is not None else (default_workers_local if is_local else default_workers_colab)
         cfg["run_name"] = cfg["run_name_tpl"].format(epochs=cfg["epochs"])
         # Build setting_desc dynamically
@@ -1230,6 +1238,7 @@ def generate_colab_notebook_dict(
                 f"- **Optimizer:** `{cfg['optimizer']}`\n",
                 f"- **Batch Size:** `{cfg['batch']}`\n",
                 f"- **Image Size:** `{cfg['imgsz']}`\n",
+                f"- **Akurasi & Tuning:** `cos_lr={cfg['cos_lr']}` | `close_mosaic={cfg['close_mosaic']}` | `box_loss={cfg['box']}`\n",
                 f"- **{hw_note}**\n",
                 auto_resume_note
             ]
@@ -1275,6 +1284,10 @@ def generate_colab_notebook_dict(
                 f"        workers={cfg['workers']},\n",
                 f"        optimizer='{cfg['optimizer']}',\n",
                 f"        lr0={cfg['lr0']},\n",
+                f"        lrf={cfg['lrf']},\n",
+                f"        cos_lr={cfg['cos_lr']},\n",
+                f"        close_mosaic={cfg['close_mosaic']},\n",
+                f"        box={cfg['box']},\n",
                 f"        patience={cfg['patience']},\n",
                 "        save=True,\n",
                 "        save_period=5,  # Simpan checkpoint berkala setiap 5 epoch\n",
@@ -2689,6 +2702,10 @@ def get_dataset_colab_notebook(
     lr0: Optional[float] = Query(None),
     workers: Optional[int] = Query(None),
     patience: Optional[int] = Query(None),
+    cos_lr: Optional[bool] = Query(True),
+    close_mosaic: Optional[int] = Query(10),
+    lrf: Optional[float] = Query(None),
+    box: Optional[float] = Query(None),
     db: Session = Depends(get_db)
 ):
     dataset = db.query(MLDataset).filter(MLDataset.id == dataset_id).first()
@@ -2725,6 +2742,10 @@ def get_dataset_colab_notebook(
         workers=workers,
         patience=patience,
         weights=weights,
+        cos_lr=cos_lr,
+        close_mosaic=close_mosaic,
+        lrf=lrf,
+        box=box,
     )
     content = json.dumps(colab_nb, indent=2)
     clean_model = (model or "yolox").lower().replace("-", "").replace("_", "")

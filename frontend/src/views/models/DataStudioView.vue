@@ -59,6 +59,10 @@ const nbLr = ref(null)
 const nbWorkers = ref(null)
 // Patience: null = use model default
 const nbPatience = ref(null)
+// Accuracy optimization hyperparameters
+const nbCosLr = ref(true)
+const nbCloseMosaic = ref(10)
+const nbBoxLoss = ref(null)
 // Show advanced settings panel
 const showAdvanced = ref(false)
 
@@ -146,6 +150,11 @@ const currentColabDownloadUrl = computed(() => {
   if (nbLr.value) url.searchParams.set('lr0', nbLr.value)
   if (nbWorkers.value) url.searchParams.set('workers', nbWorkers.value)
   if (nbPatience.value) url.searchParams.set('patience', nbPatience.value)
+  url.searchParams.set('cos_lr', nbCosLr.value ? 'true' : 'false')
+  if (nbCloseMosaic.value !== null && nbCloseMosaic.value !== undefined) {
+    url.searchParams.set('close_mosaic', nbCloseMosaic.value)
+  }
+  if (nbBoxLoss.value) url.searchParams.set('box', nbBoxLoss.value)
 
   return url.toString()
 })
@@ -923,12 +932,53 @@ onMounted(() => {
               <span class="nb-config-hint">Early stop epochs</span>
             </div>
 
+            <!-- Cosine LR Toggle -->
+            <div class="nb-config-group nb-config-group-sm">
+              <label class="nb-config-label">📈 Cosine LR</label>
+              <label class="flex items-center gap-2 cursor-pointer pt-1">
+                <input type="checkbox" v-model="nbCosLr" class="rounded accent-amber-600 w-4 h-4 cursor-pointer" />
+                <span class="text-xs text-amber-950 font-medium">cos_lr (Cosine Decay)</span>
+              </label>
+              <span class="nb-config-hint">Konvergensi lebih stabil</span>
+            </div>
+
+            <!-- Close Mosaic -->
+            <div class="nb-config-group nb-config-group-sm">
+              <label class="nb-config-label">🎨 Close Mosaic</label>
+              <input
+                v-model.number="nbCloseMosaic"
+                type="number"
+                min="0"
+                max="50"
+                placeholder="10"
+                class="nb-config-input"
+                title="Mematikan augmentasi mosaic di N epoch terakhir agar bounding box rapat dan presisi."
+              />
+              <span class="nb-config-hint">N epoch terakhir (10)</span>
+            </div>
+
+            <!-- Box Loss Weight -->
+            <div class="nb-config-group nb-config-group-sm">
+              <label class="nb-config-label">📐 Box Loss (box)</label>
+              <input
+                v-model.number="nbBoxLoss"
+                type="number"
+                step="0.5"
+                min="1"
+                max="20"
+                placeholder="7.5"
+                class="nb-config-input"
+                title="Bobot loss bounding box (default 7.5). Makin tinggi makin ketat koordinat deteksinya."
+              />
+              <span class="nb-config-hint">Default: 7.5</span>
+            </div>
+
             <!-- Reset -->
             <div class="nb-config-group nb-config-group-sm" style="justify-content: flex-end; padding-top: 18px;">
               <button
                 type="button"
                 class="nb-reset-btn"
-                @click="nbWeights=''; nbEpochs=null; nbBatch=null; nbImgsz=640; nbOptimizer=null; nbLr=null; nbWorkers=null; nbPatience=null"
+                @click="nbWeights=''; nbEpochs=null; nbBatch=null; nbImgsz=640; nbOptimizer=null; nbLr=null; nbWorkers=null; nbPatience=null; nbCosLr=true; nbCloseMosaic=10; nbBoxLoss=null"
               >
                 🔄 Reset ke Default
               </button>
