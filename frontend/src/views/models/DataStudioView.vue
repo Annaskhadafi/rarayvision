@@ -43,6 +43,8 @@ const colabModelMap = {
 // ─── Training Configuration State ──────────────────────────────────────────
 // Mode: "local_cpu" | "local_gpu" | "colab"
 const nbMode = ref('local_cpu')
+// Base pretrained weights: empty = use model default
+const nbWeights = ref('')
 // Epochs: null = use model default
 const nbEpochs = ref(null)
 // Batch: null = use model default
@@ -59,6 +61,43 @@ const nbWorkers = ref(null)
 const nbPatience = ref(null)
 // Show advanced settings panel
 const showAdvanced = ref(false)
+
+const groupedWeightsOptions = computed(() => {
+  if (activeTrainingTab.value === 'rfdetr') {
+    return [
+      {
+        group: '🎯 RF-DETR / RT-DETR (Vision Transformer)',
+        options: [
+          { value: 'rtdetr-l.pt', label: 'RT-DETR Large (32M) — Default Transformer Real-Time' },
+          { value: 'rtdetr-x.pt', label: 'RT-DETR XLarge (67M) — Akurasi Maksimal Transformer' }
+        ]
+      }
+    ]
+  }
+
+  return [
+    {
+      group: '⚡ YOLO11 (Generasi Terbaru — Rekomendasi Utama)',
+      options: [
+        { value: 'yolo11n.pt', label: '⚡ YOLO11 Nano (2.6M params) — Paling Ringan, Rekomendasi CPU PC / Laptop' },
+        { value: 'yolo11s.pt', label: '🚀 YOLO11 Small (9.4M params) — Cepat & Akurat, Cocok CPU / GPU' },
+        { value: 'yolo11m.pt', label: '⚖️ YOLO11 Medium (20.1M params) — Seimbang Speed & Akurasi' },
+        { value: 'yolo11l.pt', label: '🎯 YOLO11 Large (25.3M params) — Akurasi Tinggi' },
+        { value: 'yolo11x.pt', label: '🏆 YOLO11 XLarge (56.9M params) — Akurasi Maksimal, Butuh GPU' }
+      ]
+    },
+    {
+      group: '📦 YOLOv8 (Klasik Stabil)',
+      options: [
+        { value: 'yolov8n.pt', label: '📦 YOLOv8 Nano (3.2M params) — Ringan Klasik' },
+        { value: 'yolov8s.pt', label: '📦 YOLOv8 Small (11.2M params) — Standar Populer' },
+        { value: 'yolov8m.pt', label: '📦 YOLOv8 Medium (25.9M params) — Menengah' },
+        { value: 'yolov8l.pt', label: '📦 YOLOv8 Large (43.7M params) — Besar' },
+        { value: 'yolov8x.pt', label: '📦 YOLOv8 XLarge (68.2M params) — Terbesar' }
+      ]
+    }
+  ]
+})
 
 // Default epochs per model for display hint
 const modelDefaultEpochs = { yolox: 100, yolo26: 100, rfdetr: 100 }
@@ -99,6 +138,7 @@ const currentColabDownloadUrl = computed(() => {
   const url = new URL(baseUrl, window.location.origin)
   url.searchParams.set('model', m.key)
   url.searchParams.set('mode', nbMode.value)
+  if (nbWeights.value) url.searchParams.set('weights', nbWeights.value)
   if (nbEpochs.value) url.searchParams.set('epochs', nbEpochs.value)
   if (nbBatch.value) url.searchParams.set('batch', nbBatch.value)
   url.searchParams.set('imgsz', nbImgsz.value || 640)
@@ -754,6 +794,26 @@ onMounted(() => {
             </div>
           </div>
 
+          <!-- Model Variant / Pretrained Weights Selector -->
+          <div class="nb-config-row">
+            <div class="nb-config-group">
+              <div class="flex items-center justify-between flex-wrap gap-1">
+                <label class="nb-config-label">🎯 Varian Bobot Model (Nano, Small, Medium, Large, X-Large)</label>
+                <span v-if="nbMode === 'local_cpu'" class="text-xs text-amber-900 bg-amber-200/80 px-2 py-0.5 rounded font-medium">
+                  💡 Tips CPU: Pilih varian <strong>Nano (yolo11n)</strong> atau <strong>Small (yolo11s)</strong> agar proses cepat
+                </span>
+              </div>
+              <select v-model="nbWeights" class="nb-config-input">
+                <option value="">Default (Sesuai Tab {{ currentColabModel.label }})</option>
+                <optgroup v-for="grp in groupedWeightsOptions" :key="grp.group" :label="grp.group">
+                  <option v-for="opt in grp.options" :key="opt.value" :value="opt.value">
+                    {{ opt.label }}
+                  </option>
+                </optgroup>
+              </select>
+            </div>
+          </div>
+
           <div class="nb-config-row nb-config-params">
             <!-- Epochs -->
             <div class="nb-config-group nb-config-group-sm">
@@ -868,7 +928,7 @@ onMounted(() => {
               <button
                 type="button"
                 class="nb-reset-btn"
-                @click="nbEpochs=null; nbBatch=null; nbImgsz=640; nbOptimizer=null; nbLr=null; nbWorkers=null; nbPatience=null"
+                @click="nbWeights=''; nbEpochs=null; nbBatch=null; nbImgsz=640; nbOptimizer=null; nbLr=null; nbWorkers=null; nbPatience=null"
               >
                 🔄 Reset ke Default
               </button>

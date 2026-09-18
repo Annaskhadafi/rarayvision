@@ -374,6 +374,7 @@ def generate_colab_notebook_dict(
     lr0: float = None,           # None = use model default
     workers: int = None,         # None = use platform default
     patience: int = None,        # None = use model default
+    weights: str = None,         # None = use model default (e.g. yolo11n.pt, yolo11s.pt, etc.)
 ) -> dict:
     # Normalize mode
     mode_norm = mode.lower().replace("-", "_")
@@ -452,6 +453,40 @@ def generate_colab_notebook_dict(
     # Apply user overrides to selected model config
     if model_key in model_configs:
         cfg = model_configs[model_key]
+        if weights:
+            clean_w = weights.strip()
+            if not clean_w.endswith(".pt") and not clean_w.endswith(".yaml"):
+                clean_w += ".pt"
+            cfg["weights"] = clean_w
+            w_stem = clean_w.replace(".pt", "").lower()
+            cfg["run_name_tpl"] = f"{w_stem}_{{epochs}}epochs"
+
+            # Dynamic scale description
+            if w_stem.endswith("n") or "nano" in w_stem:
+                scale_desc = "Nano (Ultra-Ringan, Sangat Cocok CPU)"
+                default_batch = 16 if use_cpu else 32
+            elif w_stem.endswith("s") or "small" in w_stem:
+                scale_desc = "Small (Cepat & Akurat)"
+                default_batch = 8 if use_cpu else 24
+            elif w_stem.endswith("m") or "medium" in w_stem:
+                scale_desc = "Medium (Seimbang Speed & Akurasi)"
+                default_batch = 8 if use_cpu else 16
+            elif w_stem.endswith("l") or "large" in w_stem:
+                scale_desc = "Large (Akurasi Tinggi)"
+                default_batch = 4 if use_cpu else 12
+            elif w_stem.endswith("x") or "xlarge" in w_stem:
+                scale_desc = "XLarge (Akurasi Maksimal)"
+                default_batch = 4 if use_cpu else 8
+            else:
+                scale_desc = "Custom Variant"
+                default_batch = 8 if use_cpu else 16
+
+            cfg["arch_badge"] = f"⚡ **{clean_w.upper()}** ({scale_desc})"
+            cfg["title"] = f"Tutorial & Panduan: Training {clean_w.upper()} ({scale_desc})"
+            cfg["model_desc"] = f"Model {clean_w} ({scale_desc}) untuk deteksi objek presisi tinggi."
+            if batch is None:
+                cfg["batch"] = default_batch
+
         if epochs is not None:
             cfg["epochs"] = epochs
         if batch is not None:
@@ -469,7 +504,7 @@ def generate_colab_notebook_dict(
         # Build setting_desc dynamically
         hw_label = "CPU Lokal" if use_cpu else ("GPU Lokal (CUDA)" if mode_norm == "local_gpu" else "Tesla T4 GPU (Colab)")
         cfg["setting_desc"] = (
-            f"{model_key.upper()}: {cfg['epochs']} Epochs, Imgsz {cfg['imgsz']}, "
+            f"{cfg['weights'].upper()}: {cfg['epochs']} Epochs, Imgsz {cfg['imgsz']}, "
             f"Batch {cfg['batch']}, Optimizer {cfg['optimizer']}, {hw_label}"
         )
 
@@ -1173,8 +1208,9 @@ def generate_colab_notebook_dict(
 
     if model_key in model_configs:
         cfg = model_configs[model_key]
-        import_stmt = "from ultralytics import YOLO" if model_key in ["yolox", "yolo26"] else "from ultralytics import RTDETR"
-        model_cls = "YOLO" if model_key in ["yolox", "yolo26"] else "RTDETR"
+        is_detr = "detr" in cfg["weights"].lower()
+        import_stmt = "from ultralytics import RTDETR" if is_detr else "from ultralytics import YOLO"
+        model_cls = "RTDETR" if is_detr else "YOLO"
         
         # Training Step (Langkah 8)
         auto_resume_note = (
@@ -2645,6 +2681,7 @@ def get_dataset_colab_notebook(
     dataset_id: str,
     model: str = Query("yolox"),
     mode: str = Query("colab"),         # "colab" | "local_cpu" | "local_gpu"
+    weights: Optional[str] = Query(None),
     epochs: Optional[int] = Query(None),
     batch: Optional[int] = Query(None),
     imgsz: int = Query(640),
@@ -2687,11 +2724,13 @@ def get_dataset_colab_notebook(
         lr0=lr0,
         workers=workers,
         patience=patience,
+        weights=weights,
     )
     content = json.dumps(colab_nb, indent=2)
     clean_model = (model or "yolox").lower().replace("-", "").replace("_", "")
     clean_mode = mode.lower().replace("-", "_") if mode else "colab"
-    filename = f"raray_vision_{dataset.folder}_{clean_model}_{clean_mode}.ipynb"
+    w_tag = f"_{weights.lower().replace('.pt', '')}" if weights else ""
+    filename = f"raray_vision_{dataset.folder}_{clean_model}{w_tag}_{clean_mode}.ipynb"
     return Response(
         content=content,
         media_type="application/x-ipynb+json",
