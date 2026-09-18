@@ -582,7 +582,7 @@ def generate_colab_notebook_dict(
                     "        print('nvidia-smi tidak tersedia, namun GPU CUDA aktif.')\n",
                     "else:\n",
                     "    print('[INFO] GPU CUDA tidak terdeteksi. Training akan berjalan di CPU.')\n",
-                    f"print(f'[INFO] Device yang akan digunakan: {device_expr}')\n",
+                    f"print('[INFO] Device yang akan digunakan: {device_comment}')\n",
                 ] if is_local else [
                     "# Cek apakah GPU tersedia menggunakan PyTorch dan command nvidia-smi\n",
                     "import torch\n",
@@ -809,7 +809,7 @@ def generate_colab_notebook_dict(
                 "    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'\n",
                 "}\n",
                 "\n",
-                f"PUBLIC_APP_URL = '{public_app_url}'\n",
+                f"PUBLIC_APP_URL = '{PUBLIC_APP_URL}'\n",
                 "\n",
                 "def get_direct_url(url):\n",
                 "    if not url:\n",
