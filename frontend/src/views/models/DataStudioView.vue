@@ -40,6 +40,35 @@ const colabModelMap = {
   }
 }
 
+// ─── Training Configuration State ──────────────────────────────────────────
+// Mode: "local_cpu" | "local_gpu" | "colab"
+const nbMode = ref('local_cpu')
+// Epochs: null = use model default
+const nbEpochs = ref(null)
+// Batch: null = use model default
+const nbBatch = ref(null)
+// Image size
+const nbImgsz = ref(640)
+// Optimizer: null = use model default
+const nbOptimizer = ref(null)
+// Learning rate: null = use model default
+const nbLr = ref(null)
+// Workers: null = use platform default
+const nbWorkers = ref(null)
+// Patience: null = use model default
+const nbPatience = ref(null)
+// Show advanced settings panel
+const showAdvanced = ref(false)
+
+// Default epochs per model for display hint
+const modelDefaultEpochs = { yolox: 100, yolo26: 100, rfdetr: 100 }
+const epochsPlaceholder = computed(() => {
+  const key = currentColabModel.value?.key || 'yolox'
+  const isLocal = nbMode.value !== 'colab'
+  return isLocal ? (modelDefaultEpochs[key] || 100) : 200
+})
+// ────────────────────────────────────────────────────────────────────────────
+
 const currentColabModel = computed(() => {
   return colabModelMap[activeTrainingTab.value] || colabModelMap.yolo
 })
@@ -51,20 +80,36 @@ const currentColabGithubUrl = computed(() => {
 const currentColabDownloadUrl = computed(() => {
   if (!importResult.value) return ''
   const m = currentColabModel.value
+
+  // Build base URL
+  let baseUrl = ''
   if (importResult.value.colab_notebooks && importResult.value.colab_notebooks[m.key]) {
-    return getFullUrl(importResult.value.colab_notebooks[m.key])
+    baseUrl = getFullUrl(importResult.value.colab_notebooks[m.key])
+  } else if (importResult.value.colab_training?.notebook_urls?.[m.key]) {
+    baseUrl = getFullUrl(importResult.value.colab_training.notebook_urls[m.key])
+  } else if (importResult.value.dataset_id) {
+    baseUrl = `${API_BASE_URL}/api/v1/models/data/datasets/${importResult.value.dataset_id}/colab-notebook.ipynb`
+  } else if (importResult.value.colab_notebook_url) {
+    baseUrl = getFullUrl(importResult.value.colab_notebook_url)
   }
-  if (importResult.value.colab_training && importResult.value.colab_training.notebook_urls && importResult.value.colab_training.notebook_urls[m.key]) {
-    return getFullUrl(importResult.value.colab_training.notebook_urls[m.key])
-  }
-  if (importResult.value.dataset_id) {
-    return `${API_BASE_URL}/api/v1/models/data/datasets/${importResult.value.dataset_id}/colab-notebook.ipynb?model=${m.key}`
-  }
-  if (importResult.value.colab_notebook_url) {
-    return getFullUrl(importResult.value.colab_notebook_url)
-  }
-  return ''
+
+  if (!baseUrl) return ''
+
+  // Strip existing model param and append all config params
+  const url = new URL(baseUrl, window.location.origin)
+  url.searchParams.set('model', m.key)
+  url.searchParams.set('mode', nbMode.value)
+  if (nbEpochs.value) url.searchParams.set('epochs', nbEpochs.value)
+  if (nbBatch.value) url.searchParams.set('batch', nbBatch.value)
+  url.searchParams.set('imgsz', nbImgsz.value || 640)
+  if (nbOptimizer.value) url.searchParams.set('optimizer', nbOptimizer.value)
+  if (nbLr.value) url.searchParams.set('lr0', nbLr.value)
+  if (nbWorkers.value) url.searchParams.set('workers', nbWorkers.value)
+  if (nbPatience.value) url.searchParams.set('patience', nbPatience.value)
+
+  return url.toString()
 })
+
 const datasets = ref([])
 const selectedDataset = ref(null)
 const isLoadingDatasets = ref(false)
@@ -597,60 +642,67 @@ onMounted(() => {
         </div>
       </div>
 
-      <!-- Google Colab Training & Validation Guide Card -->
+      <!-- Training Hub Card (Local PC + Google Colab) -->
       <div v-if="importResult.colab_training" class="colab-training-card">
         <div class="colab-header">
           <div class="flex items-center gap-2">
             <svg viewBox="0 0 24 24" width="18" height="18" stroke="#d97706" stroke-width="2" fill="none"><circle cx="12" cy="12" r="10"></circle><polygon points="10 8 16 12 10 16 10 8"></polygon></svg>
-            <h3 class="colab-title">Google Colab Training Hub (Notebook Terpisah per Model &bull; T4 GPU 200 Epochs)</h3>
+            <h3 class="colab-title">
+              <template v-if="nbMode === 'local_cpu'">🖥️ Training Hub — Lokal CPU</template>
+              <template v-else-if="nbMode === 'local_gpu'">⚡ Training Hub — Lokal GPU (CUDA)</template>
+              <template v-else>☁️ Training Hub — Google Colab T4 GPU</template>
+            </h3>
           </div>
-          
+
           <div class="flex items-center gap-2">
-            <!-- 1-Click Open in Google Colab (Per Model Terpilih) -->
-            <a 
-              :href="currentColabGithubUrl" 
-              target="_blank" 
+            <!-- 1-Click Open in Google Colab (shown only for colab mode) -->
+            <a
+              v-if="nbMode === 'colab'"
+              :href="currentColabGithubUrl"
+              target="_blank"
               class="btn-open-colab"
               :title="`Buka langsung notebook training ${currentColabModel.label} di Google Colab via GitHub`"
             >
               <svg viewBox="0 0 24 24" width="13" height="13" stroke="currentColor" stroke-width="2" fill="none"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path><polyline points="15 3 21 3 21 9"></polyline><line x1="10" y1="14" x2="21" y2="3"></line></svg>
-              Buka {{ currentColabModel.label }} di Colab (1-Klik)
+              Buka {{ currentColabModel.label }} di Colab
             </a>
 
-            <!-- Download / Open .ipynb Button (Per Model Terpilih) -->
-            <a 
+            <!-- Download .ipynb Button -->
+            <a
               v-if="currentColabDownloadUrl"
-              :href="currentColabDownloadUrl" 
-              target="_blank" 
+              :href="currentColabDownloadUrl"
+              target="_blank"
               :download="currentColabModel.filename"
               class="btn-download-ipynb"
-              :title="`Unduh file notebook .ipynb khusus ${currentColabModel.label}`"
+              :title="`Generate & unduh notebook .ipynb ${currentColabModel.label} untuk ${nbMode}`"
             >
               <svg viewBox="0 0 24 24" width="13" height="13" stroke="currentColor" stroke-width="2" fill="none"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
-              Unduh .ipynb ({{ currentColabModel.label }})
+              <template v-if="nbMode === 'local_cpu'">⬇️ Unduh .ipynb (Lokal CPU)</template>
+              <template v-else-if="nbMode === 'local_gpu'">⬇️ Unduh .ipynb (Lokal GPU)</template>
+              <template v-else>⬇️ Unduh .ipynb (Colab T4)</template>
             </a>
 
             <div class="colab-tabs">
-              <button 
-                type="button" 
-                class="colab-tab-btn" 
-                :class="{ 'active': activeTrainingTab === 'yolo' }" 
+              <button
+                type="button"
+                class="colab-tab-btn"
+                :class="{ 'active': activeTrainingTab === 'yolo' }"
                 @click="activeTrainingTab = 'yolo'"
               >
                 ⚡ 1. YOLO-X
               </button>
-              <button 
-                type="button" 
-                class="colab-tab-btn" 
-                :class="{ 'active': activeTrainingTab === 'yolo26' }" 
+              <button
+                type="button"
+                class="colab-tab-btn"
+                :class="{ 'active': activeTrainingTab === 'yolo26' }"
                 @click="activeTrainingTab = 'yolo26'"
               >
                 🔥 2. YOLO-26
               </button>
-              <button 
-                type="button" 
-                class="colab-tab-btn" 
-                :class="{ 'active': activeTrainingTab === 'rfdetr' }" 
+              <button
+                type="button"
+                class="colab-tab-btn"
+                :class="{ 'active': activeTrainingTab === 'rfdetr' }"
                 @click="activeTrainingTab = 'rfdetr'"
               >
                 🎯 3. RF-DETR
@@ -658,6 +710,173 @@ onMounted(() => {
             </div>
           </div>
         </div>
+
+        <!-- ⚙️ Training Configuration Panel -->
+        <div class="nb-config-panel">
+          <div class="nb-config-row">
+            <!-- Mode Selector -->
+            <div class="nb-config-group">
+              <label class="nb-config-label">🖥️ Mode Running</label>
+              <div class="nb-mode-btns">
+                <button
+                  type="button"
+                  class="nb-mode-btn"
+                  :class="{ 'active': nbMode === 'local_cpu' }"
+                  @click="nbMode = 'local_cpu'"
+                  title="Jalankan di Jupyter / VS Code lokal tanpa GPU (CPU)"
+                >
+                  🖥️ Lokal CPU
+                </button>
+                <button
+                  type="button"
+                  class="nb-mode-btn"
+                  :class="{ 'active': nbMode === 'local_gpu' }"
+                  @click="nbMode = 'local_gpu'"
+                  title="Jalankan lokal dengan GPU NVIDIA (CUDA)"
+                >
+                  ⚡ Lokal GPU
+                </button>
+                <button
+                  type="button"
+                  class="nb-mode-btn"
+                  :class="{ 'active': nbMode === 'colab' }"
+                  @click="nbMode = 'colab'"
+                  title="Jalankan di Google Colab T4 GPU gratis"
+                >
+                  ☁️ Colab T4
+                </button>
+              </div>
+              <div class="nb-mode-info">
+                <template v-if="nbMode === 'local_cpu'">📋 File .ipynb dijalankan di <strong>Jupyter Notebook</strong> / VS Code PC Anda. Tidak perlu GPU, tidak perlu Google Drive.</template>
+                <template v-else-if="nbMode === 'local_gpu'">⚡ Menggunakan GPU NVIDIA lokal (CUDA). Auto-detect — jika GPU tidak tersedia, fallback ke CPU.</template>
+                <template v-else>☁️ Jalankan di Google Colab gratis. Termasuk Google Drive mount dan auto-resume.</template>
+              </div>
+            </div>
+          </div>
+
+          <div class="nb-config-row nb-config-params">
+            <!-- Epochs -->
+            <div class="nb-config-group nb-config-group-sm">
+              <label class="nb-config-label">🔄 Epoch</label>
+              <input
+                v-model.number="nbEpochs"
+                type="number"
+                min="1"
+                max="1000"
+                :placeholder="epochsPlaceholder"
+                class="nb-config-input"
+                title="Jumlah epoch training. Kosongkan untuk pakai default model."
+              />
+              <span class="nb-config-hint">Default: {{ epochsPlaceholder }}</span>
+            </div>
+
+            <!-- Batch Size -->
+            <div class="nb-config-group nb-config-group-sm">
+              <label class="nb-config-label">📦 Batch Size</label>
+              <input
+                v-model.number="nbBatch"
+                type="number"
+                min="1"
+                max="128"
+                placeholder="Auto"
+                class="nb-config-input"
+                title="Batch size. Kosongkan untuk pakai default model. CPU: gunakan nilai kecil (4-8)."
+              />
+              <span class="nb-config-hint">CPU: 4–8 | GPU: 16–32</span>
+            </div>
+
+            <!-- Image Size -->
+            <div class="nb-config-group nb-config-group-sm">
+              <label class="nb-config-label">🖼️ Image Size</label>
+              <select v-model.number="nbImgsz" class="nb-config-input">
+                <option :value="320">320</option>
+                <option :value="416">416</option>
+                <option :value="512">512</option>
+                <option :value="640">640 (Default)</option>
+                <option :value="1280">1280</option>
+              </select>
+            </div>
+
+            <!-- Optimizer -->
+            <div class="nb-config-group nb-config-group-sm">
+              <label class="nb-config-label">⚙️ Optimizer</label>
+              <select v-model="nbOptimizer" class="nb-config-input">
+                <option value="">Auto (default)</option>
+                <option value="AdamW">AdamW</option>
+                <option value="Adam">Adam</option>
+                <option value="SGD">SGD</option>
+                <option value="auto">auto</option>
+              </select>
+            </div>
+          </div>
+
+          <!-- Advanced Settings Toggle -->
+          <div class="nb-advanced-toggle" @click="showAdvanced = !showAdvanced">
+            <svg viewBox="0 0 24 24" width="12" height="12" stroke="currentColor" stroke-width="2" fill="none"
+              :style="{ transform: showAdvanced ? 'rotate(90deg)' : 'rotate(0deg)', transition: 'transform 0.2s' }">
+              <polyline points="9 18 15 12 9 6"></polyline>
+            </svg>
+            {{ showAdvanced ? 'Sembunyikan' : 'Tampilkan' }} Pengaturan Lanjutan
+          </div>
+
+          <div v-if="showAdvanced" class="nb-config-row nb-config-params">
+            <!-- LR -->
+            <div class="nb-config-group nb-config-group-sm">
+              <label class="nb-config-label">📈 Learning Rate (lr0)</label>
+              <input
+                v-model.number="nbLr"
+                type="number"
+                step="0.0001"
+                min="0.00001"
+                max="0.1"
+                placeholder="Auto"
+                class="nb-config-input"
+              />
+            </div>
+
+            <!-- Workers -->
+            <div class="nb-config-group nb-config-group-sm">
+              <label class="nb-config-label">🧵 Workers</label>
+              <input
+                v-model.number="nbWorkers"
+                type="number"
+                min="0"
+                max="16"
+                :placeholder="nbMode === 'local_cpu' ? '2' : '4'"
+                class="nb-config-input"
+              />
+              <span class="nb-config-hint">CPU: 2 | GPU: 4</span>
+            </div>
+
+            <!-- Patience -->
+            <div class="nb-config-group nb-config-group-sm">
+              <label class="nb-config-label">⏱️ Patience</label>
+              <input
+                v-model.number="nbPatience"
+                type="number"
+                min="1"
+                max="200"
+                :placeholder="nbMode === 'colab' ? '50' : '30'"
+                class="nb-config-input"
+                title="Early stopping patience. Training berhenti jika tidak ada improvement dalam N epoch."
+              />
+              <span class="nb-config-hint">Early stop epochs</span>
+            </div>
+
+            <!-- Reset -->
+            <div class="nb-config-group nb-config-group-sm" style="justify-content: flex-end; padding-top: 18px;">
+              <button
+                type="button"
+                class="nb-reset-btn"
+                @click="nbEpochs=null; nbBatch=null; nbImgsz=640; nbOptimizer=null; nbLr=null; nbWorkers=null; nbPatience=null"
+              >
+                🔄 Reset ke Default
+              </button>
+            </div>
+          </div>
+        </div>
+        <!-- END Training Configuration Panel -->
+
 
         <!-- Direct S3 Notebook URL Info Row -->
         <div v-if="currentColabDownloadUrl" class="ipynb-url-row">
@@ -1526,4 +1745,138 @@ onMounted(() => {
 .image-tile img { width: 100%; aspect-ratio: 1; object-fit: cover; display: block; background: #e2e8f0; }
 .image-tile span { display: block; font-size: .7rem; padding: 7px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 @media (max-width: 700px) { .dataset-row { flex-wrap: wrap; } .dataset-main { min-width: calc(100% - 60px); } .status-ready { margin-left: 50px; } }
+
+/* ─── Training Configuration Panel ──────────────────────────────────────── */
+.nb-config-panel {
+  background: #fffbeb;
+  border: 1px solid #fde68a;
+  border-radius: 10px;
+  padding: 14px 16px 10px;
+  margin: 10px 0 0;
+}
+
+.nb-config-row {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.nb-config-params {
+  flex-direction: row;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: flex-start;
+}
+
+.nb-config-group {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+  flex: 1;
+}
+
+.nb-config-group-sm {
+  flex: 0 1 140px;
+  min-width: 120px;
+}
+
+.nb-config-label {
+  font-size: 0.7rem;
+  font-weight: 700;
+  color: #92400e;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.nb-config-input {
+  border: 1px solid #fcd34d;
+  border-radius: 6px;
+  padding: 5px 8px;
+  font-size: 0.8rem;
+  background: #fff;
+  color: #1e293b;
+  width: 100%;
+  box-sizing: border-box;
+  outline: none;
+}
+.nb-config-input:focus {
+  border-color: #d97706;
+  box-shadow: 0 0 0 2px rgba(217,119,6,0.15);
+}
+
+.nb-config-hint {
+  font-size: 0.67rem;
+  color: #a16207;
+}
+
+.nb-mode-btns {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.nb-mode-btn {
+  border: 1px solid #fcd34d;
+  border-radius: 6px;
+  padding: 5px 11px;
+  font-size: 0.78rem;
+  background: #fff;
+  color: #78350f;
+  cursor: pointer;
+  transition: all 0.15s;
+  white-space: nowrap;
+}
+.nb-mode-btn:hover {
+  background: #fef3c7;
+  border-color: #d97706;
+}
+.nb-mode-btn.active {
+  background: #d97706;
+  border-color: #b45309;
+  color: #fff;
+  font-weight: 700;
+}
+
+.nb-mode-info {
+  font-size: 0.73rem;
+  color: #78350f;
+  background: #fef9c3;
+  border-radius: 6px;
+  padding: 6px 10px;
+  margin-top: 4px;
+  line-height: 1.4;
+}
+
+.nb-advanced-toggle {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 0.73rem;
+  color: #a16207;
+  cursor: pointer;
+  user-select: none;
+  margin-top: 4px;
+  margin-bottom: 4px;
+  width: fit-content;
+}
+.nb-advanced-toggle:hover {
+  color: #d97706;
+}
+
+.nb-reset-btn {
+  border: 1px solid #fcd34d;
+  border-radius: 6px;
+  padding: 5px 10px;
+  font-size: 0.75rem;
+  background: #fff;
+  color: #92400e;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.nb-reset-btn:hover {
+  background: #fef3c7;
+}
+/* ──────────────────────────────────────────────────────────────────────────── */
 </style>

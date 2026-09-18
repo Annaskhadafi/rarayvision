@@ -360,7 +360,28 @@ model.export(format="onnx")
     }
 
 
-def generate_colab_notebook_dict(folder_name: str, yolo_yaml_url: str, tasks_url: str, coco_url: str, model_type: str = "yolox") -> dict:
+def generate_colab_notebook_dict(
+    folder_name: str,
+    yolo_yaml_url: str,
+    tasks_url: str,
+    coco_url: str,
+    model_type: str = "yolox",
+    mode: str = "colab",        # "colab" | "local_cpu" | "local_gpu"
+    epochs: int = None,          # None = use model default
+    batch: int = None,           # None = use model default
+    imgsz: int = 640,
+    optimizer: str = None,       # None = use model default
+    lr0: float = None,           # None = use model default
+    workers: int = None,         # None = use platform default
+    patience: int = None,        # None = use model default
+) -> dict:
+    # Normalize mode
+    mode_norm = mode.lower().replace("-", "_")
+    if mode_norm not in ("colab", "local_cpu", "local_gpu"):
+        mode_norm = "colab"
+    is_local = mode_norm in ("local_cpu", "local_gpu")
+    use_cpu = mode_norm == "local_cpu"
+
     # Normalize model_type
     mt = model_type.lower().replace("-", "").replace("_", "")
     if mt in ["yolox", "yolo11x", "yolo11", "yolo"]:
@@ -372,54 +393,55 @@ def generate_colab_notebook_dict(folder_name: str, yolo_yaml_url: str, tasks_url
     else:
         model_key = "all"
 
-    # Define model configurations
+    # Default workers per platform
+    default_workers_colab = 4
+    default_workers_local = 2
+
+    # Define base model configurations (default values)
     model_configs = {
         "yolox": {
-            "title": "⚡ Tutorial & Panduan: Training YOLO-X / YOLO11-X di Google Colab",
+            "title": "⚡ Tutorial & Panduan: Training YOLO-X / YOLO11-X",
             "arch_badge": "⚡ **YOLO-X / YOLO11-X** (High-Performance Real-Time Object Detection)",
             "weights": "yolo11x.pt",
-            "run_name": "yolo_x_200epochs",
-            "epochs": 200,
+            "run_name_tpl": "yolo_x_{epochs}epochs",
+            "epochs": 100 if is_local else 200,
             "imgsz": 640,
-            "batch": 16,
+            "batch": 8 if use_cpu else 16,
             "optimizer": "AdamW",
             "lr0": 0.001,
-            "patience": 50,
-            "setting_desc": "YOLO-X: 200 Epochs, Imgsz 640, Batch 16, Optimizer AdamW, Tesla T4 GPU",
+            "patience": 30 if is_local else 50,
             "model_desc": "YOLO-X adalah arsitektur model besar untuk akurasi tertinggi dalam deteksi objek real-time.",
             "code_var": "model_yolox",
             "results_var": "results_yolox",
             "metrics_var": "metrics_yolox"
         },
         "yolo26": {
-            "title": "🔥 Tutorial & Panduan: Training YOLO-26 (Edge Variant) di Google Colab",
+            "title": "🔥 Tutorial & Panduan: Training YOLO-26 (Edge Variant)",
             "arch_badge": "🔥 **YOLO-26 (Fast Edge Variant)** (Ultra Fast Architecture for Edge Devices)",
             "weights": "yolo11m.pt",
-            "run_name": "yolo_26_200epochs",
-            "epochs": 200,
+            "run_name_tpl": "yolo_26_{epochs}epochs",
+            "epochs": 100 if is_local else 200,
             "imgsz": 640,
-            "batch": 24,
+            "batch": 8 if use_cpu else 24,
             "optimizer": "SGD",
             "lr0": 0.01,
-            "patience": 50,
-            "setting_desc": "YOLO-26: 200 Epochs, Imgsz 640, Batch 24, Optimizer SGD, Tesla T4 GPU",
+            "patience": 30 if is_local else 50,
             "model_desc": "YOLO-26 dirancang khusus untuk perangkat Edge (Raspberry Pi, Jetson Nano, Mini PC) dengan FPS tinggi.",
             "code_var": "model_yolo26",
             "results_var": "results_yolo26",
             "metrics_var": "metrics_yolo26"
         },
         "rfdetr": {
-            "title": "🎯 Tutorial & Panduan: Training RF-DETR / RT-DETR (Transformer) di Google Colab",
+            "title": "🎯 Tutorial & Panduan: Training RF-DETR / RT-DETR (Transformer)",
             "arch_badge": "🎯 **RF-DETR / RT-DETR** (Real-Time Vision Transformer without NMS)",
             "weights": "rtdetr-l.pt",
-            "run_name": "rfdetr_200epochs",
-            "epochs": 200,
+            "run_name_tpl": "rfdetr_{epochs}epochs",
+            "epochs": 100 if is_local else 200,
             "imgsz": 640,
-            "batch": 12,
+            "batch": 4 if use_cpu else 12,
             "optimizer": "AdamW",
             "lr0": 0.0001,
-            "patience": 50,
-            "setting_desc": "RF-DETR: 200 Epochs, Imgsz 640, Batch 12, Optimizer AdamW, Tesla T4 GPU",
+            "patience": 30 if is_local else 50,
             "model_desc": "RF-DETR / RT-DETR adalah arsitektur Transformer Vision State-of-the-Art tanpa Non-Maximum Suppression (NMS).",
             "code_var": "model_rfdetr",
             "results_var": "results_rfdetr",
@@ -427,26 +449,82 @@ def generate_colab_notebook_dict(folder_name: str, yolo_yaml_url: str, tasks_url
         }
     }
 
-    # Build Header
+    # Apply user overrides to selected model config
     if model_key in model_configs:
         cfg = model_configs[model_key]
-        header_text = [
-            f"# {cfg['title']}\n",
-            f"**Dataset:** `{folder_name}`  \n",
-            f"**Target Model:** {cfg['arch_badge']}  \n",
-            f"**Pretrained Base:** `{cfg['weights']}` | **Epochs:** {cfg['epochs']} | **Optimizer:** `{cfg['optimizer']}` | **Batch:** {cfg['batch']}  \n",
-            f"**Target Hardware:** NVIDIA T4 GPU (Google Colab Free Tier)  \n",
-            f"**Fitur Unggulan:** 🔄 **Auto-Resume Epoch** & 💾 **Google Drive Persistent Cache**  \n",
-            f"\n",
-            f"---\n",
-            f"### 🛡️ Solusi Anti-Terputus (T4 Free Disconnect & Auto-Resume):\n",
-            f"Google Colab Free Tier dapat terputus sewaktu-waktu. Notebook ini dilengkapi sistem **Auto-Resume** dan **Penyimpanan Google Drive**:\n",
-            f"- **Checkpoint Otomatis (`last.pt`):** Disimpan di Google Drive setiap 5 epoch dan di setiap epoch. Jika runtime Colab terputus di epoch 45, saat dijalankan lagi akan **otomatis melanjutkan ke epoch 46** tanpa mengulang dari 0!\n",
-            f"- **Cache Dataset Cepat:** Dataset yang telah diunduh otomatis disimpan di Google Drive (`dataset_{folder_name}.zip`). Sesi berikutnya hanya butuh **10 detik** untuk memulihkan dataset tanpa download ulang!\n",
-            f"- **Download Otomatis:** Setelah training selesai, file bobot (`best.pt`) dan evaluasi (.zip) otomatis diunduh ke komputer Anda untuk diunggah ke web **Raray Vision**."
-        ]
+        if epochs is not None:
+            cfg["epochs"] = epochs
+        if batch is not None:
+            cfg["batch"] = batch
+        if imgsz is not None:
+            cfg["imgsz"] = imgsz
+        if optimizer is not None:
+            cfg["optimizer"] = optimizer
+        if lr0 is not None:
+            cfg["lr0"] = lr0
+        if patience is not None:
+            cfg["patience"] = patience
+        cfg["workers"] = workers if workers is not None else (default_workers_local if is_local else default_workers_colab)
+        cfg["run_name"] = cfg["run_name_tpl"].format(epochs=cfg["epochs"])
+        # Build setting_desc dynamically
+        hw_label = "CPU Lokal" if use_cpu else ("GPU Lokal (CUDA)" if mode_norm == "local_gpu" else "Tesla T4 GPU (Colab)")
+        cfg["setting_desc"] = (
+            f"{model_key.upper()}: {cfg['epochs']} Epochs, Imgsz {cfg['imgsz']}, "
+            f"Batch {cfg['batch']}, Optimizer {cfg['optimizer']}, {hw_label}"
+        )
+
+    # Compute device expression for training code
+    if use_cpu:
+        device_expr = "'cpu'"
+        device_comment = "CPU (tidak menggunakan GPU)"
+    elif mode_norm == "local_gpu":
+        device_expr = "0 if torch.cuda.is_available() else 'cpu'"
+        device_comment = "GPU CUDA jika tersedia, fallback ke CPU"
+    else:
+        device_expr = "0"
+        device_comment = "GPU 0 (Tesla T4)"
+
+    # Build Header per mode
+    if model_key in model_configs:
+        cfg = model_configs[model_key]
+        if is_local:
+            mode_label = "🖥️ Lokal CPU" if use_cpu else "🖥️ Lokal GPU (CUDA)"
+            header_text = [
+                f"# 🖥️ Notebook Training Lokal PC — {cfg['title']}\n",
+                f"**Dataset:** `{folder_name}`  \n",
+                f"**Target Model:** {cfg['arch_badge']}  \n",
+                f"**Pretrained Base:** `{cfg['weights']}` | **Epochs:** {cfg['epochs']} | **Optimizer:** `{cfg['optimizer']}` | **Batch:** {cfg['batch']}  \n",
+                f"**Mode Running:** {mode_label} (Jalankan di Jupyter Notebook / VS Code lokal Anda)  \n",
+                f"\n",
+                f"---\n",
+                f"### ℹ️ Cara Menggunakan Notebook Ini (Lokal PC):\n",
+                f"1. Pastikan Python & pip sudah terinstall di PC Anda.\n",
+                f"2. Install Jupyter: `pip install jupyter` lalu jalankan `jupyter notebook`.\n",
+                f"3. Upload file `.ipynb` ini ke Jupyter, lalu jalankan cell satu per satu.\n",
+                f"4. Dataset akan otomatis diunduh dari server ke folder `./dataset/` di PC Anda.\n",
+                f"5. Hasil training (best.pt, ONNX) tersimpan di folder `./raray_vision_runs/` lokal.\n",
+                f"\n",
+                f"> **⚠️ Catatan CPU:** Training pada CPU jauh lebih lambat dari GPU. Untuk dataset besar, pertimbangkan menggunakan mode GPU atau Google Colab T4.",
+            ]
+        else:
+            header_text = [
+                f"# {cfg['title']} (Google Colab T4)\n",
+                f"**Dataset:** `{folder_name}`  \n",
+                f"**Target Model:** {cfg['arch_badge']}  \n",
+                f"**Pretrained Base:** `{cfg['weights']}` | **Epochs:** {cfg['epochs']} | **Optimizer:** `{cfg['optimizer']}` | **Batch:** {cfg['batch']}  \n",
+                f"**Target Hardware:** NVIDIA T4 GPU (Google Colab Free Tier)  \n",
+                f"**Fitur Unggulan:** 🔄 **Auto-Resume Epoch** & 💾 **Google Drive Persistent Cache**  \n",
+                f"\n",
+                f"---\n",
+                f"### 🛡️ Solusi Anti-Terputus (T4 Free Disconnect & Auto-Resume):\n",
+                f"Google Colab Free Tier dapat terputus sewaktu-waktu. Notebook ini dilengkapi sistem **Auto-Resume** dan **Penyimpanan Google Drive**:\n",
+                f"- **Checkpoint Otomatis (`last.pt`):** Disimpan di Google Drive setiap 5 epoch dan di setiap epoch. Jika runtime Colab terputus di epoch 45, saat dijalankan lagi akan **otomatis melanjutkan ke epoch 46** tanpa mengulang dari 0!\n",
+                f"- **Cache Dataset Cepat:** Dataset yang telah diunduh otomatis disimpan di Google Drive (`dataset_{folder_name}.zip`). Sesi berikutnya hanya butuh **10 detik** untuk memulihkan dataset tanpa download ulang!\n",
+                f"- **Download Otomatis:** Setelah training selesai, file bobot (`best.pt`) dan evaluasi (.zip) otomatis diunduh ke komputer Anda untuk diunggah ke web **Raray Vision**."
+            ]
     else:
         header_text = [
+
             f"# 📘 Tutorial & Panduan: Training Model Deep Learning di Google Colab\n",
             f"**Dataset:** `{folder_name}`  \n",
             f"**Target Hardware:** NVIDIA T4 GPU (Google Colab Free Tier)  \n",
@@ -466,85 +544,144 @@ def generate_colab_notebook_dict(folder_name: str, yolo_yaml_url: str, tasks_url
     cells = []
     cells.append({"cell_type": "markdown", "metadata": {}, "source": header_text})
 
-    # Steps 0 through 7 (Common Preparation)
+    # ── Steps 0 through 7 (Common Preparation, mode-aware) ──────────────────
     cells.extend([
-        # LANGKAH 0: CEK AKSES GPU
+        # LANGKAH 0: CEK STATUS HARDWARE
         {
             "cell_type": "markdown",
             "metadata": {},
-            "source": [
-                "### 🖥️ Langkah 0: Cek Akses GPU (Runtime Check)\n",
-                "Memastikan runtime Google Colab menggunakan **GPU Tesla T4** agar proses training berjalan cepat."
-            ]
+            "source": (
+                [
+                    "### 🖥️ Langkah 0: Cek Status Hardware (CPU/GPU)\n",
+                    "Memeriksa ketersediaan GPU CUDA di PC Anda."
+                ] if is_local else [
+                    "### 🖥️ Langkah 0: Cek Akses GPU (Runtime Check)\n",
+                    "Memastikan runtime Google Colab menggunakan **GPU Tesla T4** agar proses training berjalan cepat."
+                ]
+            )
         },
         {
             "cell_type": "code",
             "execution_count": None,
             "metadata": {},
             "outputs": [],
-            "source": [
-                "# Cek apakah GPU tersedia menggunakan PyTorch dan command nvidia-smi\n",
-                "import torch\n",
-                "import subprocess\n",
-                "\n",
-                "gpu_available = torch.cuda.is_available()\n",
-                "print('=== STATUS RUNTIME GOOGLE COLAB ===')\n",
-                "if gpu_available:\n",
-                "    device_name = torch.cuda.get_device_name(0)\n",
-                "    print(f'[OK] GPU Terdeteksi: {device_name}')\n",
-                "    print('\\nDetail Spesifikasi GPU:')\n",
-                "    try:\n",
-                "        gpu_info = subprocess.check_output('nvidia-smi', shell=True).decode('utf-8')\n",
-                "        print(gpu_info)\n",
-                "    except Exception:\n",
-                "        print('Tidak dapat memanggil nvidia-smi, namun GPU CUDA tetap aktif.')\n",
-                "else:\n",
-                "    print('[WARNING] GPU tidak terdeteksi! Silakan ganti runtime ke T4 GPU via menu: Runtime > Change runtime type > T4 GPU.')\n"
-            ]
+            "source": (
+                [
+                    "import torch\n",
+                    "import subprocess\n",
+                    "\n",
+                    "print('=== STATUS HARDWARE LOKAL ===')\n",
+                    "gpu_available = torch.cuda.is_available()\n",
+                    "if gpu_available:\n",
+                    "    device_name = torch.cuda.get_device_name(0)\n",
+                    "    print(f'[OK] GPU CUDA Terdeteksi: {device_name}')\n",
+                    "    try:\n",
+                    "        gpu_info = subprocess.check_output('nvidia-smi', shell=True).decode('utf-8')\n",
+                    "        print(gpu_info)\n",
+                    "    except Exception:\n",
+                    "        print('nvidia-smi tidak tersedia, namun GPU CUDA aktif.')\n",
+                    "else:\n",
+                    "    print('[INFO] GPU CUDA tidak terdeteksi. Training akan berjalan di CPU.')\n",
+                    f"print(f'[INFO] Device yang akan digunakan: {device_expr}')\n",
+                ] if is_local else [
+                    "# Cek apakah GPU tersedia menggunakan PyTorch dan command nvidia-smi\n",
+                    "import torch\n",
+                    "import subprocess\n",
+                    "\n",
+                    "gpu_available = torch.cuda.is_available()\n",
+                    "print('=== STATUS RUNTIME GOOGLE COLAB ===')\n",
+                    "if gpu_available:\n",
+                    "    device_name = torch.cuda.get_device_name(0)\n",
+                    "    print(f'[OK] GPU Terdeteksi: {device_name}')\n",
+                    "    print('\\nDetail Spesifikasi GPU:')\n",
+                    "    try:\n",
+                    "        gpu_info = subprocess.check_output('nvidia-smi', shell=True).decode('utf-8')\n",
+                    "        print(gpu_info)\n",
+                    "    except Exception:\n",
+                    "        print('Tidak dapat memanggil nvidia-smi, namun GPU CUDA tetap aktif.')\n",
+                    "else:\n",
+                    "    print('[WARNING] GPU tidak terdeteksi! Silakan ganti runtime ke T4 GPU via menu: Runtime > Change runtime type > T4 GPU.')\n",
+                ]
+            )
         },
-        # LANGKAH 0B: GOOGLE DRIVE MOUNT
-        {
-            "cell_type": "markdown",
-            "metadata": {},
-            "source": [
-                "### 💾 Langkah 0B: Hubungkan Google Drive (Penyimpanan Permanen & Anti-Disconnect)\n",
-                "**Langkah ini sangat penting untuk Colab Free Tier!**\n",
-                "Menyambungkan Google Drive Anda agar checkpoint (`last.pt`) dan cache dataset tersimpan permanen.\n",
-                "Jika runtime Google Colab terputus di tengah jalan, Anda tidak akan kehilangan progres training sama sekali."
-            ]
-        },
-        {
-            "cell_type": "code",
-            "execution_count": None,
-            "metadata": {},
-            "outputs": [],
-            "source": [
-                "# Mount Google Drive untuk penyimpanan permanen checkpoint & cache dataset\n",
-                "import os\n",
-                "\n",
-                f"folder_name = '{folder_name}'\n",
-                "USE_GOOGLE_DRIVE = True  # Ubah ke False jika HANYA ingin menyimpan di disk sementara Colab\n",
-                "DRIVE_BASE_DIR = '/content/drive/MyDrive/raray_vision_colab'\n",
-                "DRIVE_RUNS_DIR = os.path.join(DRIVE_BASE_DIR, 'runs')\n",
-                "DRIVE_DATASET_ZIP = os.path.join(DRIVE_BASE_DIR, f'dataset_{folder_name}.zip')\n",
-                "\n",
-                "if USE_GOOGLE_DRIVE:\n",
-                "    try:\n",
-                "        from google.colab import drive\n",
-                "        print('Menghubungkan ke Google Drive...')\n",
-                "        drive.mount('/content/drive')\n",
-                "        os.makedirs(DRIVE_RUNS_DIR, exist_ok=True)\n",
-                "        print(f'[OK] Google Drive terhubung! Folder proyek: {DRIVE_BASE_DIR}')\n",
-                "        print(f'[OK] Folder Checkpoint Runs: {DRIVE_RUNS_DIR}')\n",
-                "    except Exception as e:\n",
-                "        print(f'[WARNING] Google Drive tidak tersambung ({e}). Menggunakan penyimpanan lokal Colab.')\n",
-                "        USE_GOOGLE_DRIVE = False\n",
-                "        DRIVE_RUNS_DIR = 'raray_vision_runs'\n",
-                "else:\n",
-                "    print('Google Drive dinonaktifkan. Menggunakan penyimpanan lokal Colab.')\n",
-                "    DRIVE_RUNS_DIR = 'raray_vision_runs'\n"
-            ]
-        },
+    ])
+
+    # LANGKAH 0B: GOOGLE DRIVE (Colab only) or LOCAL SETUP (local mode)
+    if is_local:
+        cells.extend([
+            {
+                "cell_type": "markdown",
+                "metadata": {},
+                "source": [
+                    "### 📁 Langkah 0B: Setup Direktori Lokal\n",
+                    "Menyiapkan folder output untuk menyimpan checkpoint dan hasil training di PC Anda."
+                ]
+            },
+            {
+                "cell_type": "code",
+                "execution_count": None,
+                "metadata": {},
+                "outputs": [],
+                "source": [
+                    "import os\n",
+                    "\n",
+                    f"folder_name = '{folder_name}'\n",
+                    "# Folder output training tersimpan di sini (relatif dari lokasi notebook ini)\n",
+                    "RUNS_DIR = os.path.abspath('raray_vision_runs')\n",
+                    "os.makedirs(RUNS_DIR, exist_ok=True)\n",
+                    "print(f'[OK] Folder output training: {RUNS_DIR}')\n",
+                    "print('[OK] Tidak memerlukan Google Drive — semua file tersimpan lokal!')\n",
+                ]
+            },
+        ])
+    else:
+        cells.extend([
+            # LANGKAH 0B: GOOGLE DRIVE MOUNT
+            {
+                "cell_type": "markdown",
+                "metadata": {},
+                "source": [
+                    "### 💾 Langkah 0B: Hubungkan Google Drive (Penyimpanan Permanen & Anti-Disconnect)\n",
+                    "**Langkah ini sangat penting untuk Colab Free Tier!**\n",
+                    "Menyambungkan Google Drive Anda agar checkpoint (`last.pt`) dan cache dataset tersimpan permanen.\n",
+                    "Jika runtime Google Colab terputus di tengah jalan, Anda tidak akan kehilangan progres training sama sekali."
+                ]
+            },
+            {
+                "cell_type": "code",
+                "execution_count": None,
+                "metadata": {},
+                "outputs": [],
+                "source": [
+                    "# Mount Google Drive untuk penyimpanan permanen checkpoint & cache dataset\n",
+                    "import os\n",
+                    "\n",
+                    f"folder_name = '{folder_name}'\n",
+                    "USE_GOOGLE_DRIVE = True  # Ubah ke False jika HANYA ingin menyimpan di disk sementara Colab\n",
+                    "DRIVE_BASE_DIR = '/content/drive/MyDrive/raray_vision_colab'\n",
+                    "DRIVE_RUNS_DIR = os.path.join(DRIVE_BASE_DIR, 'runs')\n",
+                    "DRIVE_DATASET_ZIP = os.path.join(DRIVE_BASE_DIR, f'dataset_{folder_name}.zip')\n",
+                    "\n",
+                    "if USE_GOOGLE_DRIVE:\n",
+                    "    try:\n",
+                    "        from google.colab import drive\n",
+                    "        print('Menghubungkan ke Google Drive...')\n",
+                    "        drive.mount('/content/drive')\n",
+                    "        os.makedirs(DRIVE_RUNS_DIR, exist_ok=True)\n",
+                    "        print(f'[OK] Google Drive terhubung! Folder proyek: {DRIVE_BASE_DIR}')\n",
+                    "        print(f'[OK] Folder Checkpoint Runs: {DRIVE_RUNS_DIR}')\n",
+                    "    except Exception as e:\n",
+                    "        print(f'[WARNING] Google Drive tidak tersambung ({e}). Menggunakan penyimpanan lokal Colab.')\n",
+                    "        USE_GOOGLE_DRIVE = False\n",
+                    "        DRIVE_RUNS_DIR = 'raray_vision_runs'\n",
+                    "else:\n",
+                    "    print('Google Drive dinonaktifkan. Menggunakan penyimpanan lokal Colab.')\n",
+                    "    DRIVE_RUNS_DIR = 'raray_vision_runs'\n",
+                ]
+            },
+        ])
+
+    cells.extend([
         # LANGKAH 1: INSTALL DEPENDENCIES
         {
             "cell_type": "markdown",
@@ -561,58 +698,82 @@ def generate_colab_notebook_dict(folder_name: str, yolo_yaml_url: str, tasks_url
             "outputs": [],
             "source": [
                 "# Install library Ultralytics dan dependensi pendukung\n",
-                "!pip install -q --upgrade ultralytics pyyaml requests tqdm pillow\n",
+                "import subprocess, sys\n",
+                "subprocess.check_call([sys.executable, '-m', 'pip', 'install', '-q', '--upgrade',\n",
+                "                       'ultralytics', 'pyyaml', 'requests', 'tqdm', 'pillow'])\n",
                 "\n",
                 "import ultralytics\n",
                 "print(f'[OK] Ultralytics Version: {ultralytics.__version__}')\n",
-                "ultralytics.checks()\n"
+                "ultralytics.checks()\n",
             ]
         },
-        # LANGKAH 2: STRUKTUR DIREKTORI & CEK CACHE DRIVE
+        # LANGKAH 2: STRUKTUR DIREKTORI & CEK CACHE
         {
             "cell_type": "markdown",
             "metadata": {},
-            "source": [
-                "### 📁 Langkah 2: Menyiapkan Struktur Direktori & Cek Cache Dataset di Google Drive\n",
-                "Menyiapkan folder lokal di Colab (`/content/dataset/images/train`, `/content/dataset/images/val`, dll) dan memeriksa apakah dataset sudah pernah disimpan di Google Drive.\n",
-                "**Jika sudah ada di Google Drive**, dataset akan diekstrak langsung dalam ~10 detik tanpa perlu download ulang!"
-            ]
+            "source": (
+                [
+                    "### 📁 Langkah 2: Menyiapkan Struktur Direktori Dataset (Lokal)\n",
+                    "Menyiapkan folder `./dataset/images/train`, `./dataset/images/val`, dll di PC Anda."
+                ] if is_local else [
+                    "### 📁 Langkah 2: Menyiapkan Struktur Direktori & Cek Cache Dataset di Google Drive\n",
+                    "Menyiapkan folder lokal di Colab (`/content/dataset/images/train`, `/content/dataset/images/val`, dll) dan memeriksa apakah dataset sudah pernah disimpan di Google Drive.\n",
+                    "**Jika sudah ada di Google Drive**, dataset akan diekstrak langsung dalam ~10 detik tanpa perlu download ulang!"
+                ]
+            )
         },
         {
             "cell_type": "code",
             "execution_count": None,
             "metadata": {},
             "outputs": [],
-            "source": [
-                "import os, glob, shutil, time, json, zipfile\n",
-                "\n",
-                "# Inisialisasi struktur direktori YOLO di Colab\n",
-                "base_dir = os.path.abspath('dataset')\n",
-                "train_img_dir = os.path.join(base_dir, 'images', 'train')\n",
-                "val_img_dir = os.path.join(base_dir, 'images', 'val')\n",
-                "train_lbl_dir = os.path.join(base_dir, 'labels', 'train')\n",
-                "val_lbl_dir = os.path.join(base_dir, 'labels', 'val')\n",
-                "\n",
-                "for d in [train_img_dir, val_img_dir, train_lbl_dir, val_lbl_dir]:\n",
-                "    os.makedirs(d, exist_ok=True)\n",
-                "\n",
-                "DATASET_RESTORED_FROM_CACHE = False\n",
-                "\n",
-                "# Cek apakah arsip dataset sudah tersimpan di Google Drive\n",
-                "if 'DRIVE_DATASET_ZIP' in locals() and os.path.exists(DRIVE_DATASET_ZIP):\n",
-                "    print(f'[OK] DITEMUKAN CACHE DATASET DI GOOGLE DRIVE: {DRIVE_DATASET_ZIP}')\n",
-                "    print('Mengekstrak dataset langsung ke Colab (~10 detik, anti-download ulang)...')\n",
-                "    with zipfile.ZipFile(DRIVE_DATASET_ZIP, 'r') as zf:\n",
-                "        zf.extractall('/content')\n",
-                "    \n",
-                "    train_imgs = len(glob.glob(os.path.join(train_img_dir, '*.*')))\n",
-                "    val_imgs = len(glob.glob(os.path.join(val_img_dir, '*.*')))\n",
-                "    print(f'[OK] Dataset sukses dipulihkan dari cache Drive! (Train: {train_imgs}, Val: {val_imgs} gambar)')\n",
-                "    if train_imgs > 0:\n",
-                "        DATASET_RESTORED_FROM_CACHE = True\n",
-                "else:\n",
-                "    print('[INFO] Cache dataset di Google Drive belum ada. Sistem akan mengunduh dan menyimpannya otomatis di Langkah 6.')\n"
-            ]
+            "source": (
+                [
+                    "import os, glob, shutil, time, json, zipfile\n",
+                    "\n",
+                    "# Inisialisasi struktur direktori YOLO di lokal\n",
+                    "base_dir = os.path.abspath('dataset')\n",
+                    "train_img_dir = os.path.join(base_dir, 'images', 'train')\n",
+                    "val_img_dir = os.path.join(base_dir, 'images', 'val')\n",
+                    "train_lbl_dir = os.path.join(base_dir, 'labels', 'train')\n",
+                    "val_lbl_dir = os.path.join(base_dir, 'labels', 'val')\n",
+                    "\n",
+                    "for d in [train_img_dir, val_img_dir, train_lbl_dir, val_lbl_dir]:\n",
+                    "    os.makedirs(d, exist_ok=True)\n",
+                    "\n",
+                    "DATASET_RESTORED_FROM_CACHE = False\n",
+                    "print(f'[OK] Direktori dataset lokal siap: {base_dir}')\n",
+                ] if is_local else [
+                    "import os, glob, shutil, time, json, zipfile\n",
+                    "\n",
+                    "# Inisialisasi struktur direktori YOLO di Colab\n",
+                    "base_dir = os.path.abspath('dataset')\n",
+                    "train_img_dir = os.path.join(base_dir, 'images', 'train')\n",
+                    "val_img_dir = os.path.join(base_dir, 'images', 'val')\n",
+                    "train_lbl_dir = os.path.join(base_dir, 'labels', 'train')\n",
+                    "val_lbl_dir = os.path.join(base_dir, 'labels', 'val')\n",
+                    "\n",
+                    "for d in [train_img_dir, val_img_dir, train_lbl_dir, val_lbl_dir]:\n",
+                    "    os.makedirs(d, exist_ok=True)\n",
+                    "\n",
+                    "DATASET_RESTORED_FROM_CACHE = False\n",
+                    "\n",
+                    "# Cek apakah arsip dataset sudah tersimpan di Google Drive\n",
+                    "if 'DRIVE_DATASET_ZIP' in locals() and os.path.exists(DRIVE_DATASET_ZIP):\n",
+                    "    print(f'[OK] DITEMUKAN CACHE DATASET DI GOOGLE DRIVE: {DRIVE_DATASET_ZIP}')\n",
+                    "    print('Mengekstrak dataset langsung ke Colab (~10 detik, anti-download ulang)...')\n",
+                    "    with zipfile.ZipFile(DRIVE_DATASET_ZIP, 'r') as zf:\n",
+                    "        zf.extractall('/content')\n",
+                    "    \n",
+                    "    train_imgs = len(glob.glob(os.path.join(train_img_dir, '*.*')))\n",
+                    "    val_imgs = len(glob.glob(os.path.join(val_img_dir, '*.*')))\n",
+                    "    print(f'[OK] Dataset sukses dipulihkan dari cache Drive! (Train: {train_imgs}, Val: {val_imgs} gambar)')\n",
+                    "    if train_imgs > 0:\n",
+                    "        DATASET_RESTORED_FROM_CACHE = True\n",
+                    "else:\n",
+                    "    print('[INFO] Cache dataset di Google Drive belum ada. Sistem akan mengunduh dan menyimpannya otomatis di Langkah 6.')\n",
+                ]
+            )
         },
         # LANGKAH 3: HELPER DOWNLOAD
         {
@@ -684,7 +845,7 @@ def generate_colab_notebook_dict(folder_name: str, yolo_yaml_url: str, tasks_url
                 "            time.sleep(1)\n",
                 "    return False\n",
                 "\n",
-                "print('[OK] Helper download robust siap digunakan.')\n"
+                "print('[OK] Helper download robust siap digunakan.')\n",
             ]
         },
         # LANGKAH 4: DATA.YAML
@@ -729,7 +890,7 @@ def generate_colab_notebook_dict(folder_name: str, yolo_yaml_url: str, tasks_url
                 "\n",
                 "print('[OK] Konfigurasi data.yaml siap:')\n",
                 "with open('data.yaml', 'r') as f:\n",
-                "    print(f.read().strip())\n"
+                "    print(f.read().strip())\n",
             ]
         },
         # LANGKAH 5: FETCH TASKS
@@ -738,7 +899,7 @@ def generate_colab_notebook_dict(folder_name: str, yolo_yaml_url: str, tasks_url
             "metadata": {},
             "source": [
                 "### 📑 Langkah 5: Download Anotasi Dataset (Tasks JSON)\n",
-                "Mengambil daftar 3.500+ task anotasi (bounding box, label, dan link gambar)."
+                "Mengambil daftar task anotasi (bounding box, label, dan link gambar)."
             ]
         },
         {
@@ -811,101 +972,168 @@ def generate_colab_notebook_dict(folder_name: str, yolo_yaml_url: str, tasks_url
                 "    print(f'[OK] Total tasks anotasi siap: {len(tasks_data)}')\n",
                 "else:\n",
                 "    print('[WARNING] Gagal mengunduh tasks_data!')\n",
-                "    tasks_data = []\n"
+                "    tasks_data = []\n",
             ]
         },
-        # LANGKAH 6: DOWNLOAD GAMBAR & CACHE DRIVE
+        # LANGKAH 6: DOWNLOAD GAMBAR
         {
             "cell_type": "markdown",
             "metadata": {},
-            "source": [
-                "### 📥 Langkah 6: Download Gambar & Pembuatan Cache di Google Drive\n",
-                "Jika dataset sudah dipulihkan dari Google Drive di Langkah 2, langkah ini akan **otomatis melompat** (selesai dalam 1 detik).\n",
-                "Jika belum, sistem akan mengunduh gambar menggunakan multi-threading dan langsung mengarsipkannya ke Google Drive."
-            ]
+            "source": (
+                [
+                    "### 📥 Langkah 6: Download Gambar Dataset ke Lokal\n",
+                    "Sistem akan mengunduh gambar menggunakan multi-threading ke folder `./dataset/` di PC Anda."
+                ] if is_local else [
+                    "### 📥 Langkah 6: Download Gambar & Pembuatan Cache di Google Drive\n",
+                    "Jika dataset sudah dipulihkan dari Google Drive di Langkah 2, langkah ini akan **otomatis melompat** (selesai dalam 1 detik).\n",
+                    "Jika belum, sistem akan mengunduh gambar menggunakan multi-threading dan langsung mengarsipkannya ke Google Drive."
+                ]
+            )
         },
         {
             "cell_type": "code",
             "execution_count": None,
             "metadata": {},
             "outputs": [],
-            "source": [
-                "from concurrent.futures import ThreadPoolExecutor\n",
-                "from tqdm import tqdm\n",
-                "\n",
-                "if DATASET_RESTORED_FROM_CACHE:\n",
-                "    print('⚡ Dataset sudah lengkap dipulihkan dari cache Google Drive!')\n",
-                "    print('Melompati proses download gambar.')\n",
-                "else:\n",
-                "    print(f'Memulai download {len(tasks_data)} gambar...')\n",
-                "    \n",
-                "    # Build class mapping dari data.yaml\n",
-                "    with open('data.yaml', 'r') as f:\n",
-                "        yaml_cfg = yaml.safe_load(f)\n",
-                "    class_names = yaml_cfg.get('names', {0: 'defect'})\n",
-                "    if isinstance(class_names, list):\n",
-                "        name_to_idx = {name: idx for idx, name in enumerate(class_names)}\n",
-                "    elif isinstance(class_names, dict):\n",
-                "        name_to_idx = {name: int(idx) for idx, name in class_names.items()}\n",
-                "    else:\n",
-                "        name_to_idx = {}\n",
-                "\n",
-                "    def process_task(task_idx, task):\n",
-                "        try:\n",
-                "            img_url = task.get('data', {}).get('image') or task.get('image')\n",
-                "            if not img_url:\n",
-                "                return\n",
-                "            is_val = (task_idx % 5 == 0)\n",
-                "            split = 'val' if is_val else 'train'\n",
-                "            \n",
-                "            fname = os.path.basename(img_url).split('?')[0]\n",
-                "            if not fname:\n",
-                "                fname = f'img_{task_idx}.jpg'\n",
-                "            ext = os.path.splitext(fname)[1] or '.jpg'\n",
-                "            base_name = os.path.splitext(fname)[0]\n",
-                "            \n",
-                "            img_save_path = os.path.join(base_dir, 'images', split, f'{base_name}{ext}')\n",
-                "            lbl_save_path = os.path.join(base_dir, 'labels', split, f'{base_name}.txt')\n",
-                "            \n",
-                "            if not os.path.exists(img_save_path) or os.path.getsize(img_save_path) == 0:\n",
-                "                robust_download_file(img_url, img_save_path)\n",
-                "            \n",
-                "            # Tulis label YOLO\n",
-                "            labels = []\n",
-                "            for ann in task.get('annotations', []):\n",
-                "                for res in ann.get('result', []):\n",
-                "                    if res.get('type') == 'rectanglelabels':\n",
-                "                        val = res.get('value', {})\n",
-                "                        lbl_name = val.get('rectanglelabels', ['defect'])[0]\n",
-                "                        cls_id = name_to_idx.get(lbl_name, 0)\n",
-                "                        x = (val.get('x', 0) + val.get('width', 0) / 2) / 100.0\n",
-                "                        y = (val.get('y', 0) + val.get('height', 0) / 2) / 100.0\n",
-                "                        w = val.get('width', 0) / 100.0\n",
-                "                        h = val.get('height', 0) / 100.0\n",
-                "                        labels.append(f'{cls_id} {x:.6f} {y:.6f} {w:.6f} {h:.6f}')\n",
-                "            \n",
-                "            with open(lbl_save_path, 'w') as lf:\n",
-                "                lf.write('\\n'.join(labels))\n",
-                "        except Exception:\n",
-                "            pass\n",
-                "\n",
-                "    with ThreadPoolExecutor(max_workers=8) as executor:\n",
-                "        list(tqdm(executor.map(lambda item: process_task(item[0], item[1]), enumerate(tasks_data)), total=len(tasks_data), desc='Downloading Dataset'))\n",
-                "    \n",
-                "    # Auto-Cache ke Google Drive jika terhubung\n",
-                "    if 'USE_GOOGLE_DRIVE' in locals() and USE_GOOGLE_DRIVE and 'DRIVE_DATASET_ZIP' in locals():\n",
-                "        print('\\n💾 Mengarsipkan dataset ke Google Drive untuk proteksi disconnect...')\n",
-                "        try:\n",
-                "            with zipfile.ZipFile(DRIVE_DATASET_ZIP, 'w', zipfile.ZIP_DEFLATED) as zf:\n",
-                "                for root, _, files in os.walk(base_dir):\n",
-                "                    for f in files:\n",
-                "                        full_p = os.path.join(root, f)\n",
-                "                        rel_p = os.path.relpath(full_p, '/content')\n",
-                "                        zf.write(full_p, arcname=rel_p)\n",
-                "            print(f'[OK] Cache dataset tersimpan permanen di Google Drive: {DRIVE_DATASET_ZIP}')\n",
-                "        except Exception as e:\n",
-                "            print(f'Gagal mengarsipkan dataset ke Drive: {e}')\n"
-            ]
+            "source": (
+                [
+                    "from concurrent.futures import ThreadPoolExecutor\n",
+                    "from tqdm import tqdm\n",
+                    "\n",
+                    "print(f'Memulai download {len(tasks_data)} gambar ke direktori lokal...')\n",
+                    "\n",
+                    "# Build class mapping dari data.yaml\n",
+                    "with open('data.yaml', 'r') as f:\n",
+                    "    yaml_cfg = yaml.safe_load(f)\n",
+                    "class_names = yaml_cfg.get('names', {0: 'defect'})\n",
+                    "if isinstance(class_names, list):\n",
+                    "    name_to_idx = {name: idx for idx, name in enumerate(class_names)}\n",
+                    "elif isinstance(class_names, dict):\n",
+                    "    name_to_idx = {name: int(idx) for idx, name in class_names.items()}\n",
+                    "else:\n",
+                    "    name_to_idx = {}\n",
+                    "\n",
+                    "def process_task(task_idx, task):\n",
+                    "    try:\n",
+                    "        img_url = task.get('data', {}).get('image') or task.get('image')\n",
+                    "        if not img_url:\n",
+                    "            return\n",
+                    "        is_val = (task_idx % 5 == 0)\n",
+                    "        split = 'val' if is_val else 'train'\n",
+                    "        \n",
+                    "        fname = os.path.basename(img_url).split('?')[0]\n",
+                    "        if not fname:\n",
+                    "            fname = f'img_{task_idx}.jpg'\n",
+                    "        ext = os.path.splitext(fname)[1] or '.jpg'\n",
+                    "        base_name = os.path.splitext(fname)[0]\n",
+                    "        \n",
+                    "        img_save_path = os.path.join(base_dir, 'images', split, f'{base_name}{ext}')\n",
+                    "        lbl_save_path = os.path.join(base_dir, 'labels', split, f'{base_name}.txt')\n",
+                    "        \n",
+                    "        if not os.path.exists(img_save_path) or os.path.getsize(img_save_path) == 0:\n",
+                    "            robust_download_file(img_url, img_save_path)\n",
+                    "        \n",
+                    "        # Tulis label YOLO\n",
+                    "        labels = []\n",
+                    "        for ann in task.get('annotations', []):\n",
+                    "            for res in ann.get('result', []):\n",
+                    "                if res.get('type') == 'rectanglelabels':\n",
+                    "                    val = res.get('value', {})\n",
+                    "                    lbl_name = val.get('rectanglelabels', ['defect'])[0]\n",
+                    "                    cls_id = name_to_idx.get(lbl_name, 0)\n",
+                    "                    x = (val.get('x', 0) + val.get('width', 0) / 2) / 100.0\n",
+                    "                    y = (val.get('y', 0) + val.get('height', 0) / 2) / 100.0\n",
+                    "                    w = val.get('width', 0) / 100.0\n",
+                    "                    h = val.get('height', 0) / 100.0\n",
+                    "                    labels.append(f'{cls_id} {x:.6f} {y:.6f} {w:.6f} {h:.6f}')\n",
+                    "        \n",
+                    "        with open(lbl_save_path, 'w') as lf:\n",
+                    "            lf.write('\\n'.join(labels))\n",
+                    "    except Exception:\n",
+                    "        pass\n",
+                    "\n",
+                    "with ThreadPoolExecutor(max_workers=4) as executor:\n",
+                    "    list(tqdm(executor.map(lambda item: process_task(item[0], item[1]), enumerate(tasks_data)), total=len(tasks_data), desc='Downloading Dataset'))\n",
+                    "\n",
+                    "print('[OK] Download dataset selesai!')\n",
+                ] if is_local else [
+                    "from concurrent.futures import ThreadPoolExecutor\n",
+                    "from tqdm import tqdm\n",
+                    "\n",
+                    "if DATASET_RESTORED_FROM_CACHE:\n",
+                    "    print('⚡ Dataset sudah lengkap dipulihkan dari cache Google Drive!')\n",
+                    "    print('Melompati proses download gambar.')\n",
+                    "else:\n",
+                    "    print(f'Memulai download {len(tasks_data)} gambar...')\n",
+                    "    \n",
+                    "    # Build class mapping dari data.yaml\n",
+                    "    with open('data.yaml', 'r') as f:\n",
+                    "        yaml_cfg = yaml.safe_load(f)\n",
+                    "    class_names = yaml_cfg.get('names', {0: 'defect'})\n",
+                    "    if isinstance(class_names, list):\n",
+                    "        name_to_idx = {name: idx for idx, name in enumerate(class_names)}\n",
+                    "    elif isinstance(class_names, dict):\n",
+                    "        name_to_idx = {name: int(idx) for idx, name in class_names.items()}\n",
+                    "    else:\n",
+                    "        name_to_idx = {}\n",
+                    "\n",
+                    "    def process_task(task_idx, task):\n",
+                    "        try:\n",
+                    "            img_url = task.get('data', {}).get('image') or task.get('image')\n",
+                    "            if not img_url:\n",
+                    "                return\n",
+                    "            is_val = (task_idx % 5 == 0)\n",
+                    "            split = 'val' if is_val else 'train'\n",
+                    "            \n",
+                    "            fname = os.path.basename(img_url).split('?')[0]\n",
+                    "            if not fname:\n",
+                    "                fname = f'img_{task_idx}.jpg'\n",
+                    "            ext = os.path.splitext(fname)[1] or '.jpg'\n",
+                    "            base_name = os.path.splitext(fname)[0]\n",
+                    "            \n",
+                    "            img_save_path = os.path.join(base_dir, 'images', split, f'{base_name}{ext}')\n",
+                    "            lbl_save_path = os.path.join(base_dir, 'labels', split, f'{base_name}.txt')\n",
+                    "            \n",
+                    "            if not os.path.exists(img_save_path) or os.path.getsize(img_save_path) == 0:\n",
+                    "                robust_download_file(img_url, img_save_path)\n",
+                    "            \n",
+                    "            # Tulis label YOLO\n",
+                    "            labels = []\n",
+                    "            for ann in task.get('annotations', []):\n",
+                    "                for res in ann.get('result', []):\n",
+                    "                    if res.get('type') == 'rectanglelabels':\n",
+                    "                        val = res.get('value', {})\n",
+                    "                        lbl_name = val.get('rectanglelabels', ['defect'])[0]\n",
+                    "                        cls_id = name_to_idx.get(lbl_name, 0)\n",
+                    "                        x = (val.get('x', 0) + val.get('width', 0) / 2) / 100.0\n",
+                    "                        y = (val.get('y', 0) + val.get('height', 0) / 2) / 100.0\n",
+                    "                        w = val.get('width', 0) / 100.0\n",
+                    "                        h = val.get('height', 0) / 100.0\n",
+                    "                        labels.append(f'{cls_id} {x:.6f} {y:.6f} {w:.6f} {h:.6f}')\n",
+                    "            \n",
+                    "            with open(lbl_save_path, 'w') as lf:\n",
+                    "                lf.write('\\n'.join(labels))\n",
+                    "        except Exception:\n",
+                    "            pass\n",
+                    "\n",
+                    "    with ThreadPoolExecutor(max_workers=8) as executor:\n",
+                    "        list(tqdm(executor.map(lambda item: process_task(item[0], item[1]), enumerate(tasks_data)), total=len(tasks_data), desc='Downloading Dataset'))\n",
+                    "    \n",
+                    "    # Auto-Cache ke Google Drive jika terhubung\n",
+                    "    if 'USE_GOOGLE_DRIVE' in locals() and USE_GOOGLE_DRIVE and 'DRIVE_DATASET_ZIP' in locals():\n",
+                    "        print('\\n💾 Mengarsipkan dataset ke Google Drive untuk proteksi disconnect...')\n",
+                    "        try:\n",
+                    "            with zipfile.ZipFile(DRIVE_DATASET_ZIP, 'w', zipfile.ZIP_DEFLATED) as zf:\n",
+                    "                for root, _, files in os.walk(base_dir):\n",
+                    "                    for f in files:\n",
+                    "                        full_p = os.path.join(root, f)\n",
+                    "                        rel_p = os.path.relpath(full_p, '/content')\n",
+                    "                        zf.write(full_p, arcname=rel_p)\n",
+                    "            print(f'[OK] Cache dataset tersimpan permanen di Google Drive: {DRIVE_DATASET_ZIP}')\n",
+                    "        except Exception as e:\n",
+                    "            print(f'Gagal mengarsipkan dataset ke Drive: {e}')\n",
+                ]
+            )
         },
         # LANGKAH 7: VERIFIKASI INTEGRITAS
         {
@@ -936,18 +1164,25 @@ def generate_colab_notebook_dict(folder_name: str, yolo_yaml_url: str, tasks_url
                 "if len(train_imgs) == 0:\n",
                 "    print('[WARNING] Gambar train masih kosong! Periksa koneksi atau langkah download di atas.')\n",
                 "else:\n",
-                "    print('[OK] Dataset 100% Siap untuk Training!')\n"
+                "    print('[OK] Dataset 100% Siap untuk Training!')\n",
             ]
         }
     ])
 
-    # Now add model-specific cells:
+    # ── Model-specific cells (Step 8, 9, 10) ────────────────────────────────
+
     if model_key in model_configs:
         cfg = model_configs[model_key]
         import_stmt = "from ultralytics import YOLO" if model_key in ["yolox", "yolo26"] else "from ultralytics import RTDETR"
         model_cls = "YOLO" if model_key in ["yolox", "yolo26"] else "RTDETR"
         
         # Training Step (Langkah 8)
+        auto_resume_note = (
+            f"- **🔄 Auto-Resume:** Jika training terhenti, jalankan kembali cell ini! Sistem akan otomatis mendeteksi `last.pt` dan melanjutkan dari epoch terakhir."
+            if is_local else
+            f"- **🔄 Auto-Resume:** Jika Colab terputus, jalankan kembali cell ini! Sistem akan otomatis mendeteksi `last.pt` dan melanjutkan dari epoch terakhir tanpa mengulang dari 0."
+        )
+        hw_note = f"🖥️ Mode: {'CPU Lokal' if use_cpu else ('GPU Lokal (CUDA)' if mode_norm == 'local_gpu' else 'Google Colab T4 GPU')}"
         cells.append({
             "cell_type": "markdown",
             "metadata": {},
@@ -958,9 +1193,12 @@ def generate_colab_notebook_dict(folder_name: str, yolo_yaml_url: str, tasks_url
                 f"- **Epochs:** `{cfg['epochs']}`\n",
                 f"- **Optimizer:** `{cfg['optimizer']}`\n",
                 f"- **Batch Size:** `{cfg['batch']}`\n",
-                f"- **🔄 Auto-Resume:** Jika Colab terputus, jalankan kembali cell ini! Sistem akan otomatis mendeteksi `last.pt` dan melanjutkan dari epoch terakhir tanpa mengulang dari 0."
+                f"- **Image Size:** `{cfg['imgsz']}`\n",
+                f"- **{hw_note}**\n",
+                auto_resume_note
             ]
         })
+        runs_dir_expr = "RUNS_DIR" if is_local else "DRIVE_RUNS_DIR if ('USE_GOOGLE_DRIVE' in locals() and USE_GOOGLE_DRIVE and os.path.exists('/content/drive/MyDrive')) else 'raray_vision_runs'"
         cells.append({
             "cell_type": "code",
             "execution_count": None,
@@ -968,9 +1206,10 @@ def generate_colab_notebook_dict(folder_name: str, yolo_yaml_url: str, tasks_url
             "outputs": [],
             "source": [
                 f"{import_stmt}\n",
+                "import torch\n",
                 "\n",
-                "# Tentukan folder output penyimpanan (Google Drive jika tersambung, atau lokal Colab)\n",
-                "runs_output_dir = DRIVE_RUNS_DIR if ('USE_GOOGLE_DRIVE' in locals() and USE_GOOGLE_DRIVE and os.path.exists('/content/drive/MyDrive')) else 'raray_vision_runs'\n",
+                f"# Tentukan folder output penyimpanan\n",
+                f"runs_output_dir = {runs_dir_expr}\n",
                 f"run_name = '{cfg['run_name']}'\n",
                 "\n",
                 "# Cek keberadaan file checkpoint last.pt untuk Auto-Resume\n",
@@ -989,20 +1228,20 @@ def generate_colab_notebook_dict(folder_name: str, yolo_yaml_url: str, tasks_url
                 f"    {cfg['results_var']} = {cfg['code_var']}.train(resume=True)\n",
                 "else:\n",
                 f"    print('🚀 MEMULAI TRAINING BARU {model_key.upper()} ({cfg['epochs']} EPOCHS)...')\n",
-                f"    print(f'📁 Lokasi penyimpanan weights permanen: {{runs_output_dir}}/{{run_name}}')\n",
+                f"    print(f'📁 Lokasi penyimpanan weights: {{runs_output_dir}}/{{run_name}}')\n",
                 f"    {cfg['code_var']} = {model_cls}('{cfg['weights']}')\n",
                 f"    {cfg['results_var']} = {cfg['code_var']}.train(\n",
                 "        data='data.yaml',\n",
                 f"        epochs={cfg['epochs']},\n",
                 f"        imgsz={cfg['imgsz']},\n",
                 f"        batch={cfg['batch']},\n",
-                "        device=0, # GPU 0 (Tesla T4)\n",
-                "        workers=4,\n",
+                f"        device={device_expr},  # {device_comment}\n",
+                f"        workers={cfg['workers']},\n",
                 f"        optimizer='{cfg['optimizer']}',\n",
                 f"        lr0={cfg['lr0']},\n",
                 f"        patience={cfg['patience']},\n",
                 "        save=True,\n",
-                "        save_period=5, # Simpan checkpoint berkala setiap 5 epoch\n",
+                "        save_period=5,  # Simpan checkpoint berkala setiap 5 epoch\n",
                 "        project=runs_output_dir,\n",
                 "        name=run_name\n",
                 "    )\n",
@@ -1116,63 +1355,114 @@ def generate_colab_notebook_dict(folder_name: str, yolo_yaml_url: str, tasks_url
             ]
         })
 
-        # Download Step (Langkah 10)
-        cells.append({
-            "cell_type": "markdown",
-            "metadata": {},
-            "source": [
-                f"### 📥 Langkah 10: Download Otomatis Bobot (`best.pt`) & Arsip Evaluasi ke Komputer\n",
-                "Menjalankan fungsi download Google Colab ke browser lokal Anda. Setelah terunduh, file siap diunggah ke web **Raray Vision** di menu **Model Management**."
-            ]
-        })
-        cells.append({
-            "cell_type": "code",
-            "execution_count": None,
-            "metadata": {},
-            "outputs": [],
-            "source": [
-                "# ==========================================================\n",
-                "# DOWNLOAD LANGSUNG KE KOMPUTER ANDA\n",
-                "# ==========================================================\n",
-                "try:\n",
-                "    from google.colab import files\n",
-                "    print('📥 Memicu dialog pengunduhan browser...')\n",
-                "    \n",
-                "    if 'best_pt_path' in locals() and os.path.exists(best_pt_path):\n",
-                "        print(f'⬇️ Mengunduh model weights: best.pt ({os.path.getsize(best_pt_path)/(1024*1024):.2f} MB)...')\n",
-                "        files.download(best_pt_path)\n",
-                "    \n",
-                "    if 'eval_zip_name' in locals() and os.path.exists(eval_zip_name):\n",
-                "        print(f'⬇️ Mengunduh arsip evaluasi: {eval_zip_name}...')\n",
-                "        files.download(eval_zip_name)\n",
-                "        \n",
-                "    print('\\n🎉 Selesai! File sedang diunduh oleh browser Anda.')\n",
-                "    print('\\n📋 PANDUAN UNGGAH KE RARAY VISION:')\n",
-                "    print('1. Buka web Raray Vision > Menu \"Model Management\".')\n",
-                "    print('2. Klik tombol \"+ Upload Model (.pt / .onnx)\".')\n",
-                "    print('3. Isi formulir:')\n",
-                "    print('   - File Bobot Model (.pt): Pilih file best.pt yang baru diunduh.')\n",
-                "    print(f'   - File Arsip Evaluasi (.zip): Pilih file {eval_zip_name}.')\n",
-                "    print(f'   - Tanggal Training: {TANGGAL_TRAINING}')\n",
-                "    print(f'   - Keterangan Setting: {KETERANGAN_SETTING}')\n",
-                "    print('4. Klik \"Simpan Model\". Metrik mAP, Confusion Matrix, dan PR Curve akan langsung tampil!')\n",
-                "except ImportError:\n",
-                "    print('ℹ️ Script tidak dijalankan di Google Colab. File zip dan weights tersedia di direktori lokal.')\n"
-            ]
-        })
+        # Download/Result Step (Langkah 10)
+        if is_local:
+            cells.append({
+                "cell_type": "markdown",
+                "metadata": {},
+                "source": [
+                    f"### 📁 Langkah 10: Lokasi Hasil Training\n",
+                    "File hasil training tersimpan di folder lokal PC Anda. Siap untuk diunggah ke **Raray Vision**."
+                ]
+            })
+            cells.append({
+                "cell_type": "code",
+                "execution_count": None,
+                "metadata": {},
+                "outputs": [],
+                "source": [
+                    "# ==========================================================\n",
+                    "# LOKASI FILE HASIL TRAINING (LOKAL PC)\n",
+                    "# ==========================================================\n",
+                    "import os\n",
+                    "\n",
+                    "print('🎉 TRAINING SELESAI!')\n",
+                    "print('\\n📁 File hasil training tersimpan di:')\n",
+                    "\n",
+                    "if 'best_pt_path' in locals() and os.path.exists(best_pt_path):\n",
+                    "    sz_pt = os.path.getsize(best_pt_path) / (1024 * 1024)\n",
+                    "    print(f'  - Model Weights  : {os.path.abspath(best_pt_path)} ({sz_pt:.2f} MB)')\n",
+                    "\n",
+                    "if 'eval_zip_name' in locals() and os.path.exists(eval_zip_name):\n",
+                    "    sz_zip = os.path.getsize(eval_zip_name) / 1024\n",
+                    "    print(f'  - Arsip Evaluasi : {os.path.abspath(eval_zip_name)} ({sz_zip:.1f} KB)')\n",
+                    "\n",
+                    "if 'bundle_zip_name' in locals() and os.path.exists(bundle_zip_name):\n",
+                    "    sz_bundle = os.path.getsize(bundle_zip_name) / (1024 * 1024)\n",
+                    "    print(f'  - Bundle Lengkap : {os.path.abspath(bundle_zip_name)} ({sz_bundle:.2f} MB)')\n",
+                    "\n",
+                    "print('\\n📋 PANDUAN UNGGAH KE RARAY VISION:')\n",
+                    "print('1. Buka web Raray Vision > Menu \"Model Management\".')\n",
+                    "print('2. Klik tombol \"+ Upload Model (.pt / .onnx)\".')\n",
+                    "print('3. Isi formulir:')\n",
+                    "print('   - File Bobot Model (.pt): Pilih file best.pt dari path di atas.')\n",
+                    "print(f'   - File Arsip Evaluasi (.zip): Pilih file evaluasi dari path di atas.')\n",
+                    "print(f'   - Tanggal Training: {TANGGAL_TRAINING}')\n",
+                    "print(f'   - Keterangan Setting: {KETERANGAN_SETTING}')\n",
+                    "print('4. Klik \"Simpan Model\". Metrik mAP, Confusion Matrix, dan PR Curve akan langsung tampil!')\n",
+                ]
+            })
+        else:
+            cells.append({
+                "cell_type": "markdown",
+                "metadata": {},
+                "source": [
+                    f"### 📥 Langkah 10: Download Otomatis Bobot (`best.pt`) & Arsip Evaluasi ke Komputer\n",
+                    "Menjalankan fungsi download Google Colab ke browser lokal Anda. Setelah terunduh, file siap diunggah ke web **Raray Vision** di menu **Model Management**."
+                ]
+            })
+            cells.append({
+                "cell_type": "code",
+                "execution_count": None,
+                "metadata": {},
+                "outputs": [],
+                "source": [
+                    "# ==========================================================\n",
+                    "# DOWNLOAD LANGSUNG KE KOMPUTER ANDA\n",
+                    "# ==========================================================\n",
+                    "try:\n",
+                    "    from google.colab import files\n",
+                    "    print('📥 Memicu dialog pengunduhan browser...')\n",
+                    "    \n",
+                    "    if 'best_pt_path' in locals() and os.path.exists(best_pt_path):\n",
+                    "        print(f'⬇️ Mengunduh model weights: best.pt ({os.path.getsize(best_pt_path)/(1024*1024):.2f} MB)...')\n",
+                    "        files.download(best_pt_path)\n",
+                    "    \n",
+                    "    if 'eval_zip_name' in locals() and os.path.exists(eval_zip_name):\n",
+                    "        print(f'⬇️ Mengunduh arsip evaluasi: {eval_zip_name}...')\n",
+                    "        files.download(eval_zip_name)\n",
+                    "        \n",
+                    "    print('\\n🎉 Selesai! File sedang diunduh oleh browser Anda.')\n",
+                    "    print('\\n📋 PANDUAN UNGGAH KE RARAY VISION:')\n",
+                    "    print('1. Buka web Raray Vision > Menu \"Model Management\".')\n",
+                    "    print('2. Klik tombol \"+ Upload Model (.pt / .onnx)\".')\n",
+                    "    print('3. Isi formulir:')\n",
+                    "    print('   - File Bobot Model (.pt): Pilih file best.pt yang baru diunduh.')\n",
+                    "    print(f'   - File Arsip Evaluasi (.zip): Pilih file {eval_zip_name}.')\n",
+                    "    print(f'   - Tanggal Training: {TANGGAL_TRAINING}')\n",
+                    "    print(f'   - Keterangan Setting: {KETERANGAN_SETTING}')\n",
+                    "    print('4. Klik \"Simpan Model\". Metrik mAP, Confusion Matrix, dan PR Curve akan langsung tampil!')\n",
+                    "except ImportError:\n",
+                    "    print('ℹ️ Script tidak dijalankan di Google Colab. File zip dan weights tersedia di direktori lokal.')\n",
+                ]
+            })
     else:
-        # All models together
-        # Langkah 8: YOLO-X
-        # Langkah 9: YOLO-26
-        # Langkah 10: RF-DETR
-        # Langkah 11: Packaging
-        # Langkah 12: Download
+        # All models together — pass for now
         pass
 
-    notebook_dict = {
-        "nbformat": 4,
-        "nbformat_minor": 0,
-        "metadata": {
+    # Build notebook metadata (local mode uses standard kernelspec without Colab GPU accelerator)
+    if is_local:
+        nb_metadata = {
+            "kernelspec": {
+                "name": "python3",
+                "display_name": "Python 3 (Lokal)"
+            },
+            "language_info": {
+                "name": "python"
+            }
+        }
+    else:
+        nb_metadata = {
             "colab": {
                 "provenance": [],
                 "gpuType": "T4"
@@ -1185,10 +1475,16 @@ def generate_colab_notebook_dict(folder_name: str, yolo_yaml_url: str, tasks_url
                 "name": "python"
             },
             "accelerator": "GPU"
-        },
+        }
+
+    notebook_dict = {
+        "nbformat": 4,
+        "nbformat_minor": 0,
+        "metadata": nb_metadata,
         "cells": cells
     }
     return notebook_dict
+
 
 
 class DatasetUpdateRequest(BaseModel):
@@ -2346,8 +2642,16 @@ def get_label_studio_tasks(dataset_id: str, db: Session = Depends(get_db)):
 
 @router.get("/data/datasets/{dataset_id}/colab-notebook.ipynb")
 def get_dataset_colab_notebook(
-    dataset_id: str, 
-    model: str = Query("yolox"), 
+    dataset_id: str,
+    model: str = Query("yolox"),
+    mode: str = Query("colab"),         # "colab" | "local_cpu" | "local_gpu"
+    epochs: Optional[int] = Query(None),
+    batch: Optional[int] = Query(None),
+    imgsz: int = Query(640),
+    optimizer: Optional[str] = Query(None),
+    lr0: Optional[float] = Query(None),
+    workers: Optional[int] = Query(None),
+    patience: Optional[int] = Query(None),
     db: Session = Depends(get_db)
 ):
     dataset = db.query(MLDataset).filter(MLDataset.id == dataset_id).first()
@@ -2374,11 +2678,20 @@ def get_dataset_colab_notebook(
         yolo_yaml_url=yolo_yaml_url,
         tasks_url=tasks_url,
         coco_url=coco_json_url,
-        model_type=model
+        model_type=model,
+        mode=mode,
+        epochs=epochs,
+        batch=batch,
+        imgsz=imgsz,
+        optimizer=optimizer,
+        lr0=lr0,
+        workers=workers,
+        patience=patience,
     )
     content = json.dumps(colab_nb, indent=2)
     clean_model = (model or "yolox").lower().replace("-", "").replace("_", "")
-    filename = f"raray_vision_{dataset.folder}_{clean_model}_colab.ipynb"
+    clean_mode = mode.lower().replace("-", "_") if mode else "colab"
+    filename = f"raray_vision_{dataset.folder}_{clean_model}_{clean_mode}.ipynb"
     return Response(
         content=content,
         media_type="application/x-ipynb+json",
@@ -2387,6 +2700,7 @@ def get_dataset_colab_notebook(
             "Cache-Control": "no-cache, no-store, must-revalidate"
         }
     )
+
 
 
 @router.get("/data/datasets")
