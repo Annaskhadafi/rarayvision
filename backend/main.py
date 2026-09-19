@@ -295,6 +295,28 @@ fastapi_app.add_middleware(
     allow_headers=["*"],
 )
 
+
+@fastapi_app.middleware("http")
+async def allow_public_prediction_cors(request: Request, call_next):
+    path = request.url.path
+    prefix = "/api/v1/models/endpoints/"
+    suffix = next((value for value in ("/predict", "/predict-video") if path.endswith(value)), "")
+    slug = path[len(prefix):-len(suffix)] if path.startswith(prefix) and path.endswith(suffix) else ""
+    if not slug or "/" in slug:
+        return await call_next(request)
+
+    cors_headers = {
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "POST, OPTIONS",
+        "Access-Control-Allow-Headers": "x-api-key, content-type",
+    }
+    if request.method == "OPTIONS":
+        return Response(status_code=204, headers=cors_headers)
+
+    response = await call_next(request)
+    response.headers.update(cors_headers)
+    return response
+
 # Paths to hide from Swagger UI & ReDoc
 _HIDDEN_PATHS = {"/api/v1/faces/login"}
 
