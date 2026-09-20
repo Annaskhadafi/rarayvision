@@ -891,14 +891,6 @@ const handleSendMessage = async () => {
 
   userPrompt.value = ''
 
-  // Collect previous conversation turns for LLM context
-  const previousTurns = chatMessages.value
-    .filter(m => m.role === 'user' || m.role === 'assistant')
-    .map(m => ({
-      role: m.role,
-      content: m.content
-    }))
-
   const userMsgObj = {
     role: 'user',
     content: q,
@@ -911,7 +903,6 @@ const handleSendMessage = async () => {
   try {
     const res = await ragService.chat({
       query: q,
-      messages: previousTurns,
       sessionId: currentSessionId.value,
       topK: chatTopK.value,
       documentId: selectedDocFilter.value || null,

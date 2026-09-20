@@ -117,10 +117,13 @@ class RedisService:
         }
 
         try:
-            client.rpush(key, json.dumps(payload))
-            # Keep maximum 30 messages per session
-            client.ltrim(key, -30, -1)
-            client.expire(key, ttl_seconds)
+            # Keep the append, trim, and TTL update in one round trip.
+            with client.pipeline() as pipe:
+                pipe.rpush(key, json.dumps(payload))
+                # Keep maximum 30 messages per session
+                pipe.ltrim(key, -30, -1)
+                pipe.expire(key, ttl_seconds)
+                pipe.execute()
             return True
         except Exception as e:
             logger.warning(f"[RedisService] Failed to save chat turn: {e}")

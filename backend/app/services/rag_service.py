@@ -1681,6 +1681,43 @@ class RagService:
             return None
 
     @classmethod
+    def _persist_chat_turn(
+        cls,
+        db: Session,
+        session_id: str,
+        query: str,
+        answer: str,
+        sources: List[Dict[str, Any]],
+        latency_ms: float,
+        user_id: Optional[int],
+        document_id: Optional[str],
+        retrieved_chunks_count: int = 0,
+    ) -> tuple:
+        """Persist a turn consistently, including when the answer came from cache."""
+        user_msg = cls.save_message_to_db(
+            db=db,
+            session_id=session_id,
+            role="user",
+            content=query,
+            user_id=user_id,
+            document_id=document_id,
+        )
+        assistant_msg = cls.save_message_to_db(
+            db=db,
+            session_id=session_id,
+            role="assistant",
+            content=answer,
+            sources=sources,
+            retrieved_chunks_count=retrieved_chunks_count,
+            latency_ms=latency_ms,
+            user_id=user_id,
+            document_id=document_id,
+        )
+        RedisService.save_chat_turn(session_id, "user", query)
+        RedisService.save_chat_turn(session_id, "assistant", answer, sources=sources)
+        return user_msg, assistant_msg
+
+    @classmethod
     def get_user_sessions(cls, db: Session, user_id: Optional[int] = None, limit: int = 30) -> List[Dict[str, Any]]:
         """Retrieves list of persistent conversation sessions."""
         q = db.query(RagChatSession).filter(RagChatSession.is_active == True)
@@ -1732,11 +1769,17 @@ class RagService:
         return images
 
     @classmethod
-    def get_session_messages(cls, db: Session, session_id: str) -> List[Dict[str, Any]]:
-        """Retrieves all messages for a specific session."""
-        msgs = db.query(RagChatMessage).filter(
-            RagChatMessage.session_id == session_id
-        ).order_by(RagChatMessage.created_at.asc()).all()
+    def get_session_messages(
+        cls, db: Session, session_id: str, limit: Optional[int] = None
+    ) -> List[Dict[str, Any]]:
+        """Retrieves session messages, optionally bounded to the newest entries."""
+        query = db.query(RagChatMessage).filter(RagChatMessage.session_id == session_id)
+        msgs = (
+            query.order_by(RagChatMessage.created_at.desc()).limit(limit).all()
+            if limit else query.order_by(RagChatMessage.created_at.asc()).all()
+        )
+        if limit:
+            msgs.reverse()
 
         return [
             {
@@ -1753,6 +1796,21 @@ class RagService:
             }
             for m in msgs
         ]
+
+    @staticmethod
+    def _is_standalone_query(messages: List[Dict[str, Any]], query: str) -> bool:
+        """Treat a query as standalone when history is empty or only an opening greeting."""
+        relevant = [
+            m for m in messages
+            if isinstance(m, dict) and m.get("role") in ("assistant", "user")
+            and str(m.get("content") or "").strip()
+        ]
+        if relevant and relevant[0].get("role") == "assistant":
+            opening = str(relevant[0].get("content", "")).strip().lower()
+            if re.match(r"^(halo|hai|hi|hello|selamat (pagi|siang|sore|malam))[\s,!.:-]*", opening):
+                relevant = relevant[1:]
+        current = query.strip()
+        return not relevant or all(str(m.get("content", "")).strip() == current for m in relevant)
 
     @staticmethod
     def _normalize_sources(sources: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -1922,12 +1980,12 @@ class RagService:
             if redis_history:
                 active_messages = redis_history
             else:
-                db_msgs = cls.get_session_messages(db, session_id)
+                db_msgs = cls.get_session_messages(db, session_id, limit=8)
                 if db_msgs:
                     active_messages = [{"role": m["role"], "content": m["content"]} for m in db_msgs[-8:]]
 
         # 2. Check Semantic RAG Cache (if standalone query without previous turns)
-        is_standalone = not active_messages or len([m for m in active_messages if m.get("role") in ["assistant", "user"] and str(m.get("content")).strip() != query.strip()]) == 0
+        is_standalone = cls._is_standalone_query(active_messages, query)
         if is_standalone:
             cached_res = RedisService.get_rag_cache(query, document_id, selected_provider)
             if cached_res:
@@ -1940,6 +1998,20 @@ class RagService:
                 ]
                 cached_res["latency_ms"] = round((time.perf_counter() - start_time) * 1000, 2)
                 cached_res["from_cache"] = True
+                cached_res["session_id"] = session_id
+                user_msg, assistant_msg = cls._persist_chat_turn(
+                    db=db,
+                    session_id=session_id,
+                    query=query,
+                    answer=cached_res["answer"],
+                    sources=cached_res["sources"],
+                    latency_ms=cached_res["latency_ms"],
+                    user_id=user_id,
+                    document_id=document_id,
+                    retrieved_chunks_count=cached_res.get("retrieved_chunks_count", 0),
+                )
+                cached_res["user_message_id"] = user_msg.id if user_msg else f"msg_{uuid.uuid4().hex[:12]}"
+                cached_res["assistant_message_id"] = assistant_msg.id if assistant_msg else f"msg_{uuid.uuid4().hex[:12]}"
                 return cached_res
 
         # 3. Context-aware search query without assistant message pollution
@@ -2065,30 +2137,18 @@ Pertanyaan Pengguna:
         elapsed_ms = round((time.perf_counter() - start_time) * 1000, 2)
 
         # 9. Persist to Redis (L1) and PostgreSQL Database (L2)
-        user_msg = cls.save_message_to_db(
+        sources = cls._normalize_sources(sources)
+        user_msg, assistant_msg = cls._persist_chat_turn(
             db=db,
             session_id=session_id,
-            role="user",
-            content=query,
-            user_id=user_id,
-            document_id=document_id
-        )
-
-        assistant_msg = cls.save_message_to_db(
-            db=db,
-            session_id=session_id,
-            role="assistant",
-            content=answer,
-            sources=cls._normalize_sources(sources),
+            query=query,
+            answer=answer,
+            sources=sources,
             retrieved_chunks_count=len(chunks),
             latency_ms=elapsed_ms,
             user_id=user_id,
-            document_id=document_id
+            document_id=document_id,
         )
-
-        RedisService.save_chat_turn(session_id, "user", query)
-        sources = cls._normalize_sources(sources)
-        RedisService.save_chat_turn(session_id, "assistant", answer, sources=sources)
 
         result = {
             "query": query,
