@@ -50,6 +50,29 @@ except Exception as _e:
 # Create DB Tables
 Base.metadata.create_all(bind=engine)
 
+# Keep the feedback contract startup-safe for installations created before the
+# correction columns existed.  The model remains the single source of truth.
+try:
+    with engine.begin() as _conn:
+        from sqlalchemy import inspect
+        _existing = {c["name"] for c in inspect(engine).get_columns("ml_predictions")}
+        for _name, _ddl in {
+            "corrected_annotations": "TEXT",
+            "image_width": "INTEGER",
+            "image_height": "INTEGER",
+            "feedback_source": "VARCHAR(80)",
+            "feedback_source_record_id": "VARCHAR(160)",
+            "feedback_actor_id": "INTEGER",
+            "feedback_actor_email": "VARCHAR(255)",
+            "feedback_idempotency_key": "VARCHAR(255)",
+            # PostgreSQL rejects DATETIME; SQLite accepts TIMESTAMP here too.
+            "feedback_updated_at": "TIMESTAMP WITHOUT TIME ZONE",
+        }.items():
+            if _name not in _existing:
+                _conn.exec_driver_sql(f"ALTER TABLE ml_predictions ADD COLUMN {_name} {_ddl}")
+except Exception as _e:
+    print(f"[DB] Feedback column migration skipped: {_e}")
+
 # Ensure embedding_v2 column exists in faces table
 try:
     with engine.connect() as _conn:

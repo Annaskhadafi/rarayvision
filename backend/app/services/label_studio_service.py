@@ -53,7 +53,17 @@ class LabelStudioService:
         """
         results = []
         for i, det in enumerate(detections):
-            box = det.get("box", [0, 0, 0, 0])
+            # Feedback annotations use x/y/width/height; model detections use
+            # the legacy [x1, y1, x2, y2] box. Accept both contracts.
+            if "box" in det:
+                box = det.get("box", [0, 0, 0, 0])
+            else:
+                box = [
+                    det.get("x", 0),
+                    det.get("y", 0),
+                    det.get("x", 0) + det.get("width", 0),
+                    det.get("y", 0) + det.get("height", 0),
+                ]
             label = det.get("label", "object")
             score = det.get("confidence", 1.0)
 

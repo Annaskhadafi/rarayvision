@@ -221,6 +221,17 @@ class MLPrediction(Base):
     image_quality = Column(Text, nullable=True)
     is_synced_to_ls = Column(Boolean, default=False)
     label_studio_task_id = Column(Integer, nullable=True)
+    # Human corrections are kept separately from model detections.  The model
+    # output remains available for audit/retraining comparisons.
+    corrected_annotations = Column(Text, nullable=True)
+    image_width = Column(Integer, nullable=True)
+    image_height = Column(Integer, nullable=True)
+    feedback_source = Column(String(80), nullable=True)
+    feedback_source_record_id = Column(String(160), nullable=True)
+    feedback_actor_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    feedback_actor_email = Column(String(255), nullable=True)
+    feedback_idempotency_key = Column(String(255), nullable=True, index=True)
+    feedback_updated_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
 
 

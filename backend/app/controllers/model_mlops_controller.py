@@ -10,14 +10,17 @@ import tempfile
 from datetime import datetime
 from typing import Optional, List, Dict, Any
 from urllib.parse import quote, unquote, urlparse
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Query, status, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Query, status, BackgroundTasks, Header
 from fastapi.responses import JSONResponse, Response, FileResponse
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
+from pydantic import Field, root_validator
 
 try:
     from backend.app.database.database import get_db
     from backend.app.database.models import MLModel, MLPrediction, MLEndpoint, MLDataset
+    from backend.app.core.deps import get_current_user
+    from backend.app.database.models import User
     from backend.app.database.database import SessionLocal
     from backend.app.services.detection_service import detection_service
     from backend.app.services.s3_service import s3_service, get_storage_proxy_url, get_presigned_download_url, get_s3_credentials
@@ -26,6 +29,8 @@ try:
 except ImportError:
     from app.database.database import get_db
     from app.database.models import MLModel, MLPrediction, MLEndpoint, MLDataset
+    from app.core.deps import get_current_user
+    from app.database.models import User
     from app.database.database import SessionLocal
     from app.services.detection_service import detection_service
     from app.services.s3_service import s3_service, get_storage_proxy_url, get_presigned_download_url, get_s3_credentials
@@ -1540,8 +1545,48 @@ class DatasetUpdateRequest(BaseModel):
     name: str
 
 class FeedbackRequest(BaseModel):
-    feedback: str # "good" or "bad"
+    feedback: str # backward-compatible: good, bad, pending
     notes: Optional[str] = None
+    annotations: Optional[List["FeedbackAnnotation"]] = None
+    image_width: Optional[int] = Field(None, gt=0)
+    image_height: Optional[int] = Field(None, gt=0)
+    source: Optional[str] = Field(None, max_length=80)
+    source_record_id: Optional[str] = Field(None, max_length=160)
+    actor_email: Optional[str] = Field(None, max_length=255)
+    idempotency_key: Optional[str] = Field(None, max_length=255)
+
+    @root_validator(skip_on_failure=True)
+    def validate_annotation_bounds(cls, values):
+        annotations = values.get("annotations") or []
+        image_width, image_height = values.get("image_width"), values.get("image_height")
+        if annotations and (image_width is None or image_height is None):
+            raise ValueError("image_width and image_height are required with annotations")
+        for ann in annotations:
+            if ann.x + ann.width > image_width or ann.y + ann.height > image_height:
+                raise ValueError("annotation rectangle must fit within image dimensions")
+        return values
+
+
+class FeedbackAnnotation(BaseModel):
+    shape: str = "rectangle"
+    label: str = Field(..., min_length=1, max_length=120)
+    class_id: Optional[int] = Field(None, ge=0, le=32)
+    x: float = Field(..., ge=0)
+    y: float = Field(..., ge=0)
+    width: float = Field(..., gt=0)
+    height: float = Field(..., gt=0)
+
+    @root_validator(skip_on_failure=True)
+    def rectangle_only(cls, values):
+        if values.get("shape") != "rectangle":
+            raise ValueError("annotation shape must be rectangle")
+        return values
+
+
+if hasattr(FeedbackRequest, "model_rebuild"):
+    FeedbackRequest.model_rebuild()
+else:
+    FeedbackRequest.update_forward_refs(FeedbackAnnotation=FeedbackAnnotation)
 
 class LabelStudioSyncRequest(BaseModel):
     project_id: Optional[str] = None
@@ -1661,6 +1706,8 @@ async def predict_object(
         feedback_status=initial_status,
         is_audit_sample=is_audit,
         image_quality=json.dumps(result.get("quality", {})),
+        image_width=result.get("image_width"),
+        image_height=result.get("image_height"),
         is_synced_to_ls=False
     )
     db.add(pred_record)
@@ -1689,7 +1736,9 @@ async def predict_object(
 async def submit_feedback(
     prediction_id: str,
     payload: FeedbackRequest,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    idempotency_header: Optional[str] = Header(None, alias="Idempotency-Key"),
 ):
     """
     Submit user feedback on a prediction:
@@ -1700,13 +1749,66 @@ async def submit_feedback(
     if not record:
         raise HTTPException(status_code=404, detail="Prediction record not found")
 
+    # When the prediction model publishes the canonical 33-class vocabulary,
+    # reject typo/foreign labels while retaining compatibility with older model
+    # rows that did not persist a class list.
+    if payload.annotations and record.model_id:
+        model = db.query(MLModel).filter(MLModel.id == record.model_id).first()
+        model_classes = json.loads(model.classes or "[]") if model and model.classes else []
+        if len(model_classes) == 33:
+            canonical = {str(name).strip().casefold(): index for index, name in enumerate(model_classes)}
+            for annotation in payload.annotations:
+                label_key = annotation.label.strip().casefold()
+                if label_key not in canonical:
+                    raise HTTPException(status_code=422, detail=f"Unknown canonical tire class: {annotation.label}")
+                if annotation.class_id is not None and annotation.class_id != canonical[label_key]:
+                    raise HTTPException(status_code=422, detail="annotation class_id does not match label")
+
+    idempotency_key = payload.idempotency_key or idempotency_header
+    if idempotency_key:
+        previous = db.query(MLPrediction).filter(
+            MLPrediction.id == prediction_id,
+            MLPrediction.feedback_idempotency_key == idempotency_key,
+        ).first()
+        if previous:
+            return {
+                "success": True,
+                "prediction_id": previous.id,
+                "feedback_status": previous.feedback_status,
+                "feedback_notes": previous.feedback_notes,
+                "corrected_annotations": json.loads(previous.corrected_annotations or "[]"),
+                "idempotent_replay": True,
+            }
+        if record.feedback_idempotency_key and record.feedback_idempotency_key != idempotency_key:
+            raise HTTPException(status_code=409, detail="Feedback untuk prediksi ini sudah tercatat.")
+
     status_val = payload.feedback.lower().strip()
     if status_val not in ["good", "bad", "pending"]:
-        raise HTTPException(status_code=400, detail="Feedback must be 'good' or 'bad'")
+        raise HTTPException(status_code=400, detail="Feedback must be 'good', 'bad', or 'pending'")
 
     record.feedback_status = status_val
     if payload.notes:
         record.feedback_notes = payload.notes
+    if payload.annotations is not None:
+        record.corrected_annotations = json.dumps([a.dict() for a in payload.annotations])
+        record.image_width = payload.image_width
+        record.image_height = payload.image_height
+    record.feedback_source = payload.source or "HERO"
+    if payload.source_record_id is not None:
+        record.feedback_source_record_id = payload.source_record_id
+    record.feedback_actor_id = getattr(current_user, "id", None)
+    current_actor_email = getattr(current_user, "email", None)
+    trusted_service_email = (
+        os.getenv("HERO_SERVICE_EMAIL") or os.getenv("RARAY_VISION_EMAIL") or ""
+    ).strip().casefold()
+    delegated_actor_email = payload.actor_email if (
+        payload.source == "HERO"
+        and trusted_service_email
+        and str(current_actor_email or "").strip().casefold() == trusted_service_email
+    ) else None
+    record.feedback_actor_email = delegated_actor_email or current_actor_email
+    record.feedback_idempotency_key = idempotency_key
+    record.feedback_updated_at = datetime.utcnow()
     record.is_synced_to_ls = False # Reset sync flag so it gets picked up in next sync
 
     db.commit()
@@ -1717,6 +1819,8 @@ async def submit_feedback(
         "prediction_id": record.id,
         "feedback_status": record.feedback_status,
         "feedback_notes": record.feedback_notes,
+        "corrected_annotations": json.loads(record.corrected_annotations or "[]"),
+        "idempotency_replay": False,
         "message": f"Feedback '{record.feedback_status}' successfully recorded."
     }
 
@@ -2180,7 +2284,8 @@ def get_production_analytics(
 @router.post("/data/sync-label-studio")
 def sync_to_label_studio(
     payload: LabelStudioSyncRequest,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     """
     Push queued images (flagged 'bad' or 'good'/'auto_labeled') directly to Label Studio
@@ -2210,18 +2315,29 @@ def sync_to_label_studio(
 
     for item in items:
         detections = json.loads(item.detections) if item.detections else []
+        corrected = json.loads(item.corrected_annotations) if item.corrected_annotations else []
+        # Human rectangles are authoritative training annotations; thumbs are
+        # routing metadata only and never replace the corrected geometry.
+        annotation_source = corrected or detections
         task_data = {
             "data": {
                 "image": item.original_image_url,
                 "prediction_id": item.id,
                 "feedback_status": item.feedback_status,
-                "feedback_notes": item.feedback_notes or ""
+                "feedback_notes": item.feedback_notes or "",
+                "feedback_source": item.feedback_source or "HERO",
+                "feedback_source_record_id": item.feedback_source_record_id or "",
             }
         }
 
-        # If it's good or auto_labeled, add pre-annotations
-        if item.feedback_status in ["good", "auto_labeled"] and detections:
-            ls_results = label_studio_service.format_detection_to_ls_annotation(detections)
+        # Corrected annotations are sent for either good/bad feedback. Legacy
+        # predictions retain the previous good/auto_labeled behavior.
+        if annotation_source and (corrected or item.feedback_status in ["good", "auto_labeled"]):
+            ls_results = label_studio_service.format_detection_to_ls_annotation(
+                annotation_source,
+                img_width=item.image_width or 1000,
+                img_height=item.image_height or 1000,
+            )
             task_data["predictions"] = [
                 {
                     "model_version": item.model_version or "active",
@@ -2237,8 +2353,35 @@ def sync_to_label_studio(
 
     if result.get("success"):
         # Mark as synced in DB
-        for item in items:
+        response_tasks = result.get("response")
+        if isinstance(response_tasks, dict):
+            response_tasks = response_tasks.get("tasks") or response_tasks.get("items") or []
+        if not isinstance(response_tasks, list):
+            response_tasks = []
+        task_ids = []
+        for task in response_tasks:
+            raw_task_id = task.get("id") if isinstance(task, dict) else None
+            if isinstance(raw_task_id, bool) or not str(raw_task_id or "").isdigit():
+                task_ids = []
+                break
+            task_ids.append(int(raw_task_id))
+        if len(task_ids) != len(items):
+            for item in items:
+                item.feedback_status = "sync_reconciliation_required"
+                item.feedback_notes = (
+                    "Label Studio menerima import tetapi mapping task ID tidak lengkap; "
+                    "rekonsiliasi manual diperlukan. "
+                    f"{item.feedback_notes or ''}"
+                )[:4000]
+            db.commit()
+            return {
+                "success": False,
+                "error": "Label Studio tidak mengembalikan mapping task lengkap; status dipindah ke rekonsiliasi.",
+                "synced_count": 0,
+            }
+        for index, item in enumerate(items):
             item.is_synced_to_ls = True
+            item.label_studio_task_id = task_ids[index]
         db.commit()
 
         return {
@@ -3097,6 +3240,8 @@ async def predict_via_endpoint(
         feedback_status=initial_status,
         is_audit_sample=is_audit,
         image_quality=json.dumps(result.get("quality", {})),
+        image_width=result.get("image_width"),
+        image_height=result.get("image_height"),
         is_synced_to_ls=False
     )
     db.add(pred_record)
