@@ -375,6 +375,36 @@ def compute_bm25_scores(query: str, items: List[Dict[str, Any]], k1: float = 1.5
 
 
 class RagService:
+    PROVIDER_LABELS = {
+        "openai": "OpenAI-compatible",
+        "openrouter": "OpenRouter",
+        "groq": "Groq",
+        "gemini": "Google Gemini",
+    }
+
+    @staticmethod
+    def _provider_config() -> Dict[str, Dict[str, Any]]:
+        return {
+            "openai": {"configured": bool(os.getenv("OPENAI_API_KEY", "").strip()), "model": os.getenv("OPENAI_MODEL", "cx/gpt-5.6-luna").strip()},
+            "openrouter": {"configured": bool(os.getenv("OPENROUTER_API_KEY", "").strip()), "model": os.getenv("OPENROUTER_MODEL", "google/gemini-3.7-flash").strip()},
+            "groq": {"configured": bool(os.getenv("GROQ_API_KEY", "").strip()), "model": os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile").strip()},
+            "gemini": {"configured": bool(os.getenv("GEMINI_API_KEY", "").strip()), "model": os.getenv("GEMINI_MODEL", "gemini-2.0-flash").strip()},
+        }
+
+    @classmethod
+    def _resolve_provider(cls, provider: Optional[str]) -> Optional[str]:
+        if provider is None:
+            return None
+        normalized = provider.strip().lower()
+        if not normalized:
+            return None
+        config = cls._provider_config()
+        if normalized not in config:
+            raise ValueError("Unknown LLM provider")
+        if not config[normalized]["configured"]:
+            raise ValueError(f"LLM provider '{normalized}' is not configured")
+        return normalized
+
     @staticmethod
     def get_embedding_info() -> Dict[str, Any]:
         """Returns active embedding provider, reranker info, LLM engine info, and Redis status."""
@@ -388,6 +418,8 @@ class RagService:
         openrouter_model = os.getenv("OPENROUTER_MODEL", "google/gemini-3.7-flash")
         openrouter_emb_model = os.getenv("OPENROUTER_EMBEDDING_MODEL", "qwen/qwen3-embedding-8b")
         llm_provider = os.getenv("LLM_PROVIDER", "openai").strip().lower()
+        env_provider = "openai" if llm_provider in {"custom", "9router"} else llm_provider
+        canonical_provider = env_provider if env_provider in RagService._provider_config() and RagService._provider_config()[env_provider]["configured"] else None
 
         if openai_key and llm_provider in ["openai", "custom", "9router"]:
             active_llm = f"OpenAI-Compatible ({openai_model})"
@@ -423,6 +455,11 @@ class RagService:
             "openrouter_configured": bool(openrouter_key),
             "groq_configured": bool(groq_key),
             "gemini_configured": bool(gemini_key),
+            "llm_provider": canonical_provider or "openai",
+            "llm_providers": [
+                {"id": provider_id, "label": RagService.PROVIDER_LABELS[provider_id], **provider_info}
+                for provider_id, provider_info in RagService._provider_config().items()
+            ],
             "vector_dimensions": 384
         }
 
@@ -1863,7 +1900,8 @@ class RagService:
         document_id: Optional[str] = None,
         custom_system_prompt: Optional[str] = None,
         user_id: Optional[int] = None,
-        enable_rerank: bool = True
+        enable_rerank: bool = True,
+        provider: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         RAG Chat Completion with Multi-Turn Persistent Memory (Redis + PostgreSQL), Two-Stage Reranking & Self-Growth:
@@ -1874,6 +1912,7 @@ class RagService:
         5. Persists messages to both Redis and PostgreSQL.
         """
         start_time = time.perf_counter()
+        selected_provider = cls._resolve_provider(provider)
         session_id = session_id or f"sess_{uuid.uuid4().hex[:10]}"
 
         # 1. Retrieve Active Messages (Redis L1 cache or PostgreSQL L2 fallback)
@@ -1890,7 +1929,7 @@ class RagService:
         # 2. Check Semantic RAG Cache (if standalone query without previous turns)
         is_standalone = not active_messages or len([m for m in active_messages if m.get("role") in ["assistant", "user"] and str(m.get("content")).strip() != query.strip()]) == 0
         if is_standalone:
-            cached_res = RedisService.get_rag_cache(query, document_id)
+            cached_res = RedisService.get_rag_cache(query, document_id, selected_provider)
             if cached_res:
                 cached_res["answer"] = _normalize_markdown_image_urls(cached_res.get("answer", ""))
                 cached_res["sources"] = cls._normalize_sources(cached_res.get("sources", []))
@@ -2021,7 +2060,7 @@ Pertanyaan Pengguna:
         llm_messages.append({"role": "user", "content": current_prompt})
 
         # 8. Invoke LLM
-        answer = _normalize_markdown_image_urls(cls._call_llm_messages(llm_messages))
+        answer = _normalize_markdown_image_urls(cls._call_llm_messages(llm_messages, selected_provider))
 
         elapsed_ms = round((time.perf_counter() - start_time) * 1000, 2)
 
@@ -2066,7 +2105,7 @@ Pertanyaan Pengguna:
         }
 
         if is_standalone:
-            RedisService.set_rag_cache(query, document_id, result)
+            RedisService.set_rag_cache(query, document_id, result, provider=selected_provider)
 
         return result
 
@@ -2104,7 +2143,7 @@ Pertanyaan Pengguna:
         ])
 
     @staticmethod
-    def _call_llm_messages(messages: List[Dict[str, str]]) -> str:
+    def _call_llm_messages(messages: List[Dict[str, str]], provider: Optional[str] = None) -> str:
         """
         Invokes LLM with full conversation messages list with persistent connection pooling.
         Priority is determined by LLM_PROVIDER (default: openrouter -> groq -> gemini).
@@ -2113,7 +2152,7 @@ Pertanyaan Pengguna:
 
         llm_provider = os.getenv("LLM_PROVIDER", "openai").strip().lower()
 
-        openai_key = os.getenv("OPENAI_API_KEY", "sk-a510b6e65efa23d4-hpbvtn-35dad8f5").strip()
+        openai_key = os.getenv("OPENAI_API_KEY", "").strip()
         openai_base_url = os.getenv("OPENAI_BASE_URL", "https://9router.chitraparatama.com/v1").strip().rstrip("/")
         openai_model = os.getenv("OPENAI_MODEL", "cx/gpt-5.6-luna").strip()
 
@@ -2238,7 +2277,7 @@ Pertanyaan Pengguna:
                 client = genai.Client(api_key=gemini_key)
                 gemini_text = "\n\n".join([f"[{m['role'].upper()}]: {m['content']}" for m in messages])
                 response = client.models.generate_content(
-                    model="gemini-2.0-flash",
+                    model=os.getenv("GEMINI_MODEL", "gemini-2.0-flash").strip(),
                     contents=gemini_text
                 )
                 if response and response.text:
@@ -2247,7 +2286,12 @@ Pertanyaan Pengguna:
                 logger.error(f"[RagService] Gemini call exception: {e}")
             return None
 
-        # Execute providers based on LLM_PROVIDER preference
+        # An explicit request is strict; omitted provider retains env-driven fallback order.
+        if provider:
+            selected = {"openai": try_openai, "openrouter": try_openrouter, "groq": try_groq, "gemini": try_gemini}[provider]()
+            if selected:
+                return selected
+            raise RuntimeError(f"LLM provider '{provider}' failed to respond")
         if llm_provider in ["openai", "custom", "9router"]:
             providers = [try_openai, try_groq, try_openrouter, try_gemini]
         elif llm_provider == "groq":

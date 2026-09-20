@@ -127,7 +127,7 @@ export const ragService = {
     return this._handleResponse(res)
   },
 
-  async chat({ query, messages = null, sessionId = null, topK = 4, documentId = null, systemPrompt = null }) {
+  async chat({ query, messages = null, sessionId = null, topK = 4, documentId = null, systemPrompt = null, provider = null }) {
     const res = await fetch(`${API_BASE_URL}/api/v1/rag/chat`, {
       method: 'POST',
       headers: {
@@ -140,7 +140,8 @@ export const ragService = {
         session_id: sessionId,
         top_k: topK,
         document_id: documentId,
-        system_prompt: systemPrompt
+        system_prompt: systemPrompt,
+        provider
       })
     })
     return this._handleResponse(res)

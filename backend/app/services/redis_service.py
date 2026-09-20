@@ -167,14 +167,14 @@ class RedisService:
     # ==========================================
 
     @classmethod
-    def get_rag_cache(cls, query: str, document_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    def get_rag_cache(cls, query: str, document_id: Optional[str] = None, provider: Optional[str] = None) -> Optional[Dict[str, Any]]:
         """Retrieves cached RAG response for identical semantic queries."""
         client = cls.get_client()
         if not client:
             return None
 
         norm_query = query.strip().lower()
-        key_hash = hashlib.md5(f"{norm_query}:{document_id or 'all'}".encode("utf-8")).hexdigest()
+        key_hash = hashlib.md5(f"{norm_query}:{document_id or 'all'}:{provider or 'default'}".encode("utf-8")).hexdigest()
         key = f"rag:cache:query:{key_hash}"
 
         try:
@@ -193,7 +193,8 @@ class RedisService:
         query: str,
         document_id: Optional[str],
         response_data: Dict[str, Any],
-        ttl_seconds: int = 1800 # 30 Minutes
+        ttl_seconds: int = 1800, # 30 Minutes
+        provider: Optional[str] = None
     ) -> bool:
         """Caches RAG response in Redis."""
         client = cls.get_client()
@@ -201,7 +202,7 @@ class RedisService:
             return False
 
         norm_query = query.strip().lower()
-        key_hash = hashlib.md5(f"{norm_query}:{document_id or 'all'}".encode("utf-8")).hexdigest()
+        key_hash = hashlib.md5(f"{norm_query}:{document_id or 'all'}:{provider or 'default'}".encode("utf-8")).hexdigest()
         key = f"rag:cache:query:{key_hash}"
 
         try:

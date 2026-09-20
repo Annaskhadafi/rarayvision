@@ -77,6 +77,11 @@ const userPrompt = ref('')
 const isGenerating = ref(false)
 const chatTopK = ref(4)
 const selectedDocFilter = ref('')
+const selectedProvider = ref(localStorage.getItem('raray_rag_llm_provider') || '')
+const configuredProviders = computed(() => (ragInfo.value?.llm_providers || []).filter(provider => provider?.configured && provider.id))
+const persistProvider = () => {
+  if (selectedProvider.value) localStorage.setItem('raray_rag_llm_provider', selectedProvider.value)
+}
 
 // Persistent Sessions & Self-Growth Memory State
 const learnedFacts = ref([])
@@ -243,6 +248,17 @@ onMounted(async () => {
     if (res?.data) {
       ragInfo.value = res.data
       if (res.data.redis) redisStatus.value = res.data.redis
+      const providers = (res.data.llm_providers || []).filter(provider => provider?.configured && provider.id)
+      const availableIds = new Set(providers.map(provider => provider.id))
+      const storedProvider = localStorage.getItem('raray_rag_llm_provider')
+      const serverProvider = res.data.preferred_provider || res.data.default_provider || res.data.llm_provider
+      selectedProvider.value = availableIds.has(storedProvider)
+        ? storedProvider
+        : availableIds.has(serverProvider)
+          ? serverProvider
+          : providers[0]?.id || ''
+      if (selectedProvider.value) localStorage.setItem('raray_rag_llm_provider', selectedProvider.value)
+      else localStorage.removeItem('raray_rag_llm_provider')
     }
   } catch (err) {
     console.warn('Could not fetch RAG info:', err)
@@ -898,7 +914,8 @@ const handleSendMessage = async () => {
       messages: previousTurns,
       sessionId: currentSessionId.value,
       topK: chatTopK.value,
-      documentId: selectedDocFilter.value || null
+      documentId: selectedDocFilter.value || null,
+      provider: selectedProvider.value || null
     })
 
     if (res?.data) {
@@ -1885,6 +1902,13 @@ print("Memory Ingested:", mem_res)`
               </div>
             </div>
             <div class="chat-controls">
+              <label class="provider-control">
+                <span>Pengaturan AI</span>
+                <select v-model="selectedProvider" class="filter-select" :disabled="configuredProviders.length === 0" @change="persistProvider">
+                  <option v-if="configuredProviders.length === 0" value="">Tidak ada provider terkonfigurasi</option>
+                  <option v-for="provider in configuredProviders" :key="provider.id" :value="provider.id">{{ provider.label }}</option>
+                </select>
+              </label>
               <!-- Session Switcher -->
               <select :value="currentSessionId" @change="selectSession($event.target.value)" class="filter-select session-select" title="Pilih riwayat percakapan">
                 <option :value="currentSessionId">💬 Sesi Aktif ({{ currentSessionId.slice(0, 10) }}...)</option>
@@ -3430,6 +3454,8 @@ print("Memory Ingested:", mem_res)`
   display: flex;
   justify-content: space-between;
   align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
 }
 
 .chat-title-box {
@@ -3461,6 +3487,17 @@ print("Memory Ingested:", mem_res)`
   display: flex;
   align-items: center;
   gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.provider-control {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: #475569;
+  font-size: 11px;
+  font-weight: 700;
 }
 
 .filter-select {

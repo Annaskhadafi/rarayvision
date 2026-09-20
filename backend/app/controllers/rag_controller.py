@@ -31,6 +31,7 @@ class ChatRequest(BaseModel):
     document_id: Optional[str] = None
     system_prompt: Optional[str] = None
     enable_rerank: bool = True
+    provider: Optional[str] = None
 
 
 class FeedbackRequest(BaseModel):
@@ -170,13 +171,16 @@ async def rag_chat(
             document_id=req.document_id,
             custom_system_prompt=req.system_prompt,
             user_id=current_user.id if current_user else None,
-            enable_rerank=req.enable_rerank
+            enable_rerank=req.enable_rerank,
+            provider=req.provider
         )
 
         return {
             "status": "success",
             "data": chat_res
         }
+    except ValueError as ve:
+        raise HTTPException(status_code=400, detail=str(ve))
     except Exception as e:
         logger.error(f"[RagController] rag_chat exception: {e}", exc_info=True)
         return JSONResponse(
