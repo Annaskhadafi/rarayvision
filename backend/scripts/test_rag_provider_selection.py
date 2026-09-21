@@ -131,6 +131,33 @@ class ProviderSelectionTest(unittest.TestCase):
             )
         self.assertNotIn("reasoning", captured["json"])
 
+    def test_chat_parser_accepts_jsonl_and_sse(self):
+        class Response:
+            def __init__(self, text):
+                self.text = text
+            def json(self):
+                raise ValueError("Extra data")
+
+        jsonl = Response(
+            '{"choices":[{"delta":{"content":"Halo "}}]}\n'
+            '{"choices":[{"delta":{"content":"dunia"}}]}\n'
+        )
+        sse = Response(
+            'data: {"choices":[{"delta":{"content":"A"}}]}\n\n'
+            'data: {"choices":[{"delta":{"content":"B"}}]}\n'
+            'data: [DONE]\n'
+        )
+        self.assertEqual(RagService._extract_chat_content(jsonl), "Halo dunia")
+        self.assertEqual(RagService._extract_chat_content(sse), "AB")
+
+    def test_local_embedding_model_is_not_sent_to_openrouter(self):
+        os.environ["OPENROUTER_API_KEY"] = "test-secret"
+        with patch("backend.app.services.rag_service.get_http_session") as get_session:
+            self.assertIsNone(
+                RagService.generate_embeddings_openrouter(["text"], model="BAAI/bge-small-en-v1.5")
+            )
+        get_session.assert_not_called()
+
     def test_standalone_detection_ignores_only_opening_greeting(self):
         self.assertTrue(RagService._is_standalone_query([
             {"role": "assistant", "content": "Halo! Ada yang bisa saya bantu?"},

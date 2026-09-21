@@ -1,5 +1,6 @@
 import os
 import re
+import json
 import uuid
 import time
 import logging
@@ -495,6 +496,13 @@ class RagService:
         """
         openrouter_key = os.getenv("OPENROUTER_API_KEY", "").strip()
         if not openrouter_key or not texts:
+            return None
+
+        if model.strip().lower() in {"baai/bge-small-en-v1.5", "bge-small-en-v1.5"}:
+            logger.warning(
+                "[RagService] Skipping invalid OpenRouter embedding model '%s'; using local FastEmbed fallback.",
+                model,
+            )
             return None
 
         session = get_http_session()
@@ -2327,6 +2335,63 @@ Pertanyaan Pengguna:
         return cleaned if cleaned else text.strip()
 
     @staticmethod
+    def _extract_chat_content(response: Any) -> str:
+        """Extract content from normal JSON, JSONL, or SSE chat responses."""
+        payloads = []
+        try:
+            payloads.append(response.json())
+        except ValueError:
+            raw = str(getattr(response, "text", "") or "").strip()
+            for line in raw.splitlines():
+                line = line.strip()
+                if line.startswith("data:"):
+                    line = line[5:].strip()
+                if not line or line == "[DONE]":
+                    continue
+                try:
+                    payloads.append(json.loads(line))
+                except ValueError:
+                    continue
+
+            if not payloads:
+                decoder = json.JSONDecoder()
+                cursor = 0
+                while cursor < len(raw):
+                    while cursor < len(raw) and raw[cursor].isspace():
+                        cursor += 1
+                    if cursor >= len(raw):
+                        break
+                    try:
+                        payload, end = decoder.raw_decode(raw, cursor)
+                    except ValueError:
+                        break
+                    payloads.append(payload)
+                    cursor = end
+
+        content_parts = []
+        for payload in payloads:
+            if not isinstance(payload, dict):
+                continue
+            choices = payload.get("choices") or []
+            if not choices or not isinstance(choices[0], dict):
+                continue
+            choice = choices[0]
+            message = choice.get("message") or {}
+            delta = choice.get("delta") or {}
+            content = message.get("content") or delta.get("content")
+            if isinstance(content, list):
+                content = "".join(
+                    str(part.get("text", "")) if isinstance(part, dict) else str(part)
+                    for part in content
+                )
+            if content:
+                content_parts.append(str(content))
+
+        if content_parts:
+            return "".join(content_parts)
+        raise ValueError("Chat provider returned no readable content")
+
+    @staticmethod
     def _call_llm(system_prompt: str, user_prompt: str) -> str:
         """Legacy helper delegating to _call_llm_messages."""
         return RagService._call_llm_messages([
@@ -2389,8 +2454,7 @@ Pertanyaan Pengguna:
                     timeout=45
                 )
                 if resp.status_code == 200:
-                    data = resp.json()
-                    content = data["choices"][0]["message"]["content"] or ""
+                    content = RagService._extract_chat_content(resp)
                     cleaned = RagService._clean_llm_response(content)
                     return cleaned if cleaned else (content.strip() or None)
                 else:
@@ -2428,8 +2492,7 @@ Pertanyaan Pengguna:
                     timeout=25
                 )
                 if resp.status_code == 200:
-                    data = resp.json()
-                    content = data["choices"][0]["message"]["content"]
+                    content = RagService._extract_chat_content(resp)
                     cleaned = RagService._clean_llm_response(content)
                     if cleaned:
                         return cleaned
@@ -2463,8 +2526,7 @@ Pertanyaan Pengguna:
                     timeout=20
                 )
                 if resp.status_code == 200:
-                    data = resp.json()
-                    content = data["choices"][0]["message"]["content"] or ""
+                    content = RagService._extract_chat_content(resp)
                     cleaned = RagService._clean_llm_response(content)
                     # Use cleaned response; if empty (e.g. truncated <think> block), fallback to raw content
                     return cleaned if cleaned else (content.strip() or None)

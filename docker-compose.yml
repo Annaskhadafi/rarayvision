@@ -29,6 +29,7 @@ services:
       LLM_PROVIDER: ${LLM_PROVIDER:-openai}
       GEMINI_API_KEY: ${GEMINI_API_KEY}
       EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-local}
+      OPENROUTER_EMBEDDING_MODEL: ${OPENROUTER_EMBEDDING_MODEL:-qwen/qwen3-embedding-8b}
       RERANKER_MODEL: ${RERANKER_MODEL:-jinaai/jina-reranker-v1-tiny-en}
       RERANKER_MODE: ${RERANKER_MODE:-local_onnx}
       JEV_MODEL: ${JEV_MODEL:-typesafe/jev-1.13}
