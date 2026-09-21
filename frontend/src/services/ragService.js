@@ -111,7 +111,7 @@ export const ragService = {
     })
   },
 
-  async search({ query, topK = 4, documentId = null, rerankerMode = null }) {
+  async search({ query, topK = 4, documentId = null }) {
     const res = await fetch(`${API_BASE_URL}/api/v1/rag/search`, {
       method: 'POST',
       headers: {
@@ -121,14 +121,13 @@ export const ragService = {
       body: JSON.stringify({
         query,
         top_k: topK,
-        document_id: documentId,
-        reranker_mode: rerankerMode
+        document_id: documentId
       })
     })
     return this._handleResponse(res)
   },
 
-  async chat({ query, messages = null, sessionId = null, topK = 4, documentId = null, systemPrompt = null, provider = null, rerankerMode = null }) {
+  async chat({ query, messages = null, sessionId = null, topK = 4, documentId = null, systemPrompt = null, provider = null }) {
     const res = await fetch(`${API_BASE_URL}/api/v1/rag/chat`, {
       method: 'POST',
       headers: {
@@ -142,8 +141,7 @@ export const ragService = {
         top_k: topK,
         document_id: documentId,
         system_prompt: systemPrompt,
-        provider,
-        reranker_mode: rerankerMode
+        provider
       })
     })
     return this._handleResponse(res)
