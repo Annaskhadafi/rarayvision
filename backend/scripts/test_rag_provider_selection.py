@@ -1,4 +1,4 @@
-"""Small stdlib contract check for request-scoped RAG provider selection."""
+"""Small stdlib contract checks for RAG provider and reranker selection."""
 import os
 import unittest
 from unittest.mock import patch
@@ -12,7 +12,8 @@ class ProviderSelectionTest(unittest.TestCase):
     def setUp(self):
         self.env = {key: os.environ.get(key) for key in (
             "OPENAI_API_KEY", "OPENAI_MODEL", "OPENROUTER_API_KEY", "OPENROUTER_MODEL",
-            "GROQ_API_KEY", "GROQ_MODEL", "GEMINI_API_KEY", "GEMINI_MODEL", "LLM_PROVIDER"
+            "GROQ_API_KEY", "GROQ_MODEL", "GEMINI_API_KEY", "GEMINI_MODEL", "LLM_PROVIDER",
+            "RERANKER_MODE", "JEV_MODEL", "JEV_TIMEOUT_SECONDS", "LLM_DISABLE_REASONING"
         )}
         for key in self.env:
             os.environ.pop(key, None)
@@ -58,6 +59,77 @@ class ProviderSelectionTest(unittest.TestCase):
                 RagService._call_llm_messages([{"role": "user", "content": "hi"}], "openrouter")
             self.assertEqual(RagService._call_llm_messages([{"role": "user", "content": "hi"}], "openrouter"), "recovered")
             cache_write.assert_not_called()
+
+    def test_jev_reranker_uses_decisions_endpoint_and_sorts_scores(self):
+        os.environ["OPENROUTER_API_KEY"] = "test-secret"
+        captured = {}
+
+        class Response:
+            status_code = 200
+            text = ""
+            def json(self):
+                return {
+                    "answers": {
+                        "chunk_0": {"score": 1, "confidence": 0.8},
+                        "chunk_1": {"score": 4, "confidence": 0.9},
+                    }
+                }
+
+        class Session:
+            def post(self, url, **kwargs):
+                captured["url"] = url
+                captured["json"] = kwargs["json"]
+                return Response()
+
+        chunks = [
+            {"filename": "a.md", "content": "weak", "similarity_score": 0.7},
+            {"filename": "b.md", "content": "direct answer", "similarity_score": 0.6},
+        ]
+        with patch("backend.app.services.rag_service.get_http_session", return_value=Session()):
+            result = RagService.rerank_chunks("query", chunks, top_k=2, mode="jev")
+        self.assertEqual(captured["url"], "https://openrouter.ai/api/alpha/decisions")
+        self.assertEqual(captured["json"]["model"], "typesafe/jev-1.13")
+        self.assertEqual(result[0]["filename"], "b.md")
+        self.assertEqual(result[0]["reranker_score"], 1.0)
+
+    def test_local_mode_never_calls_remote_reranker(self):
+        chunks = [
+            {"filename": "a.md", "content": "a", "similarity_score": 0.7},
+            {"filename": "b.md", "content": "b", "similarity_score": 0.6},
+        ]
+
+        class LocalReranker:
+            def rerank(self, query, texts):
+                return [0.1, 0.9]
+
+        with patch("backend.app.services.rag_service.get_reranker_model", return_value=LocalReranker()), \
+             patch.object(RagService, "rerank_chunks_openrouter") as remote:
+            result = RagService.rerank_chunks("query", chunks, top_k=2, mode="local_onnx")
+        remote.assert_not_called()
+        self.assertEqual(result[0]["filename"], "b.md")
+
+    def test_openai_answer_payload_avoids_openrouter_reasoning_control(self):
+        os.environ["OPENAI_API_KEY"] = "test-secret"
+        os.environ["LLM_DISABLE_REASONING"] = "true"
+        captured = {}
+
+        class Response:
+            status_code = 200
+            text = ""
+            def json(self):
+                return {"choices": [{"message": {"content": "answer"}}]}
+
+        class Session:
+            def post(self, url, **kwargs):
+                captured["json"] = kwargs["json"]
+                return Response()
+
+        with patch("backend.app.services.rag_service.get_http_session", return_value=Session()):
+            self.assertEqual(
+                RagService._call_llm_messages([{"role": "user", "content": "hi"}], "openai"),
+                "answer",
+            )
+        self.assertNotIn("reasoning", captured["json"])
 
     def test_standalone_detection_ignores_only_opening_greeting(self):
         self.assertTrue(RagService._is_standalone_query([

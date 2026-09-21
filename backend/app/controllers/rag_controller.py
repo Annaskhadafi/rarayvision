@@ -21,6 +21,7 @@ class SearchRequest(BaseModel):
     top_k: int = 5
     document_id: Optional[str] = None
     enable_rerank: bool = True
+    reranker_mode: Optional[str] = None
 
 
 class ChatRequest(BaseModel):
@@ -32,6 +33,7 @@ class ChatRequest(BaseModel):
     system_prompt: Optional[str] = None
     enable_rerank: bool = True
     provider: Optional[str] = None
+    reranker_mode: Optional[str] = None
 
 
 class FeedbackRequest(BaseModel):
@@ -124,7 +126,8 @@ async def search_knowledge(
             query=req.query,
             top_k=req.top_k,
             document_id=req.document_id,
-            enable_rerank=req.enable_rerank
+            enable_rerank=req.enable_rerank,
+            reranker_mode=req.reranker_mode,
         )
 
         return {
@@ -172,7 +175,8 @@ async def rag_chat(
             custom_system_prompt=req.system_prompt,
             user_id=current_user.id if current_user else None,
             enable_rerank=req.enable_rerank,
-            provider=req.provider
+            provider=req.provider,
+            reranker_mode=req.reranker_mode,
         )
 
         return {

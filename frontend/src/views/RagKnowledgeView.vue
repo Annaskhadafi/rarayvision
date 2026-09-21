@@ -82,6 +82,11 @@ const configuredProviders = computed(() => (ragInfo.value?.llm_providers || []).
 const persistProvider = () => {
   if (selectedProvider.value) localStorage.setItem('raray_rag_llm_provider', selectedProvider.value)
 }
+const selectedRerankerMode = ref(localStorage.getItem('raray_rag_reranker_mode') || '')
+const configuredRerankerModes = computed(() => (ragInfo.value?.reranker_modes || []).filter(mode => mode?.configured && mode.id))
+const persistRerankerMode = () => {
+  if (selectedRerankerMode.value) localStorage.setItem('raray_rag_reranker_mode', selectedRerankerMode.value)
+}
 
 // Persistent Sessions & Self-Growth Memory State
 const learnedFacts = ref([])
@@ -259,6 +264,15 @@ onMounted(async () => {
           : providers[0]?.id || ''
       if (selectedProvider.value) localStorage.setItem('raray_rag_llm_provider', selectedProvider.value)
       else localStorage.removeItem('raray_rag_llm_provider')
+      const rerankModes = (res.data.reranker_modes || []).filter(mode => mode?.configured && mode.id)
+      const rerankIds = new Set(rerankModes.map(mode => mode.id))
+      selectedRerankerMode.value = rerankIds.has(selectedRerankerMode.value)
+        ? selectedRerankerMode.value
+        : rerankIds.has(res.data.reranker_mode)
+          ? res.data.reranker_mode
+          : rerankModes[0]?.id || ''
+      if (selectedRerankerMode.value) localStorage.setItem('raray_rag_reranker_mode', selectedRerankerMode.value)
+      else localStorage.removeItem('raray_rag_reranker_mode')
     }
   } catch (err) {
     console.warn('Could not fetch RAG info:', err)
@@ -906,7 +920,8 @@ const handleSendMessage = async () => {
       sessionId: currentSessionId.value,
       topK: chatTopK.value,
       documentId: selectedDocFilter.value || null,
-      provider: selectedProvider.value || null
+      provider: selectedProvider.value || null,
+      rerankerMode: selectedRerankerMode.value || null
     })
 
     if (res?.data) {
@@ -920,6 +935,7 @@ const handleSendMessage = async () => {
         learned_facts: res.data.learned_facts || [],
         latency: res.data.latency_ms,
         from_cache: res.data.from_cache,
+        reranker_mode: res.data.reranker_mode,
         rating: null
       })
       fetchSessions()
@@ -1900,6 +1916,13 @@ print("Memory Ingested:", mem_res)`
                   <option v-for="provider in configuredProviders" :key="provider.id" :value="provider.id">{{ provider.label }}</option>
                 </select>
               </label>
+              <label class="provider-control">
+                <span>Reranker</span>
+                <select v-model="selectedRerankerMode" class="filter-select" :disabled="configuredRerankerModes.length === 0" @change="persistRerankerMode">
+                  <option v-if="configuredRerankerModes.length === 0" value="">Tidak ada reranker</option>
+                  <option v-for="mode in configuredRerankerModes" :key="mode.id" :value="mode.id">{{ mode.label }}</option>
+                </select>
+              </label>
               <!-- Session Switcher -->
               <select :value="currentSessionId" @change="selectSession($event.target.value)" class="filter-select session-select" title="Pilih riwayat percakapan">
                 <option :value="currentSessionId">💬 Sesi Aktif ({{ currentSessionId.slice(0, 10) }}...)</option>
@@ -1970,6 +1993,7 @@ print("Memory Ingested:", mem_res)`
                 <div v-if="msg.latency" class="bubble-latency">
                   <span v-if="msg.from_cache" class="cache-badge">⚡ Instant Cache Hit ({{ msg.latency }} ms)</span>
                   <span v-else>⏱️ {{ msg.latency }} ms</span>
+                  <span v-if="msg.reranker_mode"> · {{ msg.reranker_mode }}</span>
                 </div>
 
                 <!-- Interactive Feedback & Self-Growth Bar -->

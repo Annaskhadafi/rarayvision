@@ -381,6 +381,10 @@ class RagService:
         "groq": "Groq",
         "gemini": "Google Gemini",
     }
+    RERANKER_MODE_LABELS = {
+        "local_onnx": "Local ONNX",
+        "jev": "Jev 1.13 (OpenRouter)",
+    }
 
     @staticmethod
     def _provider_config() -> Dict[str, Dict[str, Any]]:
@@ -404,6 +408,17 @@ class RagService:
         if not config[normalized]["configured"]:
             raise ValueError(f"LLM provider '{normalized}' is not configured")
         return normalized
+
+    @classmethod
+    def _resolve_reranker_mode(cls, mode: Optional[str]) -> str:
+        selected = (mode or os.getenv("RERANKER_MODE", "local_onnx")).strip().lower()
+        aliases = {"local": "local_onnx", "onnx": "local_onnx", "jev": "jev"}
+        selected = aliases.get(selected, selected)
+        if selected not in cls.RERANKER_MODE_LABELS:
+            raise ValueError("Unknown reranker mode. Use 'local_onnx' or 'jev'.")
+        if selected == "jev" and not os.getenv("OPENROUTER_API_KEY", "").strip():
+            raise ValueError("Reranker mode 'jev' requires OPENROUTER_API_KEY")
+        return selected
 
     @staticmethod
     def get_embedding_info() -> Dict[str, Any]:
@@ -447,6 +462,15 @@ class RagService:
             "openrouter_embedding_model": openrouter_emb_model,
             "pricing": "100% Free & Offline / OpenRouter Cloud",
             "reranker_model": reranker_model,
+            "reranker_mode": os.getenv("RERANKER_MODE", "local_onnx").strip().lower(),
+            "reranker_modes": [
+                {
+                    "id": mode_id,
+                    "label": label,
+                    "configured": mode_id == "local_onnx" or bool(openrouter_key),
+                }
+                for mode_id, label in RagService.RERANKER_MODE_LABELS.items()
+            ],
             "reranker_enabled": reranker_active,
             "active_llm": active_llm,
             "openai_configured": bool(openai_key),
@@ -1053,11 +1077,89 @@ class RagService:
             return None
 
     @classmethod
+    def rerank_chunks_jev(
+        cls,
+        query: str,
+        chunks: List[Dict[str, Any]],
+        top_k: int = 4,
+    ) -> List[Dict[str, Any]]:
+        """Score the already-small candidate set with Jev in one Decisions request."""
+        if not chunks or not query:
+            return chunks[:top_k]
+
+        session = get_http_session()
+        candidates = []
+        questions = {}
+        for idx, chunk in enumerate(chunks):
+            question_id = f"chunk_{idx}"
+            heading = str(chunk.get("heading") or "").strip()
+            content = str(chunk.get("content") or "").strip()[:1600]
+            candidates.append({
+                "id": question_id,
+                "text": f"[{heading}]\n{content}" if heading and heading != "General" else content,
+            })
+            questions[question_id] = {
+                "type": "score",
+                "instructions": (
+                    f"Score how directly candidate {question_id} answers the user query. "
+                    "Use the highest score only when the candidate contains the requested fact, procedure, or specification."
+                ),
+                "criteria": [
+                    "Irrelevant or does not answer the query",
+                    "Loosely related background only",
+                    "Partially useful but missing the main answer",
+                    "Relevant and likely useful for the answer",
+                    "Directly answers the query with the needed evidence",
+                ],
+            }
+
+        payload = {
+            "model": os.getenv("JEV_MODEL", "typesafe/jev-1.13").strip(),
+            "state": {"query": query, "candidates": candidates},
+            "questions": questions,
+        }
+        try:
+            response = session.post(
+                "https://openrouter.ai/api/alpha/decisions",
+                headers={
+                    "Authorization": f"Bearer {os.getenv('OPENROUTER_API_KEY').strip()}",
+                    "Content-Type": "application/json",
+                    "HTTP-Referer": "https://vision.chitrapratama.com",
+                    "X-Title": "Hero Assistant RAG",
+                },
+                json=payload,
+                timeout=float(os.getenv("JEV_TIMEOUT_SECONDS", "8")),
+            )
+            if response.status_code != 200:
+                raise RuntimeError(f"Jev reranker error {response.status_code}: {response.text[:300]}")
+
+            answers = response.json().get("answers") or {}
+            reranked = []
+            for idx, chunk in enumerate(chunks):
+                answer = answers.get(f"chunk_{idx}") or {}
+                score = answer.get("score")
+                if not isinstance(score, (int, float)):
+                    raise RuntimeError(f"Jev response missing score for chunk_{idx}")
+                copy = dict(chunk)
+                copy["vector_score"] = chunk.get("similarity_score", 0.0)
+                copy["jev_score"] = round(float(score), 4)
+                copy["jev_confidence"] = answer.get("confidence")
+                copy["reranker_score"] = round(float(score) / 4.0, 4)
+                copy["similarity_score"] = copy["reranker_score"]
+                reranked.append(copy)
+            reranked.sort(key=lambda item: item["jev_score"], reverse=True)
+            return reranked[:top_k]
+        except Exception as exc:
+            logger.exception("[RagService] Jev reranker failed")
+            raise RuntimeError("Jev reranker failed") from exc
+
+    @classmethod
     def rerank_chunks(
         cls,
         query: str,
         chunks: List[Dict[str, Any]],
-        top_k: int = 4
+        top_k: int = 4,
+        mode: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """
         Applies Cross-Encoder Reranking to candidate chunks for maximum retrieval precision.
@@ -1065,6 +1167,10 @@ class RagService:
         """
         if not chunks or not query:
             return chunks[:top_k]
+
+        selected_mode = cls._resolve_reranker_mode(mode)
+        if selected_mode == "jev":
+            return cls.rerank_chunks_jev(query, chunks, top_k=top_k)
 
         try:
             import numpy as np
@@ -1085,7 +1191,7 @@ class RagService:
             reranker_provider = os.getenv("RERANKER_PROVIDER", "").strip().lower()
             reranker_model = os.getenv("RERANKER_MODEL", "Xenova/ms-marco-MiniLM-L-6-v2").strip()
 
-            is_openrouter_reranker = bool(openrouter_key) and (
+            is_openrouter_reranker = selected_mode != "local_onnx" and bool(openrouter_key) and (
                 reranker_provider == "openrouter" or
                 any(prefix in reranker_model.lower() for prefix in ["cohere/", "nvidia/", "qwen/", "jina/"])
             )
@@ -1143,7 +1249,8 @@ class RagService:
         query: str,
         expanded_query: str,
         top_k: int,
-        enable_rerank: bool
+        enable_rerank: bool,
+        reranker_mode: Optional[str] = None,
     ) -> Optional[List[Dict[str, Any]]]:
         """
         Fast-path: Directly queries a single document's chunks from PostgreSQL without
@@ -1214,7 +1321,9 @@ class RagService:
             if not candidates or not effective_rerank:
                 return candidates[:top_k]
 
-            return cls.rerank_chunks(query, candidates, top_k=top_k)
+            return cls.rerank_chunks(query, candidates, top_k=top_k, mode=reranker_mode)
+        except RuntimeError:
+            raise
         except Exception as e:
             logger.error(f"[RagService] _search_single_document_direct exception: {e}")
             return None
@@ -1227,7 +1336,8 @@ class RagService:
         top_k: int = 4,
         document_id: Optional[str] = None,
         enable_rerank: bool = True,
-        return_vec: bool = False
+        return_vec: bool = False,
+        reranker_mode: Optional[str] = None,
     ) -> Any:
         """
         Two-stage Hybrid retrieval pipeline:
@@ -1237,6 +1347,8 @@ class RagService:
         """
         if not query or not query.strip():
             return ([], [0.0] * 384) if return_vec else []
+
+        selected_reranker_mode = cls._resolve_reranker_mode(reranker_mode)
 
         expanded_query = expand_bilingual_query(query)
 
@@ -1251,7 +1363,8 @@ class RagService:
                     query=query,
                     expanded_query=expanded_query,
                     top_k=top_k,
-                    enable_rerank=enable_rerank
+                    enable_rerank=enable_rerank,
+                    reranker_mode=selected_reranker_mode,
                 )
                 if fast_res is not None:
                     return (fast_res, [0.0] * 384) if return_vec else fast_res
@@ -1275,7 +1388,7 @@ class RagService:
         if not candidates or not effective_rerank:
             final_chunks = candidates[:top_k]
         else:
-            final_chunks = cls.rerank_chunks(query, candidates, top_k=top_k)
+            final_chunks = cls.rerank_chunks(query, candidates, top_k=top_k, mode=selected_reranker_mode)
 
         if return_vec:
             return final_chunks, query_vec
@@ -1959,7 +2072,8 @@ class RagService:
         custom_system_prompt: Optional[str] = None,
         user_id: Optional[int] = None,
         enable_rerank: bool = True,
-        provider: Optional[str] = None
+        provider: Optional[str] = None,
+        reranker_mode: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         RAG Chat Completion with Multi-Turn Persistent Memory (Redis + PostgreSQL), Two-Stage Reranking & Self-Growth:
@@ -1971,6 +2085,7 @@ class RagService:
         """
         start_time = time.perf_counter()
         selected_provider = cls._resolve_provider(provider)
+        selected_reranker_mode = cls._resolve_reranker_mode(reranker_mode)
         session_id = session_id or f"sess_{uuid.uuid4().hex[:10]}"
 
         # 1. Retrieve Active Messages (Redis L1 cache or PostgreSQL L2 fallback)
@@ -1987,7 +2102,9 @@ class RagService:
         # 2. Check Semantic RAG Cache (if standalone query without previous turns)
         is_standalone = cls._is_standalone_query(active_messages, query)
         if is_standalone:
-            cached_res = RedisService.get_rag_cache(query, document_id, selected_provider)
+            cached_res = RedisService.get_rag_cache(
+                query, document_id, selected_provider, selected_reranker_mode, enable_rerank
+            )
             if cached_res:
                 cached_res["answer"] = _normalize_markdown_image_urls(cached_res.get("answer", ""))
                 cached_res["sources"] = cls._normalize_sources(cached_res.get("sources", []))
@@ -1999,6 +2116,7 @@ class RagService:
                 cached_res["latency_ms"] = round((time.perf_counter() - start_time) * 1000, 2)
                 cached_res["from_cache"] = True
                 cached_res["session_id"] = session_id
+                cached_res["reranker_mode"] = selected_reranker_mode
                 user_msg, assistant_msg = cls._persist_chat_turn(
                     db=db,
                     session_id=session_id,
@@ -2027,9 +2145,17 @@ class RagService:
                 search_query = f"{user_history[-1][:80]} {query.strip()}"
 
         # 4. Retrieve relevant chunks from documents (with bilingual expansion & 2-stage Cross-Encoder reranking)
-        chunks, query_vec = cls.search_similar_chunks(db, search_query, top_k=top_k, document_id=document_id, enable_rerank=enable_rerank, return_vec=True)
+        chunks, query_vec = cls.search_similar_chunks(
+            db, search_query, top_k=top_k, document_id=document_id,
+            enable_rerank=enable_rerank, return_vec=True,
+            reranker_mode=selected_reranker_mode,
+        )
         if not chunks and search_query != query.strip():
-            chunks, query_vec = cls.search_similar_chunks(db, query.strip(), top_k=top_k, document_id=document_id, enable_rerank=enable_rerank, return_vec=True)
+            chunks, query_vec = cls.search_similar_chunks(
+                db, query.strip(), top_k=top_k, document_id=document_id,
+                enable_rerank=enable_rerank, return_vec=True,
+                reranker_mode=selected_reranker_mode,
+            )
 
         # 5. Retrieve learned facts from Self-Growth Memory using precomputed query_vec
         learned_facts = cls.search_learned_facts(db, search_query, top_k=3, user_id=user_id, query_vec=query_vec)
@@ -2161,11 +2287,17 @@ Pertanyaan Pengguna:
             "assistant_message_id": assistant_msg.id if assistant_msg else f"msg_{uuid.uuid4().hex[:12]}",
             "retrieved_chunks_count": len(chunks),
             "latency_ms": elapsed_ms,
+            "reranker_mode": selected_reranker_mode,
             "from_cache": False
         }
 
         if is_standalone:
-            RedisService.set_rag_cache(query, document_id, result, provider=selected_provider)
+            RedisService.set_rag_cache(
+                query, document_id, result,
+                provider=selected_provider,
+                reranker_mode=selected_reranker_mode,
+                rerank_enabled=enable_rerank,
+            )
 
         return result
 
@@ -2224,16 +2356,29 @@ Pertanyaan Pengguna:
 
         gemini_key = os.getenv("GEMINI_API_KEY", "").strip()
 
+        disable_reasoning = os.getenv("LLM_DISABLE_REASONING", "true").strip().lower() in {
+            "1", "true", "yes", "on", "enabled"
+        }
+
+        def apply_reasoning_policy(payload: Dict[str, Any], provider_name: str) -> Dict[str, Any]:
+            if disable_reasoning and provider_name == "openrouter":
+                payload["reasoning"] = {"enabled": False}
+            elif provider_name == "openai":
+                effort = os.getenv("OPENAI_REASONING_EFFORT", "").strip()
+                if effort:
+                    payload["reasoning_effort"] = effort
+            return payload
+
         def try_openai():
             if not openai_key:
                 return None
             try:
-                payload = {
+                payload = apply_reasoning_policy({
                     "model": openai_model,
                     "messages": messages,
                     "temperature": 0.2,
                     "max_tokens": 1500,
-                }
+                }, "openai")
                 resp = session.post(
                     f"{openai_base_url}/chat/completions",
                     headers={
@@ -2258,14 +2403,14 @@ Pertanyaan Pengguna:
             if not openrouter_key:
                 return None
             try:
-                payload = {
+                payload = apply_reasoning_policy({
                     "model": openrouter_model,
                     "messages": messages,
                     "temperature": 0.2,
                     "max_tokens": 4096,
-                }
+                }, "openrouter")
                 # For Gemini 3.7 Flash and reasoning models on OpenRouter, exclude thought tokens to eliminate long thinking latency (<2s response)
-                if any(x in openrouter_model.lower() for x in ["gemini-3.7", "flash", "reasoning", "deepseek", "qwq"]):
+                if not disable_reasoning and any(x in openrouter_model.lower() for x in ["gemini-3.7", "flash", "reasoning", "deepseek", "qwq"]):
                     payload["reasoning"] = {
                         "max_tokens": 0,
                         "exclude": True
