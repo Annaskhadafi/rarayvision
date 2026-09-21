@@ -22,6 +22,7 @@ except Exception:
     pass
 
 import json
+import time
 from pathlib import Path
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -220,31 +221,61 @@ def stream_upload_file(filename: str, request: Request):
             get_presigned_download_url(filename)
         )
         if presigned_url:
-            try:
-                s3_response = requests.get(presigned_url, stream=True, timeout=(5, 60))
-                if s3_response.ok:
-                    s3_content_type = s3_response.headers.get("content-type", "application/octet-stream")
-                    s3_content_length = s3_response.headers.get("content-length")
+            s3_response = None
+            s3_unavailable = False
+            s3_status = None
+            for attempt in range(3):
+                try:
+                    s3_response = requests.get(presigned_url, stream=True, timeout=(5, 60))
+                    s3_unavailable = False
+                    s3_status = s3_response.status_code
+                    if s3_response.ok:
+                        s3_content_type = s3_response.headers.get("content-type", "application/octet-stream")
+                        s3_content_length = s3_response.headers.get("content-length")
 
-                    def iter_s3_content():
-                        try:
-                            for chunk in s3_response.iter_content(chunk_size=1024 * 1024):
-                                if chunk:
-                                    yield chunk
-                        finally:
-                            s3_response.close()
+                        def iter_s3_content():
+                            try:
+                                for chunk in s3_response.iter_content(chunk_size=1024 * 1024):
+                                    if chunk:
+                                        yield chunk
+                            finally:
+                                s3_response.close()
 
-                    stream_headers = {**cors_headers, "Cache-Control": "public, max-age=3600"}
-                    if s3_content_length:
-                        stream_headers["Content-Length"] = s3_content_length
-                    return StreamingResponse(
-                        iter_s3_content(),
-                        media_type=s3_content_type,
-                        headers=stream_headers,
-                    )
-                s3_response.close()
-            except Exception as _s3_error:
-                print(f"[Uploads] S3 proxy error: {_s3_error}")
+                        stream_headers = {**cors_headers, "Cache-Control": "public, max-age=3600"}
+                        if s3_content_length:
+                            stream_headers["Content-Length"] = s3_content_length
+                        return StreamingResponse(
+                            iter_s3_content(),
+                            media_type=s3_content_type,
+                            headers=stream_headers,
+                        )
+
+                    s3_response.close()
+                    if s3_status not in (429, 500, 502, 503, 504) or attempt == 2:
+                        break
+                except requests.exceptions.RequestException as _s3_error:
+                    s3_unavailable = True
+                    if attempt == 2:
+                        print(
+                            f"[Uploads] S3 proxy error ({type(_s3_error).__name__}) "
+                            f"after {attempt + 1} attempts"
+                        )
+                        break
+                if attempt < 2:
+                    time.sleep(0.25 * (attempt + 1))
+
+            if s3_unavailable:
+                return JSONResponse(
+                    status_code=504,
+                    content={"status": "error", "message": "Object storage temporarily unavailable"},
+                    headers=cors_headers,
+                )
+            if s3_status in (429, 500, 502, 503, 504):
+                return JSONResponse(
+                    status_code=502,
+                    content={"status": "error", "message": "Object storage returned an upstream error"},
+                    headers=cors_headers,
+                )
         return JSONResponse(
             status_code=404,
             content={"status": "error", "message": f"File '{filename}' not found"},
