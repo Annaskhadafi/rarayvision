@@ -59,6 +59,44 @@ class ProviderSelectionTest(unittest.TestCase):
             self.assertEqual(RagService._call_llm_messages([{"role": "user", "content": "hi"}], "openrouter"), "recovered")
             cache_write.assert_not_called()
 
+    def test_openai_compatible_accepts_concatenated_json_response(self):
+        os.environ["OPENAI_API_KEY"] = "test-secret"
+        os.environ["OPENAI_BASE_URL"] = "https://gateway.test/v1"
+        os.environ["OPENAI_MODEL"] = "test-model"
+
+        class Response:
+            status_code = 200
+            text = '{"choices":[{"message":{"content":"ok"}}]}{"usage":{"total_tokens":1}}'
+
+            def json(self):
+                raise ValueError("Extra data")
+
+        class Session:
+            def post(self, *args, **kwargs):
+                return Response()
+
+        with patch("backend.app.services.rag_service.get_http_session", return_value=Session()):
+            self.assertEqual(
+                RagService._call_llm_messages([{"role": "user", "content": "hi"}], "openai"),
+                "ok",
+            )
+
+    def test_local_embedding_model_is_not_sent_to_openrouter(self):
+        class LocalModel:
+            def embed(self, *args, **kwargs):
+                return iter([[0.1, 0.2, 0.3]])
+
+        with patch.dict(os.environ, {
+            "OPENROUTER_API_KEY": "test-secret",
+            "EMBEDDING_PROVIDER": "openrouter",
+        }), patch.object(RagService, "generate_embeddings_openrouter") as remote, \
+             patch("backend.app.services.rag_service.get_fastembed_model", return_value=LocalModel()):
+            self.assertEqual(
+                RagService.generate_single_embedding("hello", "BAAI/bge-small-en-v1.5"),
+                [0.1, 0.2, 0.3],
+            )
+            remote.assert_not_called()
+
     def test_standalone_detection_ignores_only_opening_greeting(self):
         self.assertTrue(RagService._is_standalone_query([
             {"role": "assistant", "content": "Halo! Ada yang bisa saya bantu?"},

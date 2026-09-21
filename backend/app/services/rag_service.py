@@ -1,4 +1,5 @@
 import os
+import json
 import re
 import uuid
 import time
@@ -560,7 +561,8 @@ class RagService:
         openrouter_emb_model = os.getenv("OPENROUTER_EMBEDDING_MODEL", "qwen/qwen3-embedding-8b").strip()
 
         # If model matches OpenRouter or active provider is OpenRouter
-        if (model_name and "qwen" in model_name.lower()) or (openrouter_key and os.getenv("EMBEDDING_PROVIDER", "").lower() == "openrouter"):
+        use_openrouter = openrouter_key and os.getenv("EMBEDDING_PROVIDER", "").lower() == "openrouter"
+        if (model_name and "qwen" in model_name.lower()) or (use_openrouter and not model_name):
             or_embs = cls.generate_embeddings_openrouter([text], model=model_name or openrouter_emb_model)
             if or_embs and len(or_embs) > 0 and len(or_embs[0]) > 0:
                 return or_embs[0]
@@ -2244,7 +2246,14 @@ Pertanyaan Pengguna:
                     timeout=45
                 )
                 if resp.status_code == 200:
-                    data = resp.json()
+                    try:
+                        data = resp.json()
+                    except ValueError:
+                        # Some OpenAI-compatible gateways append a second JSON document.
+                        raw = resp.text.lstrip()
+                        data, end = json.JSONDecoder().raw_decode(raw)
+                        if raw[end:].strip():
+                            logger.warning("[RagService] OpenAI-compatible response contained multiple JSON documents; using the first")
                     content = data["choices"][0]["message"]["content"] or ""
                     cleaned = RagService._clean_llm_response(content)
                     return cleaned if cleaned else (content.strip() or None)
