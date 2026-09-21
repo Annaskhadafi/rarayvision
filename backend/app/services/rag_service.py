@@ -32,6 +32,31 @@ logger = logging.getLogger(__name__)
 PUBLIC_APP_URL = os.getenv("PUBLIC_APP_URL", "").rstrip("/")
 
 
+def _repair_mojibake(value: str) -> str:
+    """Repair common UTF-8 text decoded once as Latin-1/Windows-1252."""
+    text = str(value or "")
+    if not text:
+        return text
+
+    def score(candidate: str) -> int:
+        markers = sum(candidate.count(marker) for marker in ("Ã", "Â", "â", "ð", "�"))
+        controls = sum(1 for char in candidate if ord(char) < 32 and char not in "\n\r\t")
+        return markers + controls
+
+    original_score = score(text)
+    if original_score == 0:
+        return text
+
+    candidates = []
+    for encoding in ("latin1", "cp1252"):
+        try:
+            candidates.append(text.encode(encoding).decode("utf-8"))
+        except (UnicodeEncodeError, UnicodeDecodeError):
+            continue
+    repaired = min(candidates, key=score, default=text)
+    return repaired if score(repaired) < original_score else text
+
+
 def _normalize_image_url(url: str) -> str:
     """Return a stable app-proxy URL for private storage, preserving external URLs."""
     value = str(url or "").strip()
@@ -63,6 +88,7 @@ def _normalize_image_url(url: str) -> str:
 
 def _normalize_markdown_image_urls(markdown: str) -> str:
     """Normalize Markdown image destinations without changing ordinary Markdown text."""
+    markdown = _repair_mojibake(markdown)
     if not markdown:
         return markdown
 
@@ -2240,7 +2266,14 @@ class RagService:
             "   - Jika informasi spesifik tidak ditemukan di dokumen, sampaikan secara singkat dan lugas tanpa spekulasi panjang.\n"
             "5. REFERENSI GAMBAR & DIAGRAM (PENTING):\n"
             "   - Jika konteks [Sumber] di bawah memuat tag gambar `![alt](url)` yang relevan dengan topik pertanyaan pengguna, ANDA WAJIB menyertakan tag gambar Markdown `![alt](url)` tersebut di dalam respons penjelasan Anda agar pengguna dapat melihat diagram visualnya secara langsung.\n"
-            "   - Gunakan URL gambar persis sama seperti yang tertulis di [Sumber], jangan mengubah path tautan URL-nya."
+            "   - Gunakan URL gambar persis sama seperti yang tertulis di [Sumber], jangan mengubah path tautan URL-nya.\n"
+            "6. EXACT MATCH & GROUNDING:\n"
+            "   - Jika pertanyaan menyebut product line, pola, ukuran, atau kode tertentu, gunakan hanya sumber yang cocok dengan identitas tersebut.\n"
+            "   - Jangan mengganti produk dengan produk terdekat atau menyalin katalog lain. Jika exact match tidak ditemukan, katakan data tidak ditemukan.\n"
+            "7. FORMAT JAWABAN:\n"
+            "   - Jika pengguna meminta satu nilai, jawab nilai itu saja dengan satuan. Jangan menyalin seluruh spesifikasi atau membuat JSON kecuali diminta.\n"
+            "8. DATA ASLI:\n"
+            "   - Pertahankan angka, satuan, simbol, dan tanda desimal dari sumber; jangan mengarang atau mengonversi ulang."
         )
 
         current_prompt = f"""Konteks Dokumen & Memori Pengetahuan (Markdown):
@@ -2441,7 +2474,7 @@ Pertanyaan Pengguna:
                 payload = apply_reasoning_policy({
                     "model": openai_model,
                     "messages": messages,
-                    "temperature": 0.2,
+                    "temperature": 0.0,
                     "max_tokens": 1500,
                 }, "openai")
                 resp = session.post(
@@ -2470,7 +2503,7 @@ Pertanyaan Pengguna:
                 payload = apply_reasoning_policy({
                     "model": openrouter_model,
                     "messages": messages,
-                    "temperature": 0.2,
+                    "temperature": 0.0,
                     "max_tokens": 4096,
                 }, "openrouter")
                 # For Gemini 3.7 Flash and reasoning models on OpenRouter, exclude thought tokens to eliminate long thinking latency (<2s response)
@@ -2509,7 +2542,7 @@ Pertanyaan Pengguna:
                 payload = {
                     "model": groq_model,
                     "messages": messages,
-                    "temperature": 0.2,
+                    "temperature": 0.0,
                     "max_tokens": 4096,
                 }
                 groq_reasoning_models = ["deepseek", "qwq", "r1", "qwen"]

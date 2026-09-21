@@ -4,7 +4,7 @@ import unittest
 from unittest.mock import patch
 from types import SimpleNamespace
 
-from backend.app.services.rag_service import RagService
+from backend.app.services.rag_service import RagService, _repair_mojibake
 from backend.app.services.redis_service import RedisService
 
 
@@ -157,6 +157,10 @@ class ProviderSelectionTest(unittest.TestCase):
                 RagService.generate_embeddings_openrouter(["text"], model="BAAI/bge-small-en-v1.5")
             )
         get_session.assert_not_called()
+
+    def test_mojibake_is_repaired_without_changing_clean_text(self):
+        self.assertEqual(_repair_mojibake("Size: 12.00R24 â 700â¯kPa â"), "Size: 12.00R24 – 700 kPa ★")
+        self.assertEqual(_repair_mojibake("Size: 12.00R24 - 700 kPa"), "Size: 12.00R24 - 700 kPa")
 
     def test_standalone_detection_ignores_only_opening_greeting(self):
         self.assertTrue(RagService._is_standalone_query([
