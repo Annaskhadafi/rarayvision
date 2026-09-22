@@ -14,6 +14,7 @@ const isSaving = ref(false)
 const isTesting = ref(false)
 const isLoading = ref(false)
 const isUploading = ref(false)
+const uploadProgress = reactive({ uploaded: 0, total: 0, percent: 0, currentName: '' })
 const notice = ref('')
 const errorMessage = ref('')
 const copied = ref(false)
@@ -141,20 +142,58 @@ const chooseFiles = (dataset) => {
   fileInput.value?.click()
 }
 
+const uploadSingleFile = (datasetId, file, onProgress) => new Promise((resolve, reject) => {
+  const xhr = new XMLHttpRequest()
+  xhr.open('POST', `${API_BASE_URL}/api/v1/datasets/raw/${datasetId}/files`)
+  xhr.setRequestHeader('Authorization', authHeaders().Authorization)
+  xhr.upload.onprogress = (event) => {
+    if (event.lengthComputable) onProgress(Math.round((event.loaded / event.total) * 100))
+  }
+  xhr.onerror = () => reject(new Error('Koneksi upload terputus.'))
+  xhr.onload = () => {
+    let data = {}
+    try { data = JSON.parse(xhr.responseText || '{}') } catch { data = { detail: 'Respons server tidak valid.' } }
+    if (xhr.status >= 200 && xhr.status < 300) resolve(data)
+    else reject(new Error(data.detail || `Upload gagal (${xhr.status})`))
+  }
+  const body = new FormData()
+  body.append('files', file)
+  xhr.send(body)
+})
+
 const uploadFiles = async (event) => {
   const files = Array.from(event.target.files || [])
   event.target.value = ''
   if (!files.length || !selectedDataset.value) return
+  const datasetId = selectedDataset.value.id
   isUploading.value = true
+  uploadProgress.uploaded = 0
+  uploadProgress.total = files.length
+  uploadProgress.percent = 0
+  uploadProgress.currentName = ''
   clearMessage()
+  let uploadedCount = 0
   try {
-    const body = new FormData()
-    files.forEach(file => body.append('files', file))
-    await request(`/api/v1/datasets/raw/${selectedDataset.value.id}/files`, { method: 'POST', body })
-    notice.value = `${files.length} file berhasil diunggah ke S3 dataset.`
+    for (const file of files) {
+      uploadProgress.currentName = file.name
+      uploadProgress.percent = 0
+      const data = await uploadSingleFile(datasetId, file, percent => { uploadProgress.percent = percent })
+      uploadedCount += 1
+      uploadProgress.uploaded = uploadedCount
+      uploadProgress.percent = 100
+      selectedDataset.value = data.dataset
+      const index = datasets.value.findIndex(item => item.id === datasetId)
+      if (index >= 0) datasets.value[index] = data.dataset
+    }
+    notice.value = `${uploadedCount} dari ${files.length} file berhasil diunggah ke S3 dataset.`
     await loadDatasets()
-  } catch (error) { showError(error.message) }
-  finally { isUploading.value = false }
+  } catch (error) {
+    showError(`Upload berhenti setelah ${uploadedCount} dari ${files.length} file: ${error.message}`)
+    if (uploadedCount) await loadDatasets()
+  } finally {
+    isUploading.value = false
+    uploadProgress.currentName = ''
+  }
 }
 
 const renameFile = async (file) => {
@@ -291,6 +330,7 @@ onMounted(async () => {
       <div class="panel explorer-panel">
         <div v-if="selectedDataset" class="explorer-content">
           <div class="explorer-heading"><div><p class="eyebrow">RAW DATASET / {{ selectedDataset.folder }}</p><h2>{{ selectedDataset.name }}</h2><p>{{ selectedDataset.files?.length || 0 }} file · dibuat {{ formatDate(selectedDataset.created_at) }}</p></div><div class="row-actions"><button class="icon-btn" title="Edit nama" @click="renameDataset(selectedDataset)">Edit</button><button class="icon-btn danger-action" title="Hapus dataset" @click="deleteDataset(selectedDataset)">Hapus dataset</button><button class="primary-btn" :disabled="isUploading" @click="chooseFiles(selectedDataset)">{{ isUploading ? 'Mengunggah…' : '＋ Upload file' }}</button><input ref="fileInput" type="file" multiple hidden @change="uploadFiles" /></div></div>
+          <div v-if="isUploading" class="upload-progress"><div class="progress-heading"><strong>Upload {{ uploadProgress.uploaded }} / {{ uploadProgress.total }}</strong><span>{{ uploadProgress.percent }}% · {{ uploadProgress.currentName }}</span></div><progress :value="uploadProgress.percent" max="100"></progress></div>
           <div class="import-box"><div><strong>URL incremental import Label Studio</strong><code>{{ importSnapshotUrl || 'Klik “Salin URL” untuk membuat snapshot aman' }}</code><small v-if="selectedDataset.pending_file_count">{{ selectedDataset.pending_file_count }} file pending. Snapshot tidak berubah walau ada upload baru.</small><small v-else>Semua file sudah ditandai pernah di-import.</small></div><div class="import-actions"><button class="secondary-btn" :disabled="!selectedDataset.pending_file_count" @click="copyImportUrl">{{ copied ? '✓ Tersalin' : 'Salin URL' }}</button><button v-if="importSnapshotIds.length" class="primary-btn" :disabled="isMarkingImport" @click="markImported">{{ isMarkingImport ? 'Menyimpan…' : `Tandai ${importSnapshotIds.length} file sudah di-import` }}</button></div></div>
           <div class="file-table-wrap"><table><thead><tr><th>Nama file</th><th>Status import</th><th>Ukuran</th><th>Diunggah</th><th></th></tr></thead><tbody><tr v-for="file in selectedDataset.files" :key="file.id"><td><a :href="file.url" target="_blank" rel="noopener">▧ {{ file.filename }}</a></td><td><span :class="['import-status', file.label_studio_imported_at ? 'done' : 'pending']">{{ file.label_studio_imported_at ? 'Sudah diimport' : 'Belum diimport' }}</span></td><td>{{ formatBytes(file.size_bytes) }}</td><td>{{ formatDate(file.created_at) }}</td><td class="actions"><button @click="renameFile(file)">Edit</button><button class="danger" @click="deleteFile(file)">Hapus</button></td></tr><tr v-if="!selectedDataset.files?.length"><td colspan="5" class="empty">Folder masih kosong. Upload file pertama.</td></tr></tbody></table></div>
         </div>
@@ -329,6 +369,7 @@ button:disabled { opacity: .6; cursor: wait; }
 .status-pill.ready { background: #def7e8; color: #197548; }.status-pill.pending { background: #fff2d5; color: #a86600; }.count-badge { background: #eaf1ff; color: #2463c5; }
 .workspace-grid { display: grid; grid-template-columns: minmax(250px, .8fr) minmax(0, 2fr); gap: 22px; }
 .dataset-panel { padding: 18px 12px; }.explorer-panel { min-height: 440px; padding: 22px; }.dataset-item { display: flex; gap: 11px; width: 100%; text-align: left; padding: 12px 10px; border-radius: 10px; background: transparent; color: inherit; }.dataset-item:hover, .dataset-item.active { background: #eef5ff; }.folder-icon { color: #e49b28; font-size: 1.15rem; }.dataset-info { min-width: 0; }.dataset-info strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.dataset-info small { margin-top: 3px; }.empty { color: #8793a6; text-align: center; padding: 34px 14px; }.empty.large { display: grid; min-height: 380px; place-items: center; }.import-box { margin: 20px 0; padding: 14px; background: #f5f8fd; border-radius: 10px; }.import-box strong { display: block; font-size: .78rem; }.import-box code { display: block; max-width: 720px; margin-top: 6px; color: #4a628b; font-size: .74rem; word-break: break-all; }.import-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }.import-status { border-radius: 999px; padding: 5px 8px; font-size: .68rem; font-weight: 800; }.import-status.done { color: #197548; background: #def7e8; }.import-status.pending { color: #a86600; background: #fff2d5; }.file-table-wrap { overflow-x: auto; }table { width: 100%; border-collapse: collapse; font-size: .82rem; }th, td { padding: 12px 9px; border-bottom: 1px solid #edf0f5; text-align: left; white-space: nowrap; }th { color: #8290a6; font-size: .69rem; text-transform: uppercase; letter-spacing: .06em; }td a { color: #275fae; text-decoration: none; }.actions { text-align: right; }.actions button { padding: 6px 8px; background: transparent; color: #476892; }.actions .danger { color: #c44949; }.alert { padding: 12px 14px; border-radius: 10px; margin-bottom: 16px; font-size: .84rem; }.alert.error { color: #a63737; background: #fff0f0; border: 1px solid #ffd2d2; }.alert.success { color: #23764d; background: #effbf4; border: 1px solid #cdeedb; }
+.upload-progress { margin: 14px 0 18px; padding: 12px 14px; border: 1px solid #dbe7fb; border-radius: 10px; background: #f7faff; }.progress-heading { display: flex; justify-content: space-between; gap: 12px; color: #476892; font-size: .78rem; }.progress-heading span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.upload-progress progress { display: block; width: 100%; height: 8px; margin-top: 9px; accent-color: #2463c5; }
  .danger-action { color: #c44949; }
 @media (max-width: 900px) { .form-grid { grid-template-columns: repeat(2, 1fr); }.workspace-grid { grid-template-columns: 1fr; } }
 @media (max-width: 600px) { .page-header, .explorer-heading { align-items: flex-start; flex-direction: column; }.page-header .primary-btn { width: 100%; }.form-grid { grid-template-columns: 1fr; }.settings-card, .explorer-panel { padding: 16px; }.import-box { align-items: flex-start; flex-direction: column; }.import-actions, .import-box .secondary-btn, .import-box .primary-btn { width: 100%; }.import-actions { flex-direction: column; } }
