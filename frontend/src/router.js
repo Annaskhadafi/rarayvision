@@ -135,6 +135,11 @@ const routes = [
     component: () => import('./views/models/DataStudioView.vue'),
     meta: { requiresAuth: true }
   },
+  {
+    path: '/models/dataset-storage',
+    component: () => import('./views/models/DatasetStorageView.vue'),
+    meta: { requiresAuth: true }
+  },
   // Camera Routes
   { path: '/cameras', redirect: '/cameras/grid' },
   {

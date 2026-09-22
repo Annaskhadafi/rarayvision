@@ -1,6 +1,6 @@
 import uuid
 import datetime
-from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, Boolean, Float
+from sqlalchemy import BigInteger, Column, Integer, String, Text, DateTime, ForeignKey, Boolean, Float
 from sqlalchemy.orm import relationship
 try:
     from backend.app.database.database import Base
@@ -268,3 +268,57 @@ class MLDataset(Base):
     artifacts = Column(Text, default="{}")
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
+
+
+class DatasetStorageConfig(Base):
+    """Dedicated S3-compatible storage settings for raw datasets."""
+    __tablename__ = "dataset_storage_configs"
+
+    id = Column(Integer, primary_key=True, default=1)
+    endpoint_url = Column(String(500), nullable=False)
+    bucket = Column(String(255), nullable=False)
+    region = Column(String(100), nullable=False, default="us-east-1")
+    prefix = Column(String(500), nullable=False, default="datasets")
+    access_key_id = Column(String(255), nullable=False)
+    secret_access_key = Column(String(500), nullable=False)
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
+
+
+class RawDataset(Base):
+    """A named raw dataset workspace backed by the dedicated dataset bucket."""
+    __tablename__ = "raw_datasets"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    name = Column(String(160), nullable=False)
+    folder = Column(String(500), unique=True, nullable=False, index=True)
+    status = Column(String(30), default="active", nullable=False)
+    storage_endpoint_url = Column(String(500), nullable=False)
+    storage_bucket = Column(String(255), nullable=False)
+    storage_region = Column(String(100), nullable=False)
+    storage_access_key_id = Column(String(255), nullable=False)
+    storage_secret_access_key = Column(String(500), nullable=False)
+    file_count = Column(Integer, default=0, nullable=False)
+    total_bytes = Column(BigInteger, default=0, nullable=False)
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
+    last_uploaded_at = Column(DateTime, nullable=True)
+
+    files = relationship("RawDatasetFile", back_populates="dataset", cascade="all, delete-orphan")
+
+
+class RawDatasetFile(Base):
+    """Metadata for one object in a raw dataset."""
+    __tablename__ = "raw_dataset_files"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    dataset_id = Column(String(36), ForeignKey("raw_datasets.id", ondelete="CASCADE"), nullable=False, index=True)
+    status = Column(String(30), default="active", nullable=False)
+    filename = Column(String(255), nullable=False)
+    s3_key = Column(String(1000), unique=True, nullable=False)
+    content_type = Column(String(150), nullable=False, default="application/octet-stream")
+    size_bytes = Column(BigInteger, default=0, nullable=False)
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
+
+    dataset = relationship("RawDataset", back_populates="files")
