@@ -9,7 +9,7 @@ from datetime import datetime
 from typing import List, Optional
 from urllib.parse import urlencode
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, validator
 from sqlalchemy.orm import Session
@@ -411,7 +411,7 @@ def delete_raw_dataset(dataset_id: str, db: Session = Depends(get_db), _user: Us
 
 
 @router.get("/raw/files/{file_id}/content")
-def stream_raw_file(file_id: str, db: Session = Depends(get_db)):
+def stream_raw_file(file_id: str, request: Request, db: Session = Depends(get_db)):
     item = db.query(RawDatasetFile).filter(RawDatasetFile.id == file_id).first()
     if not item:
         raise HTTPException(status_code=404, detail="File tidak ditemukan.")
@@ -432,6 +432,7 @@ def stream_raw_file(file_id: str, db: Session = Depends(get_db)):
 
     safe_inline_types = {"image/jpeg", "image/png", "image/webp", "image/gif", "image/bmp"}
     disposition = "inline" if item.content_type.lower() in safe_inline_types else "attachment"
+    origin = request.headers.get("origin", "*")
     return StreamingResponse(
         iterator(),
         media_type=item.content_type,
@@ -439,6 +440,10 @@ def stream_raw_file(file_id: str, db: Session = Depends(get_db)):
             "Content-Disposition": f'{disposition}; filename="{item.filename}"',
             "X-Content-Type-Options": "nosniff",
             "Content-Security-Policy": "sandbox",
+            "Access-Control-Allow-Origin": origin,
+            "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS",
+            "Access-Control-Allow-Headers": "*",
+            "Vary": "Origin",
         },
     )
 
