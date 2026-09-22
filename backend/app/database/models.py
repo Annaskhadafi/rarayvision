@@ -305,6 +305,7 @@ class RawDataset(Base):
     last_uploaded_at = Column(DateTime, nullable=True)
 
     files = relationship("RawDatasetFile", back_populates="dataset", cascade="all, delete-orphan")
+    import_batches = relationship("RawDatasetImportBatch", cascade="all, delete-orphan")
 
 
 class RawDatasetFile(Base):
@@ -318,7 +319,19 @@ class RawDatasetFile(Base):
     s3_key = Column(String(1000), unique=True, nullable=False)
     content_type = Column(String(150), nullable=False, default="application/octet-stream")
     size_bytes = Column(BigInteger, default=0, nullable=False)
+    label_studio_imported_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
 
     dataset = relationship("RawDataset", back_populates="files")
+
+
+class RawDatasetImportBatch(Base):
+    """Frozen file IDs used by one Label Studio import URL."""
+    __tablename__ = "raw_dataset_import_batches"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    dataset_id = Column(String(36), ForeignKey("raw_datasets.id", ondelete="CASCADE"), nullable=False, index=True)
+    file_ids = Column(Text, nullable=False)
+    imported_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)

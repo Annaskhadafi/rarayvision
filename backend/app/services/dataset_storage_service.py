@@ -42,8 +42,31 @@ class DatasetStorageService:
     def test_connection(self):
         self._client().head_bucket(Bucket=self.config["bucket"])
 
-    def upload_fileobj(self, fileobj: BinaryIO, key: str, content_type: str):
-        self._client().upload_fileobj(fileobj, self.config["bucket"], key, ExtraArgs={"ContentType": content_type})
+    def upload_fileobj(self, fileobj: BinaryIO, key: str, content_type: str, content_length: int = 0):
+        """Upload through a presigned PUT; Cloudhost's S3 proxy rejects some direct boto3 uploads."""
+        try:
+            import requests
+
+            client = self._client()
+            url = client.generate_presigned_url(
+                "put_object",
+                Params={"Bucket": self.config["bucket"], "Key": key, "ContentType": content_type},
+                ExpiresIn=3600,
+            )
+            fileobj.seek(0)
+            response = requests.put(
+                url,
+                data=fileobj,
+                headers={"Content-Type": content_type, "Content-Length": str(max(0, content_length))},
+                timeout=(10, 120),
+            )
+            if response.status_code not in (200, 201):
+                detail = (response.text or "").strip()[:500]
+                raise DatasetStorageError(f"S3 PUT gagal ({response.status_code}){': ' + detail if detail else '.'}")
+        except DatasetStorageError:
+            raise
+        except Exception as exc:
+            raise DatasetStorageError(f"S3 PUT gagal: {exc}") from exc
 
     def copy_object(self, source_key: str, target_key: str):
         self._client().copy_object(

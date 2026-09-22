@@ -74,6 +74,15 @@ try:
 except Exception as _e:
     print(f"[DB] Feedback column migration skipped: {_e}")
 
+# Keep incremental Label Studio import state available on existing raw dataset databases.
+try:
+    with engine.begin() as _conn:
+        from sqlalchemy import inspect
+        if "label_studio_imported_at" not in {c["name"] for c in inspect(engine).get_columns("raw_dataset_files")}:
+            _conn.exec_driver_sql("ALTER TABLE raw_dataset_files ADD COLUMN label_studio_imported_at TIMESTAMP")
+except Exception as _e:
+    print(f"[DB] Raw dataset import-state migration skipped: {_e}")
+
 # Ensure embedding_v2 column exists in faces table
 try:
     with engine.connect() as _conn:

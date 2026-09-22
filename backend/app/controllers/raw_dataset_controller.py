@@ -1,4 +1,5 @@
 import asyncio
+import json
 import mimetypes
 import os
 import re
@@ -6,6 +7,7 @@ import threading
 import uuid
 from datetime import datetime
 from typing import List, Optional
+from urllib.parse import urlencode
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
@@ -15,17 +17,18 @@ from sqlalchemy.orm import Session
 try:
     from backend.app.core.deps import get_current_user
     from backend.app.database.database import get_db
-    from backend.app.database.models import DatasetStorageConfig, RawDataset, RawDatasetFile, User
+    from backend.app.database.models import DatasetStorageConfig, RawDataset, RawDatasetFile, RawDatasetImportBatch, User
     from backend.app.services.dataset_storage_service import DatasetStorageError, DatasetStorageService
 except ImportError:
     from app.core.deps import get_current_user
     from app.database.database import get_db
-    from app.database.models import DatasetStorageConfig, RawDataset, RawDatasetFile, User
+    from app.database.models import DatasetStorageConfig, RawDataset, RawDatasetFile, RawDatasetImportBatch, User
     from app.services.dataset_storage_service import DatasetStorageError, DatasetStorageService
 
 router = APIRouter(prefix="/api/v1/datasets", tags=["Raw Dataset Storage"])
 PUBLIC_APP_URL = os.getenv("PUBLIC_APP_URL", "https://vision.chitraparatama.com").rstrip("/")
 _storage_config_lock = threading.Lock()
+_LABEL_STUDIO_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp", "image/gif", "image/bmp"}
 
 
 class StorageConfigRequest(BaseModel):
@@ -52,6 +55,11 @@ class DatasetNameRequest(BaseModel):
 
 class FileNameRequest(BaseModel):
     filename: str = Field(..., min_length=1, max_length=255)
+
+
+class LabelStudioImportRequest(BaseModel):
+    batch_id: Optional[str] = None
+    file_ids: Optional[List[str]] = None
 
 
 def _clean_prefix(value: Optional[str]) -> str:
@@ -125,8 +133,14 @@ def _get_dataset_service(dataset: RawDataset):
         raise HTTPException(status_code=400, detail="Konfigurasi storage dataset ini tidak lengkap.") from exc
 
 
-def _dataset_url(dataset_id: str):
-    return f"{PUBLIC_APP_URL}/api/v1/datasets/raw/{dataset_id}/label-studio.json"
+def _dataset_url(dataset_id: str, pending=False):
+    suffix = "label-studio-pending.json" if pending else "label-studio.json"
+    return f"{PUBLIC_APP_URL}/api/v1/datasets/raw/{dataset_id}/{suffix}"
+
+
+def _pending_dataset_url(dataset_id: str, batch_id: str):
+    query = urlencode({"batch_id": batch_id})
+    return f"{_dataset_url(dataset_id, pending=True)}?{query}"
 
 
 def _file_url(file_id: str):
@@ -140,6 +154,7 @@ def _file_payload(item: RawDatasetFile):
         "filename": item.filename,
         "content_type": item.content_type,
         "size_bytes": item.size_bytes,
+        "label_studio_imported_at": item.label_studio_imported_at.isoformat() if item.label_studio_imported_at else None,
         "created_at": item.created_at.isoformat() if item.created_at else None,
         "updated_at": item.updated_at.isoformat() if item.updated_at else None,
         "url": _file_url(item.id),
@@ -158,6 +173,9 @@ def _dataset_payload(item: RawDataset, include_files=False):
         "updated_at": item.updated_at.isoformat() if item.updated_at else None,
         "last_uploaded_at": item.last_uploaded_at.isoformat() if item.last_uploaded_at else None,
         "label_studio_import_url": _dataset_url(item.id),
+        "label_studio_pending_import_url": _dataset_url(item.id, pending=True),
+        "pending_file_count": sum(1 for file in item.files if file.status == "active" and not file.label_studio_imported_at and file.content_type.lower() in _LABEL_STUDIO_IMAGE_TYPES),
+        "imported_file_count": sum(1 for file in item.files if file.status == "active" and file.label_studio_imported_at and file.content_type.lower() in _LABEL_STUDIO_IMAGE_TYPES),
     }
     if include_files:
         result["files"] = [_file_payload(file) for file in sorted(item.files, key=lambda row: row.created_at or datetime.min, reverse=True)]
@@ -304,7 +322,7 @@ async def upload_raw_files(dataset_id: str, files: List[UploadFile] = File(...),
                 size = incoming.file.tell()
                 await incoming.seek(0)
             key = f"{dataset.folder}/{uuid.uuid4().hex[:12]}-{filename}"
-            await asyncio.to_thread(service.upload_fileobj, incoming.file, key, content_type)
+            await asyncio.to_thread(service.upload_fileobj, incoming.file, key, content_type, size)
             uploaded_keys.append(key)
             uploaded.append(RawDatasetFile(dataset_id=dataset.id, filename=filename, s3_key=key, content_type=content_type, size_bytes=size))
         for item in uploaded:
@@ -430,8 +448,82 @@ def label_studio_tasks(dataset_id: str, db: Session = Depends(get_db)):
     dataset = db.query(RawDataset).filter(RawDataset.id == dataset_id).first()
     if not dataset:
         raise HTTPException(status_code=404, detail="Raw dataset tidak ditemukan.")
+    return _label_studio_tasks(dataset)
+
+
+def _label_studio_tasks(dataset, pending=False, file_ids=None):
+    selected_ids = set(file_ids or [])
     return [
-        {"data": {"image": _file_url(item.id), "original_filename": item.filename, "dataset": dataset.name}}
+        {"data": {"image": _file_url(item.id), "original_filename": item.filename, "dataset": dataset.name, "external_id": item.id}}
         for item in dataset.files
-        if dataset.status == "active" and item.status == "active" and item.content_type.lower() in {"image/jpeg", "image/png", "image/webp", "image/gif", "image/bmp"}
+        if dataset.status == "active"
+        and item.status == "active"
+        and (not pending or not item.label_studio_imported_at)
+        and (not selected_ids or item.id in selected_ids)
+        and item.content_type.lower() in _LABEL_STUDIO_IMAGE_TYPES
     ]
+
+
+@router.get("/raw/{dataset_id}/label-studio-pending.json")
+def label_studio_pending_tasks(dataset_id: str, batch_id: Optional[str] = None, db: Session = Depends(get_db)):
+    dataset = db.query(RawDataset).filter(RawDataset.id == dataset_id).first()
+    if not dataset:
+        raise HTTPException(status_code=404, detail="Raw dataset tidak ditemukan.")
+    selected_ids = None
+    if batch_id:
+        batch = db.query(RawDatasetImportBatch).filter(RawDatasetImportBatch.id == batch_id, RawDatasetImportBatch.dataset_id == dataset_id).first()
+        if not batch:
+            raise HTTPException(status_code=404, detail="Snapshot import tidak ditemukan.")
+        selected_ids = json.loads(batch.file_ids)
+    return _label_studio_tasks(dataset, pending=True, file_ids=selected_ids or None)
+
+
+@router.post("/raw/{dataset_id}/label-studio/prepare")
+def prepare_label_studio_import(dataset_id: str, db: Session = Depends(get_db), _user: User = Depends(get_current_user)):
+    dataset = db.query(RawDataset).filter(RawDataset.id == dataset_id).first()
+    if not dataset:
+        raise HTTPException(status_code=404, detail="Raw dataset tidak ditemukan.")
+    file_ids = [
+        item.id for item in dataset.files
+        if item.status == "active" and not item.label_studio_imported_at and item.content_type.lower() in _LABEL_STUDIO_IMAGE_TYPES
+    ]
+    if not file_ids:
+        raise HTTPException(status_code=409, detail="Tidak ada file baru yang siap di-import.")
+    batch = RawDatasetImportBatch(dataset_id=dataset.id, file_ids=json.dumps(file_ids))
+    db.add(batch)
+    db.commit()
+    db.refresh(batch)
+    return {"success": True, "batch_id": batch.id, "file_ids": file_ids, "url": _pending_dataset_url(dataset.id, batch.id)}
+
+
+@router.post("/raw/{dataset_id}/label-studio/mark-imported")
+def mark_label_studio_imported(dataset_id: str, payload: LabelStudioImportRequest, db: Session = Depends(get_db), _user: User = Depends(get_current_user)):
+    dataset = db.query(RawDataset).filter(RawDataset.id == dataset_id).first()
+    if not dataset:
+        raise HTTPException(status_code=404, detail="Raw dataset tidak ditemukan.")
+    batch = None
+    if payload.batch_id:
+        batch = db.query(RawDatasetImportBatch).filter(RawDatasetImportBatch.id == payload.batch_id, RawDatasetImportBatch.dataset_id == dataset_id).first()
+        if not batch:
+            raise HTTPException(status_code=404, detail="Snapshot import tidak ditemukan.")
+        file_ids = json.loads(batch.file_ids)
+    else:
+        file_ids = payload.file_ids or []
+    file_ids = list(dict.fromkeys(file_ids))
+    if not file_ids:
+        raise HTTPException(status_code=400, detail="Snapshot import kosong.")
+    files = db.query(RawDatasetFile).filter(
+        RawDatasetFile.dataset_id == dataset_id,
+        RawDatasetFile.id.in_(file_ids),
+        RawDatasetFile.status == "active",
+    ).all()
+    if len(files) != len(file_ids) or any(item.content_type.lower() not in _LABEL_STUDIO_IMAGE_TYPES for item in files):
+        raise HTTPException(status_code=400, detail="Satu atau lebih file tidak ditemukan di dataset ini.")
+    imported_at = datetime.utcnow()
+    for item in files:
+        item.label_studio_imported_at = imported_at
+    if batch:
+        batch.imported_at = imported_at
+    db.commit()
+    db.refresh(dataset)
+    return {"success": True, "dataset": _dataset_payload(dataset, include_files=True)}
