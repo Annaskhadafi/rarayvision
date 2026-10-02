@@ -42,7 +42,7 @@ def _extract_engine_mode(request: Request, engine: str = None) -> str:
     return get_global_engine_mode()
 
 @router.get("/system/engine-mode", tags=["System"])
-async def get_engine_mode_endpoint():
+async def get_engine_mode_endpoint(current_user: db_models.User = Depends(get_current_user)):
     mode = get_global_engine_mode()
     return {
         "status": "success",
@@ -51,7 +51,7 @@ async def get_engine_mode_endpoint():
     }
 
 @router.post("/system/engine-mode", tags=["System"])
-async def set_engine_mode_endpoint(payload: dict):
+async def set_engine_mode_endpoint(payload: dict, current_user: db_models.User = Depends(get_current_user)):
     target_mode = payload.get("engine_mode", "v1").lower()
     if target_mode not in ["v1", "v2"]:
         raise HTTPException(status_code=400, detail="Invalid engine_mode. Must be 'v1' or 'v2'.")
@@ -63,7 +63,7 @@ async def set_engine_mode_endpoint(payload: dict):
     }
 
 @router.get("/system/face-config", tags=["System"])
-async def get_face_config_endpoint(db_session: Session = Depends(db.get_db)):
+async def get_face_config_endpoint(current_user: db_models.User = Depends(get_current_user), db_session: Session = Depends(db.get_db)):
     try:
         config = db_session.query(db_models.CVConfig).filter(
             db_models.CVConfig.module == "face",
@@ -97,7 +97,7 @@ async def get_face_config_endpoint(db_session: Session = Depends(db.get_db)):
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/system/face-config", tags=["System"])
-async def update_face_config_endpoint(payload: dict, db_session: Session = Depends(db.get_db)):
+async def update_face_config_endpoint(payload: dict, current_user: db_models.User = Depends(get_current_user), db_session: Session = Depends(db.get_db)):
     try:
         config = db_session.query(db_models.CVConfig).filter(
             db_models.CVConfig.module == "face",

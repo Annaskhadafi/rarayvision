@@ -9,18 +9,18 @@ services:
       - .env
     environment:
       ENV: production
-      DATABASE_URL: postgresql://face:Wusthochq2018-@31.97.187.38:5556/face
-      SECRET_KEY: rarayvision-secret-key-2026-chitraparatama-prod
-      ALGORITHM: HS256
-      ACCESS_TOKEN_EXPIRE_MINUTES: "10080"
-      ALLOWED_ORIGINS: https://vision.chitrapratama.com,https://vision.chitraparatama.com,http://localhost:3800
-      RARAY_VISION_EMAIL: mochamad.khadafi@chitraparatama.co.id
-      RARAY_VISION_PASSWORD: Wusthochq2018-
-      RARAY_VISION_BASE_URL: https://vision.chitrapratama.com
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL must be set}
+      SECRET_KEY: ${SECRET_KEY:?SECRET_KEY must be set}
+      ALGORITHM: ${ALGORITHM:-HS256}
+      ACCESS_TOKEN_EXPIRE_MINUTES: "${ACCESS_TOKEN_EXPIRE_MINUTES:-10080}"
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:?ALLOWED_ORIGINS must be set}
+      RARAY_VISION_EMAIL: ${RARAY_VISION_EMAIL:?RARAY_VISION_EMAIL must be set}
+      RARAY_VISION_PASSWORD: ${RARAY_VISION_PASSWORD:?RARAY_VISION_PASSWORD must be set}
+      RARAY_VISION_BASE_URL: ${RARAY_VISION_BASE_URL:?RARAY_VISION_BASE_URL must be set}
       GROQ_API_KEY: ${GROQ_API_KEY}
       GROQ_MODEL: ${GROQ_MODEL:-qwen/qwen3.6-27b}
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY}
-      OPENROUTER_MODEL: nvidia/nemotron-nano-12b-v2-vl:free
+      OPENROUTER_MODEL: ${OPENROUTER_MODEL:-nvidia/nemotron-nano-12b-v2-vl:free}
       OPENAI_API_KEY: ${OPENAI_API_KEY}
       OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://9router.chitraparatama.com/v1}
       OPENAI_MODEL: ${OPENAI_MODEL:-cx/gpt-5.6-luna}
