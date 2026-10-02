@@ -7,15 +7,24 @@ os.environ["NUMEXPR_NUM_THREADS"] = "1"
 
 import cv2
 cv2.setNumThreads(1)
-try:
-    import torch
-    torch.set_num_threads(1)
-except Exception:
-    pass
+# Keep PyTorch out of the default API process startup. This service primarily
+# uses ONNX Runtime/InsightFace and does not need torch just to be imported.
 
 import numpy as np
-import insightface
-from insightface.app import FaceAnalysis
+# InsightFace is imported on first face-engine use to avoid initializing its
+# dependency graph for unrelated API requests.
+_FACE_ANALYSIS_CLASS = None
+
+
+def _get_face_analysis_class():
+    global _FACE_ANALYSIS_CLASS
+    if _FACE_ANALYSIS_CLASS is None:
+        try:
+            from insightface.app import FaceAnalysis
+        except ImportError as exc:
+            raise RuntimeError("InsightFace belum terpasang") from exc
+        _FACE_ANALYSIS_CLASS = FaceAnalysis
+    return _FACE_ANALYSIS_CLASS
 import onnxruntime as ort
 import json
 import base64
@@ -140,10 +149,12 @@ def get_face_app(mode: Optional[str] = None):
         try:
             if target_mode == 'v2':
                 # CPU Turbo: only run detection and recognition modules (skips 106-point landmark, 3D mesh, and age/gender for ultra-fast CPU inference)
+                FaceAnalysis = _get_face_analysis_class()
                 app = FaceAnalysis(name=model_name, allowed_modules=['detection', 'recognition'], providers=available_providers)
                 app.prepare(ctx_id=0, det_size=(320, 320), det_thresh=0.4)
             else:
                 # Standard V1
+                FaceAnalysis = _get_face_analysis_class()
                 app = FaceAnalysis(name=model_name, providers=available_providers)
                 app.prepare(ctx_id=0, det_size=(640, 640), det_thresh=0.4)
             _face_engines[target_mode] = app
