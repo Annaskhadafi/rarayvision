@@ -180,13 +180,26 @@ def stream_upload_file(filename: str, request: Request):
         "Vary": "Origin",
     }
     clean_filename = unquote(filename)
-    file_path = os.path.join(uploads_dir, clean_filename)
-    if not os.path.exists(file_path):
-        file_path = os.path.join(uploads_dir, filename)
+
+    def _safe_upload_path(root: str, candidate: str):
+        root_real = os.path.realpath(root)
+        candidate_real = os.path.realpath(os.path.join(root_real, candidate))
+        try:
+            if os.path.commonpath([root_real, candidate_real]) != root_real:
+                return None
+        except ValueError:
+            return None
+        return candidate_real
+
+    # Reject traversal, absolute paths and symlink escapes before touching disk.
+    file_path = _safe_upload_path(uploads_dir, clean_filename)
+    if file_path is None:
+        raise HTTPException(status_code=400, detail="Invalid upload path")
 
     if not os.path.exists(file_path):
-        alt_path = os.path.join(os.path.dirname(__file__), "app", "uploads", clean_filename)
-        if os.path.exists(alt_path):
+        alt_root = os.path.join(os.path.dirname(__file__), "app", "uploads")
+        alt_path = _safe_upload_path(alt_root, clean_filename)
+        if alt_path and os.path.exists(alt_path):
             file_path = alt_path
 
     # If file not found on disk, look up if it's an ingested document in database to find actual stored key
@@ -206,12 +219,13 @@ def stream_upload_file(filename: str, request: Request):
                 _stored_target = (_doc.local_url or _doc.s3_url or "").split("/")[-1]
                 if _stored_target:
                     actual_s3_key = _stored_target
-                    _stored_path = os.path.join(uploads_dir, _stored_target)
-                    if os.path.exists(_stored_path):
+                    _stored_path = _safe_upload_path(uploads_dir, _stored_target)
+                    if _stored_path and os.path.exists(_stored_path):
                         file_path = _stored_path
                     else:
-                        _alt_stored_path = os.path.join(os.path.dirname(__file__), "app", "uploads", _stored_target)
-                        if os.path.exists(_alt_stored_path):
+                        _alt_root = os.path.join(os.path.dirname(__file__), "app", "uploads")
+                        _alt_stored_path = _safe_upload_path(_alt_root, _stored_target)
+                        if _alt_stored_path and os.path.exists(_alt_stored_path):
                             file_path = _alt_stored_path
         finally:
             _db.close()
