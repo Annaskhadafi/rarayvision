@@ -15,11 +15,8 @@ if _CUR_DIR not in sys.path:
 
 import cv2
 cv2.setNumThreads(1)
-try:
-    import torch
-    torch.set_num_threads(1)
-except Exception:
-    pass
+# PyTorch is intentionally not imported during API startup. AI services that
+# need it configure/load it on first use instead.
 
 import json
 import time
