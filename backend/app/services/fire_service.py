@@ -14,10 +14,18 @@ from PIL import Image
 
 from backend.app.core.config import FIRE_MODEL_PATH, FIRE_ONNX_MODEL_PATH
 
-try:
-    from ultralytics import YOLO
-except ImportError:
-    YOLO = None
+_YOLO_CLASS = None
+
+
+def _get_yolo_class():
+    global _YOLO_CLASS
+    if _YOLO_CLASS is None:
+        try:
+            from ultralytics import YOLO
+        except ImportError as exc:
+            raise RuntimeError("Dependency ultralytics belum terpasang") from exc
+        _YOLO_CLASS = YOLO
+    return _YOLO_CLASS
 
 _MODEL_PATHS = {"onnx": FIRE_ONNX_MODEL_PATH, "pt": FIRE_MODEL_PATH}
 _MODEL_LABELS = {"onnx": "ONNX Runtime (.onnx)", "pt": "PyTorch (.pt)"}
@@ -42,11 +50,10 @@ def get_fire_model(model_id: str = "onnx"):
     if model_id not in _MODEL_PATHS:
         raise ValueError(f"Model Fire tidak valid: {model_id}")
     if model_id not in _models:
-        if YOLO is None:
-            raise RuntimeError("Dependency ultralytics belum terpasang")
         model_path = _MODEL_PATHS[model_id]
         if not os.path.isfile(model_path):
             raise FileNotFoundError(f"Model Fire tidak ditemukan: {model_path}")
+        YOLO = _get_yolo_class()
         _models[model_id] = YOLO(model_path, task="detect")
     return _models[model_id]
 
