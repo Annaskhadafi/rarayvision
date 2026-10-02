@@ -9,10 +9,20 @@ from typing import List, Dict, Any, Optional, Tuple
 from PIL import Image
 import io
 
-try:
-    from ultralytics import YOLO
-except ImportError:
-    YOLO = None
+# Ultralytics imports PyTorch and is intentionally loaded only when inference
+# or an explicit model operation needs it. This keeps ordinary API startup lean.
+_YOLO_CLASS = None
+
+
+def _get_yolo_class():
+    global _YOLO_CLASS
+    if _YOLO_CLASS is None:
+        try:
+            from ultralytics import YOLO
+        except ImportError as exc:
+            raise RuntimeError("Ultralytics YOLO is not installed") from exc
+        _YOLO_CLASS = YOLO
+    return _YOLO_CLASS
 
 try:
     from backend.app.core.config import BASE_DIR
@@ -53,7 +63,8 @@ class DetectionService:
         os.makedirs(self.models_storage_dir, exist_ok=True)
         os.makedirs(self.evaluations_dir, exist_ok=True)
 
-        self.init_model()
+        # Do not initialize YOLO/PyTorch during application startup.
+        # get_model() will resolve the active DB model and load weights on first use.
 
     def init_model(self):
         """Load the active model from DB, or fallback to default yolov8n.pt"""
@@ -67,7 +78,7 @@ class DetectionService:
                 if not os.path.exists(root_yolo):
                     root_yolo = os.path.join(BASE_DIR, "yolov8n.pt")
                 
-                if os.path.exists(root_yolo) and YOLO:
+                if os.path.exists(root_yolo):
                     self._load_from_path(root_yolo, None, "YOLOv8n Base", "v8n-default", None)
                     if not active:
                         try:
@@ -95,7 +106,8 @@ class DetectionService:
     def _load_from_path(self, path: str, model_id: Optional[int], name: str, version: str, classes_json: Optional[str]):
         """Load YOLO (.pt or .onnx) model weights into memory."""
         try:
-            if YOLO:
+            if path:
+                YOLO = _get_yolo_class()
                 self.model_instance = YOLO(path)
                 self.active_model_id = model_id
                 self.active_model_name = name
@@ -138,9 +150,7 @@ class DetectionService:
             if not os.path.exists(m_path):
                 raise FileNotFoundError(f"Model weights file not found at {m_path}")
 
-            if not YOLO:
-                raise RuntimeError("Ultralytics YOLO not installed")
-
+            YOLO = _get_yolo_class()
             inst = YOLO(m_path)
             classes = []
             if hasattr(inst, 'names') and inst.names:
