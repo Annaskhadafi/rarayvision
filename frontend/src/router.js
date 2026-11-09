@@ -1,5 +1,6 @@
 import { createRouter, createWebHistory } from 'vue-router'
 import { store } from './store'
+import { authService } from './services/authService'
 import LoginView from './views/LoginView.vue'
 import DashboardView from './views/DashboardView.vue'
 import TesterView from './views/TesterView.vue'
@@ -40,12 +41,21 @@ const router = createRouter({
   routes
 })
 
-router.beforeEach((to, _from, next) => {
-  if (to.meta.requiresAuth && !store.isLoggedIn) {
-    next('/login')
-  } else {
-    next()
+router.beforeEach(async (to) => {
+  if (!to.meta.requiresAuth) return true
+
+  if (!store.isLoggedIn) {
+    return { path: '/login', query: { redirect: to.fullPath } }
   }
+
+  if (!store.user) {
+    const result = await authService.fetchMe()
+    if (result.unauthorized) {
+      return { path: '/login', query: { redirect: to.fullPath } }
+    }
+  }
+
+  return true
 })
 
 export default router

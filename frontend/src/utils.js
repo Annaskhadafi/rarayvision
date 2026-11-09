@@ -4,6 +4,8 @@ export const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || (
     : 'https://apirv.dfs.co.id'
 )
 
+export const API_V1_BASE_URL = `${API_BASE_URL.replace(/\/+$/, '')}/api/v1`
+
 export const formatDate = (value) => {
   if (!value) return '-'
   let dateStr = value

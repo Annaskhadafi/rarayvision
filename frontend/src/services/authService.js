@@ -66,14 +66,19 @@ export const authService = {
       const res = await fetch(`${API_BASE_URL}/api/v1/auth/me`, {
         headers: { 'Authorization': `Bearer ${token}` }
       })
+      if (res.status === 401 || res.status === 403) {
+        store.logout()
+        return { success: false, unauthorized: true }
+      }
       if (!res.ok) throw new Error('Failed to fetch user')
       const data = await res.json()
       if (data.status === 'success') {
         store.user = data.user
         return { success: true }
       }
+      return { success: false, unauthorized: false }
     } catch {
-      return { success: false }
+      return { success: false, unauthorized: false }
     }
   },
 
