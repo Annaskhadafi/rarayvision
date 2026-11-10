@@ -16,30 +16,56 @@ from backend.app.database.database import Base, engine
 # Create DB Tables
 Base.metadata.create_all(bind=engine)
 
-def create_default_admin():
+def _get_bootstrap_admin_password():
+    password_file = os.getenv("BOOTSTRAP_ADMIN_PASSWORD_FILE", "").strip()
+    if password_file:
+        try:
+            return Path(password_file).read_text().strip()
+        except OSError as exc:
+            raise RuntimeError(
+                f"Unable to read BOOTSTRAP_ADMIN_PASSWORD_FILE: {password_file}"
+            ) from exc
+    return os.getenv("BOOTSTRAP_ADMIN_PASSWORD", "")
+
+
+def create_bootstrap_admin():
     from backend.app.database.database import SessionLocal
     from backend.app.database.models import User
     from backend.app.core.security import get_password_hash
-    
+
+    admin_email = os.getenv("BOOTSTRAP_ADMIN_EMAIL", "").strip().lower()
+    admin_password = _get_bootstrap_admin_password()
+
+    if not admin_email and not admin_password:
+        return
+    if not admin_email or not admin_password:
+        raise RuntimeError(
+            "Set BOOTSTRAP_ADMIN_EMAIL and either BOOTSTRAP_ADMIN_PASSWORD "
+            "or BOOTSTRAP_ADMIN_PASSWORD_FILE together."
+        )
+    if len(admin_password) < 12:
+        raise RuntimeError("Bootstrap admin password must be at least 12 characters.")
+
     db = SessionLocal()
     try:
-        admin_email = "admin@rarayvision.dfs.co.id"
         admin = db.query(User).filter(User.email == admin_email).first()
         if not admin:
-            print(f"Creating default admin user: {admin_email}")
+            print(f"Creating bootstrap admin user: {admin_email}")
             admin = User(
                 email=admin_email,
-                password_hash=get_password_hash("askingme"),
-                name="System Admin"
+                password_hash=get_password_hash(admin_password),
+                name=os.getenv("BOOTSTRAP_ADMIN_NAME", "System Admin").strip() or "System Admin"
             )
             db.add(admin)
             db.commit()
-    except Exception as e:
-        print(f"Failed to create default admin: {e}")
+    except Exception:
+        db.rollback()
+        raise
     finally:
         db.close()
 
-create_default_admin()
+
+create_bootstrap_admin()
 
 fastapi_app = FastAPI(
     title="Raray Vision API",
