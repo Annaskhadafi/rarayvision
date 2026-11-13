@@ -17,27 +17,42 @@ from backend.app.database.database import Base, engine
 Base.metadata.create_all(bind=engine)
 
 def create_default_admin():
+    """Create an initial admin only when explicit bootstrap credentials are set."""
     from backend.app.database.database import SessionLocal
     from backend.app.database.models import User
     from backend.app.core.security import get_password_hash
-    
+
+    admin_email = os.getenv("DEFAULT_ADMIN_EMAIL", "").strip().lower()
+    admin_password = os.getenv("DEFAULT_ADMIN_PASSWORD", "")
+    admin_name = os.getenv("DEFAULT_ADMIN_NAME", "System Admin").strip() or "System Admin"
+
+    if not admin_email and not admin_password:
+        return
+    if not admin_email or not admin_password:
+        raise RuntimeError(
+            "DEFAULT_ADMIN_EMAIL and DEFAULT_ADMIN_PASSWORD must be set together."
+        )
+    if len(admin_password) < 12:
+        raise RuntimeError("DEFAULT_ADMIN_PASSWORD must be at least 12 characters.")
+
     db = SessionLocal()
     try:
-        admin_email = "admin@rarayvision.dfs.co.id"
         admin = db.query(User).filter(User.email == admin_email).first()
         if not admin:
-            print(f"Creating default admin user: {admin_email}")
+            print(f"Creating configured default admin user: {admin_email}")
             admin = User(
                 email=admin_email,
-                password_hash=get_password_hash("askingme"),
-                name="System Admin"
+                password_hash=get_password_hash(admin_password),
+                name=admin_name,
             )
             db.add(admin)
             db.commit()
-    except Exception as e:
-        print(f"Failed to create default admin: {e}")
+    except Exception:
+        db.rollback()
+        raise
     finally:
         db.close()
+
 
 create_default_admin()
 
