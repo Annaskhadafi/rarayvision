@@ -27,7 +27,16 @@ def create_default_admin():
     admin_name = os.getenv("DEFAULT_ADMIN_NAME", "System Admin").strip() or "System Admin"
 
     if not admin_email and not admin_password:
-        return
+        db = SessionLocal()
+        try:
+            if db.query(User.id).first() is None:
+                raise RuntimeError(
+                    "No users exist. Set DEFAULT_ADMIN_EMAIL and "
+                    "DEFAULT_ADMIN_PASSWORD for the first startup."
+                )
+            return
+        finally:
+            db.close()
     if not admin_email or not admin_password:
         raise RuntimeError(
             "DEFAULT_ADMIN_EMAIL and DEFAULT_ADMIN_PASSWORD must be set together."
