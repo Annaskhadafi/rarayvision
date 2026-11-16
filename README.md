@@ -138,6 +138,13 @@ Create a `.env` file in the project root:
 # DB_NAME=
 
 DATABASE_URL=sqlite:///./rarayvision.db
+
+# Required only for the first startup of an empty database.
+# Remove both values after the initial admin account has been created.
+DEFAULT_ADMIN_EMAIL=admin@example.com
+DEFAULT_ADMIN_PASSWORD=replace-with-at-least-12-characters
+DEFAULT_ADMIN_NAME=System Admin
+
 SECRET_KEY=your-secret-key-here
 ALGORITHM=HS256
 ACCESS_TOKEN_EXPIRE_MINUTES=10080
@@ -290,6 +297,13 @@ Edit the `.env` file and configure the values (use your MySQL credentials):
 # DB_NAME=
 
 DATABASE_URL=sqlite:///./rarayvision.db
+
+# Required only for the first startup of an empty database.
+# Remove both values after the initial admin account has been created.
+DEFAULT_ADMIN_EMAIL=admin@example.com
+DEFAULT_ADMIN_PASSWORD=replace-with-at-least-12-characters
+DEFAULT_ADMIN_NAME=System Admin
+
 SECRET_KEY=your-secret-key-here
 ALGORITHM=HS256
 ACCESS_TOKEN_EXPIRE_MINUTES=10080
@@ -407,6 +421,13 @@ Create a `.env` file in the project root. The default configuration uses SQLite,
 # DB_NAME=
 
 DATABASE_URL=sqlite:///./rarayvision.db
+
+# Required only for the first startup of an empty database.
+# Remove both values after the initial admin account has been created.
+DEFAULT_ADMIN_EMAIL=admin@example.com
+DEFAULT_ADMIN_PASSWORD=replace-with-at-least-12-characters
+DEFAULT_ADMIN_NAME=System Admin
+
 SECRET_KEY=change-me-to-a-random-secret-key
 ALGORITHM=HS256
 ACCESS_TOKEN_EXPIRE_MINUTES=10080
