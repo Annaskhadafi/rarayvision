@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, File, UploadFile
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 from backend.app.schemas.schemas import RegisterRequest, LoginRequest, UpdateProfileRequest, UpdatePasswordRequest
 from backend.app.core.security import get_password_hash, verify_password, create_access_token
@@ -34,7 +35,10 @@ def get_me(current_user: db_models.User = Depends(get_current_user)):
 def update_profile(req: UpdateProfileRequest, db_session: Session = Depends(db.get_db), current_user: db_models.User = Depends(get_current_user)):
     normalized_email = normalize_email(req.email)
     if normalized_email != current_user.email:
-        existing = db_session.query(db_models.User).filter(db_models.User.email == normalized_email).first()
+        existing = db_session.query(db_models.User).filter(
+            func.lower(func.trim(db_models.User.email)) == normalized_email,
+            db_models.User.id != current_user.id,
+        ).first()
         if existing:
             raise HTTPException(status_code=400, detail="Email is already taken")
         current_user.email = normalized_email
@@ -69,7 +73,9 @@ def update_password(req: UpdatePasswordRequest, db_session: Session = Depends(db
 @router.post("/register", include_in_schema=False)
 def register_user(req: RegisterRequest, db_session: Session = Depends(db.get_db)):
     normalized_email = normalize_email(req.email)
-    existing = db_session.query(db_models.User).filter(db_models.User.email == normalized_email).first()
+    existing = db_session.query(db_models.User).filter(
+        func.lower(func.trim(db_models.User.email)) == normalized_email
+    ).first()
     if existing:
         raise HTTPException(status_code=400, detail="Email already registered")
     hashed = get_password_hash(req.password)
@@ -82,7 +88,11 @@ def register_user(req: RegisterRequest, db_session: Session = Depends(db.get_db)
 @router.post("/login", include_in_schema=False)
 def login_user(req: LoginRequest, db_session: Session = Depends(db.get_db)):
     normalized_email = normalize_email(req.email)
-    user = db_session.query(db_models.User).filter(db_models.User.email == normalized_email).first()
+    matches = db_session.query(db_models.User).filter(
+        func.lower(func.trim(db_models.User.email)) == normalized_email
+    ).all()
+    exact_matches = [user for user in matches if user.email == req.email.strip()]
+    user = exact_matches[0] if len(exact_matches) == 1 else (matches[0] if len(matches) == 1 else None)
     if not user or not user.password_hash or not verify_password(req.password, user.password_hash):
         raise HTTPException(status_code=401, detail="Invalid credentials")
     
